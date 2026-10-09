@@ -1,0 +1,9 @@
+"Refract"
+{
+    "$model" 1
+    "$surfaceprop" "glass"
+    "$normalmap" "effects/glass_normal"
+    "$refractamount" 1.0
+    "$refracttint" "{255 255 255}"
+    "$bluramount" 0.3
+}

@@ -1,0 +1,6 @@
+"VertexLitGeneric"
+{
+	"$basetexture" "brick/brickwall052a"
+	"$surfaceprop" "brick"
+	"$detail" "detail/detailsprites"
+}

@@ -1,0 +1,3 @@
+[submodule "thirdparty/vtflib"]
+	path = thirdparty/vtflib
+	url = https://github.com/ficool2/VTFLib

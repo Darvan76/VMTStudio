@@ -1,0 +1,33 @@
+VTFLib++'s VTFLib/Resource.rc includes afxres.h, which only ships with the
+optional MFC component of the Visual Studio build tools. The resource script
+contains no MFC resources, so winres.h (Windows SDK) is the correct
+replacement for non-MFC projects. This changes only how the resource compiler
+parses the DLL version resource; library behavior is unchanged.
+
+Applied to the pinned VTFLib++ submodule revision (master commit b27ecd3,
+"Fix incorrect component order for ARGB8888", which includes the
+BC4/BC5/BC6H_UNSIGNED id corrections from "Update enum order for BC6H
+onwards").
+
+Automatic, idempotent application:
+    cmake -P thirdparty/patches/apply_vtflib_patches.cmake
+or from the viewer build tree:
+    cmake --build build --target vtflib_apply_patch
+
+Manual application from the parent repository root:
+    git -C thirdparty/vtflib apply ../patches/vtflib-resource-winres.patch
+diff --git a/VTFLib/Resource.rc b/VTFLib/Resource.rc
+index 3b5dbdf..8c35abc 100644
+--- a/VTFLib/Resource.rc
++++ b/VTFLib/Resource.rc
+@@ -7,7 +7,9 @@
+ //
+ // Generated from the TEXTINCLUDE 2 resource.
+ //
+-#include "afxres.h"
++// VMTViewer patch: afxres.h requires the optional MFC component; this script
++// uses no MFC resources, so winres.h (Windows SDK) is the correct replacement.
++#include "winres.h"
+ 
+ /////////////////////////////////////////////////////////////////////////////
+ #undef APSTUDIO_READONLY_SYMBOLS

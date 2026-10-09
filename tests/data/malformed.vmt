@@ -1,0 +1,6 @@
+"VertexLitGeneric
+{
+    "$basetexture" "missing/quote
+    $phong 1
+    {
+        unterminated

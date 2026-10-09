@@ -1,0 +1,5 @@
+"VertexLitGeneric"
+{
+    "$phongboost" "2"
+    "$phongexponent" "20"
+}

@@ -1,0 +1,27 @@
+{
+  "format": "vmt-schema/1",
+  "shader": "Refract",
+  "groups": [
+    {
+      "name": "Refraction",
+      "parameters": [
+        { "name": "$normalmap", "type": "texture", "description": "Normal map used for refraction distortion." },
+        { "name": "$refractamount", "type": "float", "description": "Strength of the refraction distortion." },
+        { "name": "$refracttint", "type": "color", "description": "Color tint applied to the refracted image." }
+      ]
+    },
+    {
+      "name": "Flags",
+      "parameters": [
+        { "name": "$surfaceprop", "type": "string", "description": "Physics surface property (friction/sounds) applied by this material." }
+      ]
+    }
+  ],
+  "needs_review": [
+    { "name": "$dudvmap", "reason": "Verify DUDV distortion map support and exact name on Refract." },
+    { "name": "$envmap", "reason": "Verify environment map support on Refract." },
+    { "name": "$envmaptint", "reason": "Verify environment tint support on Refract." },
+    { "name": "$envmapmask", "reason": "Verify environment mask support on Refract." },
+    { "name": "$alpha", "reason": "Verify opacity parameter support on Refract." }
+  ]
+}

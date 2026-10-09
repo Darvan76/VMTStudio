@@ -1,0 +1,6 @@
+"vertexlitgeneric"
+{
+    "$BaseTexture" "wood/wood1"
+    "$PHONG" "1"
+    "$PhongExponent" "10"
+}

@@ -1,0 +1,5 @@
+{
+  "textures": [
+    { "file": "brick05.vtf", "width": 512, "height": 512, "format": "DXT5", "frames": 1, "mips": 10, "alpha": true }
+  ]
+}

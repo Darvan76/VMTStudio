@@ -1,0 +1,20 @@
+LightmappedGeneric
+{
+    "$basetexture" "plaster/plasterwall009a"
+
+    >=DX90
+    {
+        "$bumpmap" "plaster/plasterwall009a_height"
+        "$ssbump" "1"
+    }
+
+    <DX90
+    {
+        "$bumpmap" "plaster/plasterwall009a_normal"
+    }
+
+    $WIN32
+    {
+        "$envmap" "env_cubemap"
+    }
+}

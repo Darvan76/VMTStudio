@@ -1,0 +1,10 @@
+"Water"
+{
+    "$abovewater" 1
+    "$normalmap" "water/water_normal"
+    "$fogcolor" "{80 100 120}"
+    "$fogenable" 1
+    "$fogstart" 400
+    "$fogend" 2000
+    "$basetexture" "water/water_2"
+}

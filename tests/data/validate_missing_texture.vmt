@@ -1,0 +1,4 @@
+"VertexLitGeneric"
+{
+    "$basetexture" "vmtviewer_tests/definitely_missing_texture"
+}

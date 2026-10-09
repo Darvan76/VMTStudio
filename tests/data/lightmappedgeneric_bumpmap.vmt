@@ -1,0 +1,9 @@
+LightmappedGeneric
+{
+    $basetexture "de_dust/blend_1"
+    $bumpmap "de_dust/blend_1_normal"
+    $surfaceprop "sand"
+    $bumpmapscale 1.0
+    $detail "detail/detailsprites"
+    $detailscale 2
+}

@@ -1,0 +1,36 @@
+{
+  "format": "vmt-schema/1",
+  "shader": "Sprite",
+  "groups": [
+    {
+      "name": "Base",
+      "parameters": [
+        { "name": "$basetexture", "type": "texture", "description": "Sprite texture." }
+      ]
+    },
+    {
+      "name": "Blending",
+      "parameters": [
+        { "name": "$alpha", "type": "float", "description": "Overall opacity multiplier." },
+        { "name": "$translucent", "type": "bool", "description": "Enables alpha blending." }
+      ]
+    },
+    {
+      "name": "Flags",
+      "parameters": [
+        { "name": "$vertexcolor", "type": "bool", "description": "Multiplies color by per-vertex color." },
+        { "name": "$vertexalpha", "type": "bool", "description": "Multiplies opacity by per-vertex alpha." },
+        { "name": "$ignorez", "type": "bool", "description": "Disables depth testing." }
+      ]
+    }
+  ],
+  "needs_review": [
+    { "name": "$additive", "reason": "Verify additive blending parameter support on Sprite." },
+    { "name": "$spriteorientation", "reason": "Verify exact name and value type on the VDC wiki." },
+    { "name": "$spriterendermode", "reason": "Verify exact name and value type on the VDC wiki." },
+    { "name": "$spriteorigin", "reason": "Verify exact name and value type on the VDC wiki." },
+    { "name": "$spriteframe", "reason": "Verify exact name for animated sprite frames." },
+    { "name": "$spriteframerate", "reason": "Verify exact name for the sprite animation rate." },
+    { "name": "$nocull", "reason": "Verify backface culling parameter support on Sprite." }
+  ]
+}

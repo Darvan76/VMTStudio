@@ -1,0 +1,100 @@
+{
+  "format": "vmt-schema/1",
+  "shader": "VertexLitGeneric",
+  "groups": [
+    {
+      "name": "Base",
+      "parameters": [
+        { "name": "$basetexture", "type": "texture", "description": "Primary base color texture of the material." },
+        { "name": "$bumpmap", "type": "texture", "description": "Tangent-space normal map." }
+      ]
+    },
+    {
+      "name": "Phong",
+      "parameters": [
+        { "name": "$phong", "type": "bool", "description": "Enables specular (Phong) highlights." },
+        { "name": "$phongexponent", "type": "float", "description": "Sharpness of the specular highlight." },
+        { "name": "$phongboost", "type": "float", "description": "Intensity multiplier for specular highlights." },
+        { "name": "$phongexponenttexture", "type": "texture", "advanced": true, "description": "Per-texel specular exponent map." },
+        { "name": "$phongtint", "type": "color", "description": "Color tint of the specular highlight." },
+        { "name": "$phongalbedotint", "type": "bool", "advanced": true, "description": "Tints specular highlights by the base texture color." },
+        { "name": "$phongfresnelranges", "type": "vector", "advanced": true, "description": "Fresnel ranges controlling specular falloff (three values)." },
+        { "name": "$phongwarptexture", "type": "texture", "advanced": true, "description": "Warp texture remapping the Fresnel term." }
+      ]
+    },
+    {
+      "name": "Environment",
+      "parameters": [
+        { "name": "$envmap", "type": "texture", "description": "Cubemap used for reflections." },
+        { "name": "$envmaptint", "type": "color", "description": "Tint applied to environment reflections." },
+        { "name": "$envmapmask", "type": "texture", "advanced": true, "description": "Mask controlling environment map intensity." },
+        { "name": "$normalmapalphaenvmapmask", "type": "bool", "advanced": true, "description": "Uses the normal map alpha channel as the environment mask." },
+        { "name": "$basealphaenvmapmask", "type": "bool", "advanced": true, "description": "Uses the base texture alpha channel as the environment mask." }
+      ]
+    },
+    {
+      "name": "Self-Illumination",
+      "parameters": [
+        { "name": "$selfillum", "type": "bool", "description": "Marks the material as self-illuminated." }
+      ]
+    },
+    {
+      "name": "Tint",
+      "parameters": [
+        { "name": "$color", "type": "color", "description": "Tint color applied to the base texture." }
+      ]
+    },
+    {
+      "name": "Blending",
+      "parameters": [
+        { "name": "$alpha", "type": "float", "description": "Overall opacity multiplier." },
+        { "name": "$translucent", "type": "bool", "description": "Enables alpha blending." },
+        { "name": "$alphatest", "type": "bool", "description": "Enables alpha-tested transparency." }
+      ]
+    },
+    {
+      "name": "Flags",
+      "parameters": [
+        { "name": "$vertexcolor", "type": "bool", "description": "Multiplies color by per-vertex color." },
+        { "name": "$vertexalpha", "type": "bool", "description": "Multiplies opacity by per-vertex alpha." },
+        { "name": "$model", "type": "bool", "description": "Shades the material in model space." },
+        { "name": "$halflambert", "type": "bool", "description": "Wraps lighting around the surface (half-Lambert)." },
+        { "name": "$nocull", "type": "bool", "description": "Disables backface culling." },
+        { "name": "$ignorez", "type": "bool", "description": "Disables depth testing." },
+        { "name": "$nodecal", "type": "bool", "description": "Disables decal projection onto this material." },
+        { "name": "$surfaceprop", "type": "string", "description": "Physics surface property (friction/sounds) applied by this material." }
+      ]
+    }
+  ],
+  "needs_review": [
+    { "name": "$basetexture2", "reason": "Two-layer base texture; verify support and exact name on the VDC wiki." },
+    { "name": "$bumpmapscale", "reason": "Confirmed on LightmappedGeneric; verify VertexLitGeneric accepts it." },
+    { "name": "$detail", "reason": "Verify detail texture support on VertexLitGeneric." },
+    { "name": "$detailscale", "reason": "Verify detail texture support on VertexLitGeneric." },
+    { "name": "$detailblendmode", "reason": "Verify detail texture support on VertexLitGeneric." },
+    { "name": "$detailblendfactor", "reason": "Verify detail texture support on VertexLitGeneric." },
+    { "name": "$detailtint", "reason": "Verify exact name and type on the VDC wiki." },
+    { "name": "$color2", "reason": "Verify a second tint parameter exists on VertexLitGeneric." },
+    { "name": "$envmapfresnel", "reason": "Verify exact name and type on the VDC wiki." },
+    { "name": "$envmapcontrast", "reason": "Verify exact name and type on the VDC wiki." },
+    { "name": "$envmapsaturation", "reason": "Verify exact name and type on the VDC wiki." },
+    { "name": "$selfillumtint", "reason": "Verify exact name and type (color) on the VDC wiki." },
+    { "name": "$rimlight", "reason": "Verify exact name (possibly $phongrimlight) and type." },
+    { "name": "$rimlightexponent", "reason": "Verify exact name and type on the VDC wiki." },
+    { "name": "$rimlightboost", "reason": "Verify exact name and type on the VDC wiki." },
+    { "name": "$blendtintbybasealpha", "reason": "Verify exact name and behavior on the VDC wiki." },
+    { "name": "$blendtintcoloroverbase", "reason": "Verify exact name and behavior on the VDC wiki." },
+    { "name": "$seamless_scale", "reason": "Verify VertexLitGeneric support." },
+    { "name": "$treeSway", "reason": "Verify exact casing and the related tree-sway parameter family." },
+    { "name": "$treeSwayHeight", "reason": "Verify exact name and casing." },
+    { "name": "$treeSwayStartHeight", "reason": "Verify exact name and casing." },
+    { "name": "$treeSwayRadius", "reason": "Verify exact name and casing." },
+    { "name": "$treeSwayStartRadius", "reason": "Verify exact name and casing." },
+    { "name": "$treeSwaySpeed", "reason": "Verify exact name and casing." },
+    { "name": "$treeSwayStrength", "reason": "Verify exact name and casing." },
+    { "name": "$treeSwayScrumblefrequency", "reason": "Verify exact name and casing (spelling uncertain)." },
+    { "name": "$bumpframe", "reason": "Animated bump frames; verify exact name." },
+    { "name": "$bumpframes", "reason": "Animated bump frames; verify exact name." },
+    { "name": "$frame", "reason": "Animated base texture frames; verify exact name and type." }
+  ]
+}

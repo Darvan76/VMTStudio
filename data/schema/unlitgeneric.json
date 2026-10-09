@@ -1,0 +1,39 @@
+{
+  "format": "vmt-schema/1",
+  "shader": "UnlitGeneric",
+  "groups": [
+    {
+      "name": "Base",
+      "parameters": [
+        { "name": "$basetexture", "type": "texture", "description": "Base color texture of the material." }
+      ]
+    },
+    {
+      "name": "Blending",
+      "parameters": [
+        { "name": "$alpha", "type": "float", "description": "Overall opacity multiplier." },
+        { "name": "$translucent", "type": "bool", "description": "Enables alpha blending." },
+        { "name": "$alphatest", "type": "bool", "description": "Enables alpha-tested transparency." },
+        { "name": "$additive", "type": "bool", "description": "Uses additive blending." }
+      ]
+    },
+    {
+      "name": "Flags",
+      "parameters": [
+        { "name": "$vertexcolor", "type": "bool", "description": "Multiplies color by per-vertex color." },
+        { "name": "$vertexalpha", "type": "bool", "description": "Multiplies opacity by per-vertex alpha." },
+        { "name": "$nocull", "type": "bool", "description": "Disables backface culling." },
+        { "name": "$ignorez", "type": "bool", "description": "Disables depth testing." },
+        { "name": "$nodecal", "type": "bool", "description": "Disables decal projection onto this material." },
+        { "name": "$surfaceprop", "type": "string", "description": "Physics surface property (friction/sounds) applied by this material." }
+      ]
+    }
+  ],
+  "needs_review": [
+    { "name": "$color", "reason": "Verify tint parameter support and exact name on the VDC wiki." },
+    { "name": "$color2", "reason": "Verify a second tint parameter exists on UnlitGeneric." },
+    { "name": "$frame", "reason": "Animated texture frames; verify exact name and type." },
+    { "name": "$alphatestreference", "reason": "Alpha test threshold; verify exact name and type." },
+    { "name": "$nolod", "reason": "Verify the exact name and that this shader accepts it." }
+  ]
+}

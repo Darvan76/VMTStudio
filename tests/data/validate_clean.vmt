@@ -1,0 +1,6 @@
+"VertexLitGeneric"
+{
+    "$basetexture" "models/props/cs_office/computer"
+    "$phong" "1"
+    "$phongboost" "1"
+}

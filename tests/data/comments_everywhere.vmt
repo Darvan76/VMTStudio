@@ -1,0 +1,13 @@
+// Top of file comment
+// second line
+
+/* block comment
+   spanning multiple lines */
+"VertexLitGeneric" // shader comment
+{
+    // leading comment for a parameter
+    "$basetexture" "metal/metalwall011a" // trailing comment
+
+    "$phong" "1" /* inline block comment */
+    // comment just before the closing brace
+}

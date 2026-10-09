@@ -1,0 +1,78 @@
+{
+  "format": "vmt-schema/1",
+  "shader": "LightmappedGeneric",
+  "groups": [
+    {
+      "name": "Base",
+      "parameters": [
+        { "name": "$basetexture", "type": "texture", "description": "Primary base color texture of the material." },
+        { "name": "$basetexture2", "type": "texture", "description": "Second base texture used for two-layer blending." },
+        { "name": "$blendmodulatetexture", "type": "texture", "advanced": true, "description": "Modulation texture used when blending the two base textures." },
+        { "name": "$bumpmap", "type": "texture", "description": "Tangent-space normal map." },
+        { "name": "$bumpmapscale", "type": "float", "description": "Scales the bump map." },
+        { "name": "$ssbump", "type": "bool", "description": "Treats the bump map as a self-shadowing bump map." }
+      ]
+    },
+    {
+      "name": "Detail",
+      "parameters": [
+        { "name": "$detail", "type": "texture", "description": "Detail texture overlaid on the base texture." },
+        { "name": "$detailscale", "type": "float", "description": "Scale of the detail texture." },
+        { "name": "$detailblendmode", "type": "int", "advanced": true, "description": "Detail blending mode index." },
+        { "name": "$detailblendfactor", "type": "float", "advanced": true, "description": "Strength of the detail blend." }
+      ]
+    },
+    {
+      "name": "Environment",
+      "parameters": [
+        { "name": "$envmap", "type": "texture", "description": "Cubemap used for reflections." },
+        { "name": "$envmaptint", "type": "color", "description": "Tint applied to environment reflections." },
+        { "name": "$envmapmask", "type": "texture", "advanced": true, "description": "Mask controlling environment map intensity." },
+        { "name": "$normalmapalphaenvmapmask", "type": "bool", "advanced": true, "description": "Uses the normal map alpha channel as the environment mask." }
+      ]
+    },
+    {
+      "name": "Seamless",
+      "parameters": [
+        { "name": "$seamless_scale", "type": "float", "advanced": true, "description": "Scales textures to reduce visible seams when tiling." }
+      ]
+    },
+    {
+      "name": "Blending",
+      "parameters": [
+        { "name": "$alpha", "type": "float", "description": "Overall opacity multiplier." },
+        { "name": "$translucent", "type": "bool", "description": "Enables alpha blending." },
+        { "name": "$alphatest", "type": "bool", "description": "Enables alpha-tested transparency." }
+      ]
+    },
+    {
+      "name": "Flags",
+      "parameters": [
+        { "name": "$vertexcolor", "type": "bool", "description": "Multiplies color by per-vertex color." },
+        { "name": "$vertexalpha", "type": "bool", "description": "Multiplies opacity by per-vertex alpha." },
+        { "name": "$nocull", "type": "bool", "description": "Disables backface culling." },
+        { "name": "$ignorez", "type": "bool", "description": "Disables depth testing." },
+        { "name": "$nodecal", "type": "bool", "description": "Disables decal projection onto this material." },
+        { "name": "$surfaceprop", "type": "string", "description": "Physics surface property (friction/sounds) applied by this material." }
+      ]
+    }
+  ],
+  "needs_review": [
+    { "name": "$bumpmap2", "reason": "Two-layer bump map; verify support and exact name on the VDC wiki." },
+    { "name": "$surfaceprop2", "reason": "Second surface property for blended materials; verify name and type." },
+    { "name": "$detailtexturetransform", "reason": "Verify exact name and type (matrix) on the VDC wiki." },
+    { "name": "$detailtint", "reason": "Verify exact name and type on the VDC wiki." },
+    { "name": "$color", "reason": "Verify LightmappedGeneric support and semantics." },
+    { "name": "$color2", "reason": "Verify LightmappedGeneric support and semantics." },
+    { "name": "$envmapfresnel", "reason": "Verify exact name and type on the VDC wiki." },
+    { "name": "$envmapcontrast", "reason": "Verify exact name and type on the VDC wiki." },
+    { "name": "$envmapsaturation", "reason": "Verify exact name and type on the VDC wiki." },
+    { "name": "$basealphaenvmapmask", "reason": "Verify support on LightmappedGeneric." },
+    { "name": "$seamless_base_scale", "reason": "Verify exact name on the VDC wiki." },
+    { "name": "$areaportalwindow", "reason": "Verify exact name and behavior on the VDC wiki." },
+    { "name": "$bumpframe", "reason": "Animated bump frames; verify exact name." },
+    { "name": "$bumpframes", "reason": "Animated bump frames; verify exact name." },
+    { "name": "$frame", "reason": "Animated base texture frames; verify exact name and type." },
+    { "name": "$alphatestreference", "reason": "Alpha test threshold; verify exact name and type." }
+  ]
+}

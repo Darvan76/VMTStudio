@@ -1,0 +1,28 @@
+{
+  "format": "vmt-schema/1",
+  "shader": "Water",
+  "groups": [
+    {
+      "name": "Surface",
+      "parameters": [
+        { "name": "$abovewater", "type": "bool", "description": "0 = material shown below the surface, 1 = material shown above it." },
+        { "name": "$normalmap", "type": "texture", "description": "Normal map used to perturb the water surface." },
+        { "name": "$dudvmap", "type": "texture", "description": "DUDV distortion map used by the water surface." }
+      ]
+    },
+    {
+      "name": "Appearance",
+      "parameters": [
+        { "name": "$bottommaterial", "type": "texture", "description": "Material shown when the water is viewed from beneath." },
+        { "name": "$reflectamount", "type": "float", "description": "Strength of surface reflection." },
+        { "name": "$refractamount", "type": "float", "description": "Strength of refraction distortion." }
+      ]
+    }
+  ],
+  "needs_review": [
+    { "name": "$basetexture", "reason": "Verify whether the Water shader accepts $basetexture." },
+    { "name": "$fogcolor", "reason": "Verify exact name and value format for underwater fog tint." },
+    { "name": "$underwateroverlay", "reason": "Verify exact name and type for the underwater screen overlay." },
+    { "name": "$surfaceprop", "reason": "Verify whether water materials set the surface property here." }
+  ]
+}

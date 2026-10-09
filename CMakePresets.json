@@ -1,0 +1,54 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "x86-base",
+      "displayName": "Windows x86 (Visual Studio 2022)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "Win32", "strategy": "set" },
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "17"
+      }
+    },
+    {
+      "name": "x86-debug",
+      "displayName": "Windows x86 Debug",
+      "inherits": "x86-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "x86-release",
+      "displayName": "Windows x86 Release",
+      "inherits": "x86-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "x86-debug",
+      "configurePreset": "x86-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "x86-release",
+      "configurePreset": "x86-release",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "x86-debug",
+      "configurePreset": "x86-debug",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "x86-release",
+      "configurePreset": "x86-release",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

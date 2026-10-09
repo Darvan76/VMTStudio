@@ -1,0 +1,29 @@
+{
+  "format": "vmt-schema/1",
+  "shader": "WorldVertexTransition",
+  "groups": [
+    {
+      "name": "Base",
+      "parameters": [
+        { "name": "$basetexture", "type": "texture", "description": "Primary base color texture of the material." },
+        { "name": "$basetexture2", "type": "texture", "description": "Second base texture blended in by vertex alpha." }
+      ]
+    },
+    {
+      "name": "Flags",
+      "parameters": [
+        { "name": "$surfaceprop", "type": "string", "description": "Physics surface property (friction/sounds) applied by this material." }
+      ]
+    }
+  ],
+  "needs_review": [
+    { "name": "$bumpmap", "reason": "Verify bump map support and exact name on WorldVertexTransition." },
+    { "name": "$ssbump", "reason": "Verify self-shadowing bump support on WorldVertexTransition." },
+    { "name": "$detail", "reason": "Verify detail texture support on WorldVertexTransition." },
+    { "name": "$detailscale", "reason": "Verify detail texture support on WorldVertexTransition." },
+    { "name": "$color", "reason": "Verify tint parameter support and exact name." },
+    { "name": "$color2", "reason": "Verify tint parameter support and exact name." },
+    { "name": "$seamless_scale", "reason": "Verify support on WorldVertexTransition." },
+    { "name": "$surfaceprop2", "reason": "Second surface property for blended materials; verify name and type." }
+  ]
+}
