@@ -153,6 +153,7 @@ public:
 
         child_hwnd_ = child;
         initialized_ = true;
+        (void)resize(0, 0);
         return vmt::Ok();
     }
 
@@ -438,9 +439,21 @@ public:
     }
 
     vmt::Result<void> resize(int width, int height) override {
+        if (host_hwnd_ != nullptr && IsWindow(host_hwnd_)) {
+            RECT rc{};
+            if (GetClientRect(host_hwnd_, &rc)) {
+                int client_w = rc.right - rc.left;
+                int client_h = rc.bottom - rc.top;
+                if (client_w > 0 && client_h > 0) {
+                    width = client_w;
+                    height = client_h;
+                }
+            }
+        }
+
         if (child_hwnd_ != nullptr && IsWindow(child_hwnd_)) {
             SetWindowPos(child_hwnd_, HWND_TOP, 0, 0, width, height,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
         send_command("RESIZE " + std::to_string(width) + " " + std::to_string(height));
         return vmt::Ok();

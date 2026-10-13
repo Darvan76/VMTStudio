@@ -318,18 +318,25 @@ MDLViewer::MDLViewer ()
 			d_cpl->setVisible( false );
 
 			HWND myHwnd = (HWND)getHandle();
+			SetMenu( myHwnd, NULL );
 			SetParent( myHwnd, hParent );
 			LONG style = GetWindowLong( myHwnd, GWL_STYLE );
 			style &= ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
 			style |= (WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
 			SetWindowLong( myHwnd, GWL_STYLE, style );
 
+			LONG exStyle = GetWindowLong( myHwnd, GWL_EXSTYLE );
+			exStyle &= ~(WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_WINDOWEDGE);
+			SetWindowLong( myHwnd, GWL_EXSTYLE, exStyle );
+
 			RECT rc{};
 			GetClientRect( hParent, &rc );
-			setBounds( 0, 0, rc.right - rc.left, rc.bottom - rc.top );
+			int w = rc.right - rc.left;
+			int h = rc.bottom - rc.top;
+			setBounds( 0, 0, w, h );
 			if ( d_MatSysWindow )
 			{
-				d_MatSysWindow->setBounds( 0, 0, rc.right - rc.left, rc.bottom - rc.top );
+				d_MatSysWindow->setBounds( 0, 0, w, h );
 			}
 		}
 		else
@@ -830,7 +837,7 @@ MDLViewer::handleEvent (mxEvent *event)
 	{
 		int w = event->width;
 		int h = event->height;
-		int y = (mb && mb->isVisible()) ? mb->getHeight () : 0;
+		int y = m_controlPanelHidden ? 0 : ((mb && mb->isVisible()) ? mb->getHeight () : 0);
 #ifdef WIN32
 #define HEIGHT 240
 #else
@@ -838,7 +845,7 @@ MDLViewer::handleEvent (mxEvent *event)
 		h -= 40;
 #endif
 		if(m_controlPanelHidden)
-			d_MatSysWindow->setBounds(0, y, w, h - y);
+			d_MatSysWindow->setBounds(0, 0, w, h);
 		else
 		{
 			d_MatSysWindow->setBounds (0, y, w, h - HEIGHT - y);
@@ -1185,7 +1192,10 @@ int CHLModelViewerApp::Main()
 	HLMV_Log("[HLMV] creating MDLViewer...\n");
 	g_MDLViewer = new MDLViewer ();
 	HLMV_Log("[HLMV] MDLViewer created, handle=%p\n", g_MDLViewer->getHandle());
-	g_MDLViewer->setMenuBar (g_MDLViewer->getMenuBar ());
+	if ( !CommandLine()->FindParm("-embed") )
+	{
+		g_MDLViewer->setMenuBar (g_MDLViewer->getMenuBar ());
+	}
 
 	extern void BackendIPC_Init(HWND hWndMain);
 	BackendIPC_Init((HWND)g_MDLViewer->getHandle());

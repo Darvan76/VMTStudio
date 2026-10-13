@@ -50,22 +50,36 @@ void BackendIPC_Init(HWND hWndMain)
             g_bEmbedded = true;
             SetWindowTextA(hWndMain, "VMTViewer_HLMV_Backend_Canvas");
             SetParent(hWndMain, g_hHostWnd);
+            SetMenu(hWndMain, NULL);
+
             LONG style = GetWindowLong(hWndMain, GWL_STYLE);
             style &= ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
             style |= (WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
             SetWindowLong(hWndMain, GWL_STYLE, style);
 
+            LONG exStyle = GetWindowLong(hWndMain, GWL_EXSTYLE);
+            exStyle &= ~(WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_WINDOWEDGE);
+            SetWindowLong(hWndMain, GWL_EXSTYLE, exStyle);
+
             RECT rc{};
             GetClientRect(g_hHostWnd, &rc);
-            SetWindowPos(hWndMain, HWND_TOP, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+            int width = rc.right - rc.left;
+            int height = rc.bottom - rc.top;
+
+            SetWindowPos(hWndMain, HWND_TOP, 0, 0, width, height,
                          SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 
+            if (g_MDLViewer)
+            {
+                g_MDLViewer->setBounds(0, 0, width, height);
+            }
             if (g_MatSysWindow)
             {
-                g_MatSysWindow->setBounds(0, 0, rc.right - rc.left, rc.bottom - rc.top);
+                g_MatSysWindow->setBounds(0, 0, width, height);
+                g_MatSysWindow->redraw();
             }
             PostMessage(g_hHostWnd, WM_USER + 421, (WPARAM)hWndMain, (LPARAM)GetCurrentProcessId());
-            HLMV_Log("[IPC] Embedded reparented and notified host %p\n", g_hHostWnd);
+            HLMV_Log("[IPC] Embedded reparented and notified host %p (w=%d, h=%d)\n", g_hHostWnd, width, height);
         }
     }
 
@@ -605,7 +619,11 @@ bool BackendIPC_ExecuteCommand(const std::string& cmd)
         if (w > 0 && h > 0 && g_MDLViewer)
         {
             g_MDLViewer->setBounds(0, 0, w, h);
-            if (g_MatSysWindow) g_MatSysWindow->setBounds(0, 0, w, h);
+            if (g_MatSysWindow)
+            {
+                g_MatSysWindow->setBounds(0, 0, w, h);
+                g_MatSysWindow->redraw();
+            }
             return true;
         }
     }

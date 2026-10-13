@@ -34,6 +34,9 @@ HWND ViewportWidget::hostHwnd() const {
 
 void ViewportWidget::setEngineView(bridge::EngineView* engine) {
     m_engine = engine;
+    if (m_engine && m_engine->initialized()) {
+        (void)m_engine->resize(0, 0);
+    }
     update();
 }
 
@@ -44,15 +47,43 @@ void ViewportWidget::setStatusText(const QString& status) {
 
 void ViewportWidget::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
-    m_pendingWidth = event->size().width();
-    m_pendingHeight = event->size().height();
+    if (m_engine && m_engine->initialized()) {
+        HWND hwnd = hostHwnd();
+        RECT rc{};
+        if (hwnd && GetClientRect(hwnd, &rc)) {
+            int w = rc.right - rc.left;
+            int h = rc.bottom - rc.top;
+            if (w > 0 && h > 0) {
+                (void)m_engine->resize(w, h);
+            }
+        } else {
+            const qreal dpr = devicePixelRatioF();
+            int w = static_cast<int>(event->size().width() * dpr);
+            int h = static_cast<int>(event->size().height() * dpr);
+            (void)m_engine->resize(w, h);
+        }
+    }
     m_resizeTimer->start();
 }
 
 void ViewportWidget::onResizeTimeout() {
-    if (m_engine && m_engine->initialized() && m_pendingWidth > 0 && m_pendingHeight > 0) {
-        (void)m_engine->resize(m_pendingWidth, m_pendingHeight);
-        emit viewportResized(m_pendingWidth, m_pendingHeight);
+    if (m_engine && m_engine->initialized()) {
+        HWND hwnd = hostHwnd();
+        RECT rc{};
+        int w = 0, h = 0;
+        if (hwnd && GetClientRect(hwnd, &rc)) {
+            w = rc.right - rc.left;
+            h = rc.bottom - rc.top;
+        }
+        if (w <= 0 || h <= 0) {
+            const qreal dpr = devicePixelRatioF();
+            w = static_cast<int>(width() * dpr);
+            h = static_cast<int>(height() * dpr);
+        }
+        if (w > 0 && h > 0) {
+            (void)m_engine->resize(w, h);
+            emit viewportResized(w, h);
+        }
     }
 }
 

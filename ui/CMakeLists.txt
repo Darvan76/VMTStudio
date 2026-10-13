@@ -1,10 +1,12 @@
 cmake_minimum_required(VERSION 3.21)
 
-find_package(Qt6 COMPONENTS Core Gui Widgets REQUIRED)
+find_package(Qt6 COMPONENTS Core Gui Widgets QUIET)
 
-set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTORCC ON)
-set(CMAKE_AUTOUIC ON)
+if(Qt6_FOUND)
+    set(CMAKE_AUTOMOC ON)
+    set(CMAKE_AUTORCC ON)
+    set(CMAKE_AUTOUIC ON)
+endif()
 
 # The 'ui' static library holds the headless editing core (session, panel model,
 # settings, validation, material browser, thumbnails).
@@ -39,6 +41,7 @@ target_link_libraries(ui
     PRIVATE engine_spike_sdk vmtviewer_warnings advapi32
 )
 
+if(Qt6_FOUND)
 # The Qt 6 application executable
 add_executable(vmtviewer WIN32
     src/main.cpp
@@ -113,3 +116,5 @@ if(WINDEPLOYQT_EXE)
         VERBATIM
     )
 endif()
+endif() # Qt6_FOUND
+

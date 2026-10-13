@@ -439,6 +439,7 @@ bool MainWindow::ensureEngine(QString& error) {
     (void)m_engine->set_render_mode(m_currentRenderMode);
 
     m_viewport->setEngineView(m_engine.get());
+    (void)m_engine->resize(0, 0);
     updateStatus();
     return true;
 }
@@ -952,6 +953,15 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     } else {
         event->ignore();
     }
+}
+
+void MainWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    QTimer::singleShot(50, this, [this]() {
+        if (m_engine && m_engine->initialized()) {
+            (void)m_engine->resize(0, 0);
+        }
+    });
 }
 
 } // namespace qt
