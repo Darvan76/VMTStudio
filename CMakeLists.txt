@@ -6,6 +6,8 @@ project(VMTViewer
     LANGUAGES CXX
 )
 
+list(APPEND CMAKE_PREFIX_PATH "C:/Qt/6.8.2/msvc2022_64")
+
 # --- Language settings --------------------------------------------------------
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,20 +16,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # --- Toolchain guards ---------------------------------------------------------
 if(NOT MSVC)
     message(FATAL_ERROR
-        "VMTViewer currently targets MSVC only. Configure with a Visual Studio "
-        "generator, e.g. cmake -S . -B build -G \"Visual Studio 17 2022\" -A Win32")
+        "VMTViewer currently targets MSVC only. Configure with a Visual Studio generator.")
 endif()
 
-if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
-    message(FATAL_ERROR
-        "VMTViewer must be built as 32-bit (x86). Configure with -A Win32 "
-        "(detected pointer size: ${CMAKE_SIZEOF_VOID_P}).")
+# --- Runtime library ----------------------------------------------------------
+# Static CRT for 32-bit standalone build; dynamic CRT when building with Qt 6 (64-bit)
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+else()
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
-
-# --- Runtime library: static CRT (/MT, /MTd) ----------------------------------
-# Phase 0 decision: avoids a VC++ Redistributable dependency. We never pass
-# allocator-owned C++ objects across the engine DLL boundary, so static CRT is safe.
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # --- Warnings -----------------------------------------------------------------
 # Applied to our own targets only, never to third-party or (later) Valve SDK headers.
@@ -55,7 +53,9 @@ enable_testing()
 add_subdirectory(vmt_core)
 add_subdirectory(vtf_reader)
 add_subdirectory(renderer)
-add_subdirectory(hlmv_backend)
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    add_subdirectory(hlmv_backend)
+endif()
 add_subdirectory(engine_bridge)
 add_subdirectory(game_profiles)
 add_subdirectory(ui)

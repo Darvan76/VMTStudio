@@ -1,5 +1,7 @@
 # Build output
 build/
+build64/
+aqtinstall.log
 
 # Stray compiler artifacts
 *.obj

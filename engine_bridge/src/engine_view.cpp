@@ -1,6 +1,9 @@
 #include "bridge/engine_view.h"
 
+#include <fstream>
+#if !defined(_WIN64)
 #include "engine_spike_engine.h"
+#endif
 
 #include <windows.h>
 #include <chrono>
@@ -49,6 +52,7 @@ public:
 
         config_ = config;
 
+#if !defined(_WIN64)
         // 1. Initialize in-process filesystem (for instant file reading, material list, etc.)
         if (!diagnostics_installed_) {
             spike::install_diagnostics();
@@ -64,6 +68,7 @@ public:
         fs_options.mount_mode = spike::MountMode::All;
 
         (void)spike::init_filesystem_only(fs_options);
+#endif
 
         // 2. Locate hlmv_backend.exe
         const std::filesystem::path backend_exe = find_hlmv_backend();
@@ -153,7 +158,9 @@ public:
 
     vmt::Result<void> mount_directory(const std::filesystem::path& dir,
                                       bool search_first) override {
+#if !defined(_WIN64)
         (void)spike::mount_custom_path("GAME", dir.string(), search_first);
+#endif
         send_command("MOUNT_DIR " + dir.string());
         return vmt::Ok();
     }
@@ -180,51 +187,90 @@ public:
     }
 
     vmt::Result<bool> file_exists(const std::string& game_path) override {
+#if !defined(_WIN64)
         const spike::ExistsResult result = spike::file_exists(game_path);
-        if (!result.ok) {
-            return vmt::Err<bool>(engine_error(vmt::ErrorCode::InvalidArgument,
-                                               "the engine file system is not initialized"));
+        if (result.ok) {
+            return vmt::Ok(result.exists);
         }
-        return vmt::Ok(result.exists);
+#endif
+        if (!config_.game_dir.empty()) {
+            std::filesystem::path full = config_.game_dir / std::filesystem::u8path(game_path);
+            if (std::filesystem::exists(full)) {
+                return vmt::Ok(true);
+            }
+        }
+        return vmt::Ok(false);
     }
 
     vmt::Result<std::vector<std::string>> list_materials() override {
+#if !defined(_WIN64)
         const spike::MaterialList result = spike::list_materials();
-        if (!result.ok) {
-            return vmt::Err<std::vector<std::string>>(engine_error(
-                vmt::ErrorCode::InvalidArgument, "the engine file system is not initialized"));
+        if (result.ok) {
+            return vmt::Ok(result.names);
         }
-        return vmt::Ok(result.names);
+#endif
+        std::vector<std::string> names;
+        if (!config_.game_dir.empty()) {
+            std::filesystem::path mat_dir = config_.game_dir / "materials";
+            if (std::filesystem::exists(mat_dir)) {
+                for (const auto& entry : std::filesystem::recursive_directory_iterator(mat_dir)) {
+                    if (entry.is_regular_file() && entry.path().extension() == ".vmt") {
+                        auto rel = std::filesystem::relative(entry.path(), mat_dir);
+                        std::string name = rel.generic_string();
+                        if (name.size() > 4 && name.substr(name.size() - 4) == ".vmt") {
+                            name = name.substr(0, name.size() - 4);
+                        }
+                        names.push_back(std::move(name));
+                    }
+                }
+            }
+        }
+        return vmt::Ok(names);
     }
 
     vmt::Result<std::vector<unsigned char>> read_binary_file(
         const std::string& game_path) override {
+#if !defined(_WIN64)
         const spike::BinaryFile result = spike::read_binary_file(game_path);
-        if (!result.ok) {
-            return vmt::Err<std::vector<unsigned char>>(
-                engine_error(vmt::ErrorCode::EngineInitFailed, result.message));
+        if (result.ok && result.found) {
+            return vmt::Ok(result.bytes);
         }
-        if (!result.found) {
-            return vmt::Err<std::vector<unsigned char>>(
-                engine_error(vmt::ErrorCode::NotFound, result.message));
+#endif
+        if (!config_.game_dir.empty()) {
+            std::filesystem::path full = config_.game_dir / std::filesystem::u8path(game_path);
+            if (std::filesystem::exists(full)) {
+                std::ifstream f(full, std::ios::binary);
+                if (f) {
+                    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(f)),
+                                                     std::istreambuf_iterator<char>());
+                    return vmt::Ok(bytes);
+                }
+            }
         }
-        return vmt::Ok(result.bytes);
+        return vmt::Err<std::vector<unsigned char>>(
+            engine_error(vmt::ErrorCode::NotFound, "file not found: " + game_path));
     }
 
     vmt::Result<std::string> read_text_file(const std::string& game_path) override {
+#if !defined(_WIN64)
         const spike::TextFile result = spike::read_text_file(game_path);
-        if (!result.ok) {
-            return vmt::Err<std::string>(engine_error(vmt::ErrorCode::InvalidArgument,
-                                                      "the engine file system is not initialized"));
+        if (result.ok && result.found) {
+            return vmt::Ok(result.text);
         }
-        if (!result.found) {
-            vmt::Error error = vmt::make_error(vmt::ErrorCode::NotFound,
-                                               "file not found in the mounted game paths: " +
-                                                   game_path,
-                                               "Check the game connection and the file name");
-            return vmt::Err<std::string>(std::move(error));
+#endif
+        if (!config_.game_dir.empty()) {
+            std::filesystem::path full = config_.game_dir / std::filesystem::u8path(game_path);
+            if (std::filesystem::exists(full)) {
+                std::ifstream f(full, std::ios::binary);
+                if (f) {
+                    std::string text((std::istreambuf_iterator<char>(f)),
+                                     std::istreambuf_iterator<char>());
+                    return vmt::Ok(text);
+                }
+            }
         }
-        return vmt::Ok(result.text);
+        return vmt::Err<std::string>(
+            engine_error(vmt::ErrorCode::NotFound, "file not found: " + game_path));
     }
 
     vmt::Result<void> set_preview_shape(PreviewShape shape) override {
@@ -403,7 +449,9 @@ public:
     void shutdown() override {
         if (!initialized_) return;
         terminate_backend();
+#if !defined(_WIN64)
         (void)spike::shutdown_engine();
+#endif
         initialized_ = false;
         material_name_.clear();
     }

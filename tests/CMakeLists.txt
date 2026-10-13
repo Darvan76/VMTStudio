@@ -70,4 +70,6 @@ target_link_libraries(ui_tests PRIVATE
     vmtviewer_warnings
 )
 
+vtf_deploy_vtflib_runtime(ui_tests)
+
 add_test(NAME ui_tests COMMAND ui_tests)

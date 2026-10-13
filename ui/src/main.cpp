@@ -1,47 +1,50 @@
-// vmtviewer - application entry point.
-//
-// The real UI lives in the 'ui' library (parameter panel, raw text editor,
-// recent files). This file only enables debug leak checking and hands control
-// to ui::run_app.
+#include "qt/main_window.h"
+#include "qt/theme.h"
+#include "app_log.h"
 
-#ifndef UNICODE
-#define UNICODE
+#include <QApplication>
+#include <QFileInfo>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #endif
-#ifndef _UNICODE
-#define _UNICODE
+#ifndef NOMINMAX
+#define NOMINMAX
 #endif
-
-#include "main_window.h"
-
 #include <windows.h>
-#include <shellapi.h>
 
-#include <string>
+int main(int argc, char* argv[]) {
+    // Initialize application logging and crash handler
+    ui::install_crash_handler();
+    
+    wchar_t localApp[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", localApp, MAX_PATH) > 0) {
+        ui::log_open(std::filesystem::path(localApp) / L"VMTViewer");
+    } else {
+        ui::log_open(std::filesystem::temp_directory_path() / L"VMTViewer");
+    }
+    ui::log_session_begin();
 
-#ifdef _DEBUG
-#include <crtdbg.h>
-#define VMT_ENABLE_LEAK_CHECK() \
-    do { _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF); } while (0)
-#else
-#define VMT_ENABLE_LEAK_CHECK() \
-    do { } while (0)
-#endif
+    QApplication app(argc, argv);
+    app.setApplicationName("VMTViewer");
+    app.setApplicationVersion("0.2.0");
+    app.setOrganizationName("VMTViewer");
 
-int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show_command) {
-    VMT_ENABLE_LEAK_CHECK();
+    ui::qt::apply_dark_theme(app);
 
-    // Hidden compatibility probe: run the engine in this disposable process.
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argv != nullptr) {
-        const bool probe = argc >= 4 && std::wstring(argv[1]) == L"--engine-probe";
-        const std::wstring bin = probe ? argv[2] : std::wstring();
-        const std::wstring game = probe ? argv[3] : std::wstring();
-        LocalFree(argv);
-        if (probe) {
-            return ui::run_engine_probe(bin, game);
+    ui::qt::MainWindow mainWindow;
+    mainWindow.show();
+
+    if (argc > 1) {
+        QString initialFile = QString::fromLocal8Bit(argv[1]);
+        if (QFileInfo::exists(initialFile) && initialFile.endsWith(".vmt", Qt::CaseInsensitive)) {
+            mainWindow.openFile(initialFile);
         }
     }
 
-    return ui::run_app(instance, show_command);
+    int result = app.exec();
+
+    ui::log_session_end();
+    ui::log_close();
+    return result;
 }

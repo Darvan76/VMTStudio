@@ -14,10 +14,16 @@
 # the DLL resource compiles without the optional MFC component). The patch is
 # applied below, idempotently, and exposed as the vtflib_apply_patch target.
 set(VTFLIB_ROOT "${CMAKE_SOURCE_DIR}/thirdparty/vtflib")
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(VTFLIB_BUILD_DIR "build_vtflib64")
+else()
+    set(VTFLIB_BUILD_DIR "build_vtflib")
+endif()
+
 set(VTFLIB_IMPORT_LIB
-    "$<IF:$<CONFIG:Debug>,${VTFLIB_ROOT}/build_vtflib/VTFLib/Debug/VTFLib++_d.lib,${VTFLIB_ROOT}/build_vtflib/VTFLib/Release/VTFLib++.lib>")
+    "$<IF:$<CONFIG:Debug>,${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/VTFLib/Debug/VTFLib++_d.lib,${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/VTFLib/Release/VTFLib++.lib>")
 set(VTFLIB_RUNTIME_DLL
-    "$<IF:$<CONFIG:Debug>,${VTFLIB_ROOT}/build_vtflib/bin/VTFLib++_d.dll,${VTFLIB_ROOT}/build_vtflib/bin/VTFLib++.dll>")
+    "$<IF:$<CONFIG:Debug>,${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/bin/VTFLib++_d.dll,${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/bin/VTFLib++.dll>")
 
 # Applying the patches must happen before the standalone VTFLib++ build, so
 # do it at configure time (and again on demand via the build target).
@@ -39,13 +45,9 @@ add_custom_target(vtflib_apply_patch
     COMMENT "Ensuring the VTFLib++ patches are applied"
     VERBATIM)
 
-if(NOT EXISTS "${VTFLIB_ROOT}/build_vtflib/VTFLib/Release/VTFLib++.lib")
+if(NOT EXISTS "${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/VTFLib/Release/VTFLib++.lib")
     message(FATAL_ERROR
-        "VTFLib++ has not been built yet (missing build_vtflib/VTFLib/Release/VTFLib++.lib).\n"
-        "The Resource.rc patch has already been applied; now run:\n"
-        "  cmake -B thirdparty/vtflib/build_vtflib -A Win32 -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF\n"
-        "  cmake --build thirdparty/vtflib/build_vtflib --config Release\n"
-        "  cmake --build thirdparty/vtflib/build_vtflib --config Debug")
+        "VTFLib++ has not been built yet (missing ${VTFLIB_BUILD_DIR}/VTFLib/Release/VTFLib++.lib).\n")
 endif()
 
 add_library(vtf_reader STATIC
@@ -74,10 +76,15 @@ target_link_libraries(vtf_reader
 # recomputed inside the function because functions use the caller's variable
 # scope, and callers live in other directories.
 function(vtf_deploy_vtflib_runtime target)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(vtflib_build_dir "build_vtflib64")
+    else()
+        set(vtflib_build_dir "build_vtflib")
+    endif()
     set(vtflib_root "${CMAKE_SOURCE_DIR}/thirdparty/vtflib")
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "$<IF:$<CONFIG:Debug>,${vtflib_root}/build_vtflib/bin/VTFLib++_d.dll,${vtflib_root}/build_vtflib/bin/VTFLib++.dll>"
+                "$<IF:$<CONFIG:Debug>,${vtflib_root}/${vtflib_build_dir}/bin/VTFLib++_d.dll,${vtflib_root}/${vtflib_build_dir}/bin/VTFLib++.dll>"
                 "$<TARGET_FILE_DIR:${target}>"
         COMMENT "Copying the VTFLib++ runtime next to ${target}"
         VERBATIM)
