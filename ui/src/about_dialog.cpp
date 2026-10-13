@@ -1,5 +1,9 @@
 #include "about_dialog.h"
 
+#include <ui/theme_button.h>
+#include <ui/win32_controls.h>
+#include <ui/win32_theme.h>
+
 #include <string>
 
 namespace ui {
@@ -43,6 +47,39 @@ int dp(int value) {
     return g_about != nullptr ? MulDiv(value, g_about->dpi, 96) : value;
 }
 
+// Single layout pass, shared by WM_CREATE, WM_SIZE and WM_DPICHANGED: the box
+// has no real layout engine, so every geometry change is these two rects.
+void layout_about(HWND hwnd) {
+    HWND text = GetDlgItem(hwnd, 10);
+    HWND ok = GetDlgItem(hwnd, IDOK);
+    if (text == nullptr || ok == nullptr) {
+        return;
+    }
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    MoveWindow(text, dp(12), dp(12), client.right - dp(24), client.bottom - dp(62), TRUE);
+    MoveWindow(ok, client.right - dp(100), client.bottom - dp(42), dp(88), dp(28), TRUE);
+}
+
+// BS_DEFPUSHBUTTON used to make OK this window's default button: pressing Enter
+// anywhere that did not consume the key (the read-only text box - it has no
+// ES_WANTRETURN, so the edit passes Enter on - or the frame itself) activated it
+// through IsDialogMessage's DM_GETDEFID path. ThemeButton is not a native button
+// and carries no BS_DEFPUSHBUTTON style for DefWindowProc to find, so that
+// routing is restored here by hand. The button keeps WS_TABSTOP (ThemeButton
+// always sets it), so the tab order and the focus ring are unchanged.
+void press_default_button(HWND hwnd) {
+    HWND button = GetDlgItem(hwnd, IDOK);
+    if (button == nullptr) {
+        return;
+    }
+    // ThemeButton has no BM_CLICK, so the notification a real click produces is
+    // raised directly - the same WM_COMMAND the button sends from the mouse.
+    SendMessageW(hwnd, WM_COMMAND,
+                 MAKEWPARAM(static_cast<WORD>(IDOK), static_cast<WORD>(BN_CLICKED)),
+                 reinterpret_cast<LPARAM>(button));
+}
+
 LRESULT CALLBACK AboutProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_CREATE: {
@@ -53,32 +90,54 @@ LRESULT CALLBACK AboutProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0,
             0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(10)),
             GetModuleHandleW(nullptr), nullptr);
-        HWND ok = CreateWindowExW(0, L"BUTTON", L"OK",
-                                  WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 0, 0,
-                                  0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)),
-                                  GetModuleHandleW(nullptr), nullptr);
+        // The confirm action of this window, so it carries the accent weight. It
+        // draws its own label through DirectWrite, so no WM_SETFONT is needed.
+        ui::controls::ThemeButton::create(hwnd, IDOK, L"OK", 0, 0, 0, 0,
+                                          ui::controls::ButtonKind::Push,
+                                          ui::controls::ButtonStyle::Accent);
         HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         SendMessageW(text, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        SendMessageW(ok, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-        RECT client{};
-        GetClientRect(hwnd, &client);
-        MoveWindow(text, dp(12), dp(12), client.right - dp(24), client.bottom - dp(62), TRUE);
-        MoveWindow(ok, client.right - dp(100), client.bottom - dp(42), dp(88), dp(28), TRUE);
+        layout_about(hwnd);
         return 0;
     }
 
-    case WM_SIZE: {
-        HWND text = GetDlgItem(hwnd, 10);
-        HWND ok = GetDlgItem(hwnd, IDOK);
-        if (text != nullptr && ok != nullptr) {
-            RECT client{};
-            GetClientRect(hwnd, &client);
-            MoveWindow(text, dp(12), dp(12), client.right - dp(24), client.bottom - dp(62), TRUE);
-            MoveWindow(ok, client.right - dp(100), client.bottom - dp(42), dp(88), dp(28), TRUE);
+    case WM_SIZE:
+        layout_about(hwnd);
+        return 0;
+
+    // Per-monitor V2 delivers this whenever the window moves to a display with
+    // another DPI. The suggested rect preserves the physical size, and dp()
+    // needs the new value before the children are repositioned.
+    case WM_DPICHANGED: {
+        const RECT* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested != nullptr) {
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
         }
+        if (g_about != nullptr) {
+            g_about->dpi = ui::theming::metrics_for(hwnd).dpi;
+        }
+        layout_about(hwnd);
+        ui::controls::handle_dpi_change(hwnd);
         return 0;
     }
+
+    // Only reached when no child wanted VK_RETURN: a focused ThemeButton claims
+    // it for itself, so the default action cannot fire twice.
+    case WM_KEYDOWN:
+        if (wparam == VK_RETURN) {
+            press_default_button(hwnd);
+            return 0;
+        }
+        break;
+
+    case WM_SETTINGCHANGE:
+        if (ui::controls::handle_theme_change(hwnd, lparam)) {
+            return 0;
+        }
+        break;
 
     case WM_COMMAND:
         if (LOWORD(wparam) == IDOK || LOWORD(wparam) == IDCANCEL) {
@@ -97,8 +156,9 @@ LRESULT CALLBACK AboutProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         return 0;
 
     default:
-        return DefWindowProcW(hwnd, message, wparam, lparam);
+        break;
     }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 } // namespace
@@ -142,6 +202,13 @@ void show_about_dialog(HWND owner) {
         g_about = nullptr;
         return;
     }
+
+    // Dark caption, rounded corners and the dark subtree styling for the EDIT.
+    // The class registration itself happened in the main window's bootstrap, and
+    // ThemeButton::create() re-registers on demand, so nothing more is needed
+    // here. Both calls are IsWindow-guarded internally.
+    ui::controls::apply_chrome(hwnd);
+    ui::theming::apply_subtree(hwnd);
 
     RECT window_rect{};
     GetWindowRect(hwnd, &window_rect);

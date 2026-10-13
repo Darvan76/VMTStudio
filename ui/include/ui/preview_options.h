@@ -19,6 +19,10 @@ enum class PreviewShape {
     Cube,
     Cylinder,
     Plane,
+    BrushWall,
+    BrushFloor,
+    BrushCube,
+    BrushDisplacement,
 };
 
 // "Environment" is a small set of one-click lighting setups, not a skybox:

@@ -139,17 +139,17 @@ std::uint32_t read_u32_le(const std::uint8_t* data) {
            (static_cast<std::uint32_t>(data[3]) << 24);
 }
 
-vmt::Result<void> probe_vtf_header(const std::vector<std::uint8_t>& bytes,
+vmt::Result<void> probe_vtf_header(const std::uint8_t* data, std::size_t size,
                                    const std::filesystem::path& path) {
-    if (bytes.size() < kFileHeaderProbeSize) {
+    if (size < kFileHeaderProbeSize) {
         return vmt::Err<void>(vmt::make_error(
             vmt::ErrorCode::VtfTruncated,
-            "the file is too small to hold a VTF header (" + std::to_string(bytes.size()) + " bytes)",
+            "the file is too small to hold a VTF header (" + std::to_string(size) + " bytes)",
             "Re-export or re-download the texture; the file is truncated",
             path.string()));
     }
 
-    if (std::memcmp(bytes.data(), "VTF\0", 4) != 0) {
+    if (std::memcmp(data, "VTF\0", 4) != 0) {
         return vmt::Err<void>(vmt::make_error(
             vmt::ErrorCode::VtfInvalidHeader,
             "the file does not start with the 'VTF' signature",
@@ -157,8 +157,8 @@ vmt::Result<void> probe_vtf_header(const std::vector<std::uint8_t>& bytes,
             path.string()));
     }
 
-    const std::uint32_t major = read_u32_le(bytes.data() + 4);
-    const std::uint32_t minor = read_u32_le(bytes.data() + 8);
+    const std::uint32_t major = read_u32_le(data + 4);
+    const std::uint32_t minor = read_u32_le(data + 8);
     if (major != static_cast<std::uint32_t>(VTF_MAJOR_VERSION) ||
         minor > static_cast<std::uint32_t>(VTF_MINOR_VERSION)) {
         return vmt::Err<void>(vmt::make_error(
@@ -170,7 +170,7 @@ vmt::Result<void> probe_vtf_header(const std::vector<std::uint8_t>& bytes,
             path.string()));
     }
 
-    const std::uint32_t declared_header_size = read_u32_le(bytes.data() + 12);
+    const std::uint32_t declared_header_size = read_u32_le(data + 12);
     if (declared_header_size < kFileHeaderProbeSize) {
         return vmt::Err<void>(vmt::make_error(
             vmt::ErrorCode::VtfInvalidHeader,
@@ -179,11 +179,11 @@ vmt::Result<void> probe_vtf_header(const std::vector<std::uint8_t>& bytes,
             "Re-export or re-download the texture; the file looks corrupt",
             path.string()));
     }
-    if (bytes.size() < declared_header_size) {
+    if (size < declared_header_size) {
         return vmt::Err<void>(vmt::make_error(
             vmt::ErrorCode::VtfTruncated,
             "the file declares a " + std::to_string(declared_header_size) + "-byte header but only " +
-                std::to_string(bytes.size()) + " bytes are present",
+                std::to_string(size) + " bytes are present",
             "Re-export or re-download the texture; the file is truncated",
             path.string()));
     }
@@ -322,44 +322,61 @@ bool allocate_rgba(std::uint32_t width, std::uint32_t height,
     return true;
 }
 
-vmt::Result<VtfInfo> open_vtf_info_impl(const std::filesystem::path& path) {
-    std::lock_guard<std::mutex> lock(vtflib_mutex());
+// The two helpers below take an already-loaded buffer and assume
+// vtflib_mutex() is held by the caller; the public entry points own the lock so
+// that the path-based and memory-based variants share one serialization point.
 
-    std::vector<std::uint8_t> bytes;
-    vmt::Error error;
-    if (!read_file(path, bytes, error)) {
-        return vmt::Err<VtfInfo>(std::move(error));
+// Rejects an unusable buffer before VTFLib++ sees it, with the same error
+// classification the file-based path produces.
+vmt::Result<void> check_memory_input(const std::uint8_t* data, std::size_t size,
+                                     const std::filesystem::path& origin) {
+    if (data == nullptr) {
+        return vmt::Err<void>(vmt::make_error(
+            vmt::ErrorCode::InvalidArgument,
+            "no VTF data was supplied for '" + origin.string() + "'",
+            "The texture could not be read from the game files"));
     }
-    if (auto probe = probe_vtf_header(bytes, path); !probe.ok()) {
+    if (size > kMaxVtfFileSize) {
+        return vmt::Err<void>(vmt::make_error(
+            vmt::ErrorCode::OutOfMemory,
+            "the VTF data is larger than 4 GiB, which VTFLib++ cannot load",
+            "Re-export the texture at a lower resolution",
+            origin.string()));
+    }
+    return vmt::Ok();
+}
+
+vmt::Result<VtfInfo> open_vtf_info_bytes_locked(const std::uint8_t* data, std::size_t size,
+                                                const std::filesystem::path& origin) {
+    if (auto checked = check_memory_input(data, size, origin); !checked.ok()) {
+        return vmt::Err<VtfInfo>(checked.error());
+    }
+    if (auto probe = probe_vtf_header(data, size, origin); !probe.ok()) {
         return vmt::Err<VtfInfo>(probe.error());
     }
     if (!ensure_vtflib_ready()) {
         return vmt::Err<VtfInfo>(vtflib_not_ready_error());
     }
-    if (vlImageLoadLump(bytes.data(), static_cast<vlUInt>(bytes.size()), vlTrue) == vlFalse) {
-        return vmt::Err<VtfInfo>(load_failure_error(path));
+    if (vlImageLoadLump(data, static_cast<vlUInt>(size), vlTrue) == vlFalse) {
+        return vmt::Err<VtfInfo>(load_failure_error(origin));
     }
     return vmt::Ok(read_info());
 }
 
-vmt::Result<RgbaImage> decode_vtf_preview_impl(const std::filesystem::path& path,
-                                               std::uint32_t frame,
-                                               std::uint32_t max_size) {
-    std::lock_guard<std::mutex> lock(vtflib_mutex());
-
-    std::vector<std::uint8_t> bytes;
-    vmt::Error error;
-    if (!read_file(path, bytes, error)) {
-        return vmt::Err<RgbaImage>(std::move(error));
+vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data, std::size_t size,
+                                                       std::uint32_t frame, std::uint32_t max_size,
+                                                       const std::filesystem::path& origin) {
+    if (auto checked = check_memory_input(data, size, origin); !checked.ok()) {
+        return vmt::Err<RgbaImage>(checked.error());
     }
-    if (auto probe = probe_vtf_header(bytes, path); !probe.ok()) {
+    if (auto probe = probe_vtf_header(data, size, origin); !probe.ok()) {
         return vmt::Err<RgbaImage>(probe.error());
     }
     if (!ensure_vtflib_ready()) {
         return vmt::Err<RgbaImage>(vtflib_not_ready_error());
     }
-    if (vlImageLoadLump(bytes.data(), static_cast<vlUInt>(bytes.size()), vlFalse) == vlFalse) {
-        return vmt::Err<RgbaImage>(load_failure_error(path));
+    if (vlImageLoadLump(data, static_cast<vlUInt>(size), vlFalse) == vlFalse) {
+        return vmt::Err<RgbaImage>(load_failure_error(origin));
     }
 
     const VTFImageFormat format = vlImageGetFormat();
@@ -371,21 +388,21 @@ vmt::Result<RgbaImage> decode_vtf_preview_impl(const std::filesystem::path& path
             vmt::ErrorCode::VtfUnsupportedFormat,
             "the texture uses the HDR format '" + format_name + "', which cannot be previewed as 8-bit RGBA",
             "Preview is unavailable for HDR textures",
-            path.string()));
+            origin.string()));
     }
     if (is_depth_stencil_format(format)) {
         return vmt::Err<RgbaImage>(vmt::make_error(
             vmt::ErrorCode::VtfUnsupportedFormat,
             "the texture uses the depth/stencil format '" + format_name + "', which cannot be previewed",
             "Preview is unavailable for depth/stencil textures",
-            path.string()));
+            origin.string()));
     }
     if (format_info == nullptr || format_info->bIsSupported == vlFalse) {
         return vmt::Err<RgbaImage>(vmt::make_error(
             vmt::ErrorCode::VtfUnsupportedFormat,
             "the texture format '" + format_name + "' is not supported by VTFLib++",
             "Re-export the texture with a standard format such as DXT1, DXT5 or RGBA8888",
-            path.string()));
+            origin.string()));
     }
 
     const std::uint32_t frame_count = static_cast<std::uint32_t>(vlImageGetFrameCount());
@@ -395,7 +412,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_impl(const std::filesystem::path& path
             "frame " + std::to_string(frame) + " is out of range (the texture has " +
                 std::to_string(frame_count) + " frame(s))",
             "Choose a frame between 0 and " + std::to_string(frame_count - 1),
-            path.string()));
+            origin.string()));
     }
 
     const std::uint32_t depth = static_cast<std::uint32_t>(vlImageGetDepth());
@@ -404,7 +421,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_impl(const std::filesystem::path& path
             vmt::ErrorCode::VtfUnsupportedFormat,
             "volume textures cannot be previewed (depth " + std::to_string(depth) + ")",
             "Preview is available for 2D textures only",
-            path.string()));
+            origin.string()));
     }
 
     const std::uint32_t width = static_cast<std::uint32_t>(vlImageGetWidth());
@@ -415,9 +432,10 @@ vmt::Result<RgbaImage> decode_vtf_preview_impl(const std::filesystem::path& path
             vmt::ErrorCode::Internal,
             "VTFLib++ returned no image data for frame " + std::to_string(frame),
             "Re-export the texture; the file may be corrupt",
-            path.string()));
+            origin.string()));
     }
 
+    vmt::Error error;
     std::vector<std::uint8_t> rgba;
     if (!allocate_rgba(width, height, rgba, error)) {
         return vmt::Err<RgbaImage>(std::move(error));
@@ -428,7 +446,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_impl(const std::filesystem::path& path
             "the texture format '" + format_name + "' could not be converted to RGBA8 (" +
                 vtflib_last_error() + ")",
             "Preview is unavailable for this texture format",
-            path.string()));
+            origin.string()));
     }
 
     RgbaImage image;
@@ -456,7 +474,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_impl(const std::filesystem::path& path
             "failed to downscale the preview to " + std::to_string(target_width) + "x" +
                 std::to_string(target_height) + " (" + vtflib_last_error() + ")",
             "Try a different preview size",
-            path.string()));
+            origin.string()));
     }
 
     image.width = target_width;
@@ -505,7 +523,13 @@ std::vector<FormatSupport> list_formats() {
 
 vmt::Result<VtfInfo> open_vtf_info(const std::filesystem::path& path) {
     try {
-        return open_vtf_info_impl(path);
+        std::lock_guard<std::mutex> lock(vtflib_mutex());
+        std::vector<std::uint8_t> bytes;
+        vmt::Error error;
+        if (!read_file(path, bytes, error)) {
+            return vmt::Err<VtfInfo>(std::move(error));
+        }
+        return open_vtf_info_bytes_locked(bytes.data(), bytes.size(), path);
     } catch (const std::exception& exception) {
         return vmt::Err<VtfInfo>(unexpected_error(path, exception.what()));
     } catch (...) {
@@ -517,11 +541,42 @@ vmt::Result<RgbaImage> decode_vtf_preview(const std::filesystem::path& path,
                                           std::uint32_t frame,
                                           std::uint32_t max_size) {
     try {
-        return decode_vtf_preview_impl(path, frame, max_size);
+        std::lock_guard<std::mutex> lock(vtflib_mutex());
+        std::vector<std::uint8_t> bytes;
+        vmt::Error error;
+        if (!read_file(path, bytes, error)) {
+            return vmt::Err<RgbaImage>(std::move(error));
+        }
+        return decode_vtf_preview_bytes_locked(bytes.data(), bytes.size(), frame, max_size, path);
     } catch (const std::exception& exception) {
         return vmt::Err<RgbaImage>(unexpected_error(path, exception.what()));
     } catch (...) {
         return vmt::Err<RgbaImage>(unexpected_error(path, "unknown exception"));
+    }
+}
+
+vmt::Result<VtfInfo> open_vtf_info_from_memory(const std::uint8_t* data, std::size_t size,
+                                               const std::filesystem::path& origin) {
+    try {
+        std::lock_guard<std::mutex> lock(vtflib_mutex());
+        return open_vtf_info_bytes_locked(data, size, origin);
+    } catch (const std::exception& exception) {
+        return vmt::Err<VtfInfo>(unexpected_error(origin, exception.what()));
+    } catch (...) {
+        return vmt::Err<VtfInfo>(unexpected_error(origin, "unknown exception"));
+    }
+}
+
+vmt::Result<RgbaImage> decode_vtf_preview_from_memory(const std::uint8_t* data, std::size_t size,
+                                                      std::uint32_t frame, std::uint32_t max_size,
+                                                      const std::filesystem::path& origin) {
+    try {
+        std::lock_guard<std::mutex> lock(vtflib_mutex());
+        return decode_vtf_preview_bytes_locked(data, size, frame, max_size, origin);
+    } catch (const std::exception& exception) {
+        return vmt::Err<RgbaImage>(unexpected_error(origin, exception.what()));
+    } catch (...) {
+        return vmt::Err<RgbaImage>(unexpected_error(origin, "unknown exception"));
     }
 }
 

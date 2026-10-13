@@ -82,3 +82,21 @@ function(vtf_deploy_vtflib_runtime target)
         COMMENT "Copying the VTFLib++ runtime next to ${target}"
         VERBATIM)
 endfunction()
+
+# --- Fixture generator (maintenance tool; not part of the normal build) ------
+# Regenerates the committed fixtures under tests/data/vtf:
+#   cmake --build build --target make_vtf_fixtures --config Release
+#   build\bin\Release\make_vtf_fixtures.exe tests\data\vtf
+add_executable(make_vtf_fixtures EXCLUDE_FROM_ALL
+    tools/make_vtf_fixtures.cpp
+)
+
+target_include_directories(make_vtf_fixtures PRIVATE
+    "${VTFLIB_ROOT}/lib"
+)
+
+target_link_libraries(make_vtf_fixtures PRIVATE
+    "${VTFLIB_IMPORT_LIB}" vmtviewer_warnings
+)
+
+vtf_deploy_vtflib_runtime(make_vtf_fixtures)

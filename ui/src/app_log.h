@@ -22,6 +22,12 @@ void log_close();
 void log_write(const std::string& tag, const std::string& message);
 std::filesystem::path log_path();
 
+// Debug console management
+void console_open();
+void console_close();
+void console_focus();
+bool is_console_open();
+
 // Session marker: written at start, removed on a clean exit. Call
 // log_report_previous_session() after log_open to record an unclean end of the
 // previous run in the log.

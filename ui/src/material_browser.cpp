@@ -35,7 +35,7 @@ std::string path_to_slashes(std::string s) {
 }
 
 std::string strip_vmt_extension(std::string s) {
-    if (ends_with_ci(s, ".vmt")) {
+    if (ends_with_ci(s, ".vmt") || ends_with_ci(s, ".vtf")) {
         s.resize(s.size() - 4);
     }
     return s;

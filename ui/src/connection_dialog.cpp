@@ -1,9 +1,11 @@
 #include "connection_dialog.h"
 
+#include "folder_picker.h"
 #include "ui/connection_model.h"
 
-#include <shellapi.h>
-#include <shlobj.h>
+#include <ui/theme_button.h>
+#include <ui/win32_controls.h>
+#include <ui/win32_theme.h>
 
 #include <string>
 #include <vector>
@@ -84,25 +86,16 @@ void remember_path() {
     }
 }
 
-void browse_folder(std::wstring& out) {
-    BROWSEINFOW info{};
-    info.hwndOwner = g_dialog->hwnd;
-    info.lpszTitle = L"Select the folder";
-    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    LPITEMIDLIST idl = SHBrowseForFolderW(&info);
-    if (idl == nullptr) {
-        return;
-    }
-    wchar_t path[4 * MAX_PATH] = {};
-    if (SHGetPathFromIDListW(idl, path) != FALSE) {
-        out = path;
-    }
-    CoTaskMemFree(idl);
+// Opens the Explorer folder chooser starting from whatever the box currently
+// holds, so re-picking is a one-click correction rather than a re-navigation.
+std::wstring browse_folder(HWND start_edit, const wchar_t* title) {
+    const std::filesystem::path chosen = ui::pick_folder(
+        g_dialog->hwnd, title, std::filesystem::path(window_text(start_edit)));
+    return chosen.empty() ? std::wstring() : chosen.wstring();
 }
 
 void browse_bin() {
-    std::wstring path;
-    browse_folder(path);
+    const std::wstring path = browse_folder(g_dialog->path_edit, L"Select the game's bin folder");
     if (path.empty()) {
         return;
     }
@@ -119,8 +112,8 @@ void browse_bin() {
 }
 
 void browse_game() {
-    std::wstring path;
-    browse_folder(path);
+    const std::wstring path =
+        browse_folder(g_dialog->game_edit, L"Select the game folder (with gameinfo.txt)");
     if (path.empty()) {
         return;
     }
@@ -210,11 +203,9 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
                                            0, 0, 0, 0, hwnd,
                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PATH)),
                                            GetModuleHandleW(nullptr), nullptr);
-        state->browse_button = CreateWindowExW(0, L"BUTTON", L"Browse...",
-                                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-                                               0, 0, 0, 0, hwnd,
-                                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BROWSE)),
-                                               GetModuleHandleW(nullptr), nullptr);
+        state->browse_button = ui::controls::ThemeButton::create(
+            hwnd, IDC_BROWSE, L"Browse...", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+            ui::controls::ButtonStyle::Default);
         HWND label_game_edit = CreateWindowExW(0, L"STATIC", L"Game folder:",
                                                WS_CHILD | WS_VISIBLE, dp(12), dp(50), dp(84),
                                                dp(20), hwnd, nullptr, GetModuleHandleW(nullptr),
@@ -225,15 +216,12 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
                                            reinterpret_cast<HMENU>(
                                                static_cast<INT_PTR>(IDC_GAME_EDIT)),
                                            GetModuleHandleW(nullptr), nullptr);
-        state->game_browse_button = CreateWindowExW(
-            0, L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, 0, 0,
-            0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_GAME_BROWSE)),
-            GetModuleHandleW(nullptr), nullptr);
-        state->test_button = CreateWindowExW(
-            0, L"BUTTON", L"Test connection",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, 0, 0, 0, 0, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TEST)), GetModuleHandleW(nullptr),
-            nullptr);
+        state->game_browse_button = ui::controls::ThemeButton::create(
+            hwnd, IDC_GAME_BROWSE, L"Browse...", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+            ui::controls::ButtonStyle::Default);
+        state->test_button = ui::controls::ThemeButton::create(
+            hwnd, IDC_TEST, L"Test connection", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+            ui::controls::ButtonStyle::Default);
         HWND label_arch = CreateWindowExW(0, L"STATIC", L"Architecture:", WS_CHILD | WS_VISIBLE,
                                           dp(12), dp(114), dp(84), dp(18), hwnd, nullptr,
                                           GetModuleHandleW(nullptr), nullptr);
@@ -255,16 +243,16 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
                                          0, 0, 0, 0, hwnd,
                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RESULTS)),
                                          GetModuleHandleW(nullptr), nullptr);
-        state->close_button = CreateWindowExW(
-            0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, 0, 0, 0, 0,
-            hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), GetModuleHandleW(nullptr),
-            nullptr);
+        state->close_button = ui::controls::ThemeButton::create(
+            hwnd, IDCANCEL, L"Close", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+            ui::controls::ButtonStyle::Accent);
 
+        // The themed buttons are left out on purpose: they draw their labels
+        // through DirectWrite and ignore WM_SETFONT.
         HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-        for (HWND control : {label_path, state->path_edit, state->browse_button,
-                             label_game_edit, state->game_edit, state->game_browse_button,
-                             state->test_button, label_arch, state->arch_value, label_game,
-                             state->game_value, state->results, state->close_button}) {
+        for (HWND control : {label_path, state->path_edit, label_game_edit, state->game_edit,
+                             label_arch, state->arch_value, label_game, state->game_value,
+                             state->results}) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
 
@@ -284,6 +272,29 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
     case WM_SIZE:
         layout_dialog();
         return 0;
+
+    // Per-monitor V2: take the suggested rect, refresh the dpi that dp() scales
+    // with, then lay the hardcoded rects out again.
+    case WM_DPICHANGED: {
+        const RECT* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested != nullptr) {
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if (g_dialog != nullptr) {
+            g_dialog->dpi = ui::theming::metrics_for(hwnd).dpi;
+        }
+        layout_dialog();
+        ui::controls::handle_dpi_change(hwnd);
+        return 0;
+    }
+
+    case WM_SETTINGCHANGE:
+        if (ui::controls::handle_theme_change(hwnd, lparam)) {
+            return 0;
+        }
+        break;
 
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
@@ -315,8 +326,9 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
         return 0;
 
     default:
-        return DefWindowProcW(hwnd, message, wparam, lparam);
+        break;
     }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 } // namespace
@@ -354,7 +366,8 @@ void show_connection_dialog(HWND owner, UISettings& settings,
     }
     g_dialog = &state;
 
-    const bool com_ready = SUCCEEDED(OleInitialize(nullptr));
+    // COM is initialised by pick_folder() itself for the duration of the browse
+    // dialog, so this window no longer has to own an apartment.
 
     HWND hwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME, kDialogClass, kTitle,
@@ -363,11 +376,15 @@ void show_connection_dialog(HWND owner, UISettings& settings,
         GetModuleHandleW(nullptr), nullptr);
     if (hwnd == nullptr) {
         g_dialog = nullptr;
-        if (com_ready) {
-            OleUninitialize();
-        }
         return;
     }
+
+    // Dark caption and rounded corners, plus the subtree walk that themes the
+    // EDITs and the STATIC labels. The custom classes were registered by the
+    // main window's bootstrap (and ThemeButton::create() re-registers anyway),
+    // so no register_all() call is needed here.
+    ui::controls::apply_chrome(hwnd);
+    ui::theming::apply_subtree(hwnd);
 
     RECT window_rect{};
     GetWindowRect(hwnd, &window_rect);
@@ -395,9 +412,6 @@ void show_connection_dialog(HWND owner, UISettings& settings,
         DestroyWindow(hwnd);
     }
     g_dialog = nullptr;
-    if (com_ready) {
-        OleUninitialize();
-    }
 }
 
 } // namespace ui

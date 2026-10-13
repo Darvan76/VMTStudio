@@ -1,0 +1,15 @@
+// Generated from ui/win32/app.rc.in - do not edit the generated copy.
+//
+// Only job today: embed ui/win32/app.manifest as the application manifest so
+// that the process declares Common Controls v6 and Per-Monitor V2 DPI
+// awareness. Both are load-bearing for the Win32 shell work - without the
+// manifest the common controls render in the classic pre-Vista style and
+// Windows bitmap-scales the whole window on HiDPI monitors.
+//
+// The manifest path is baked in by CMake (configure_file, @ONLY) as an
+// absolute path so the resource compiler never depends on its working
+// directory and no /D define has to survive the trip to rc.exe.
+
+#include <windows.h>
+
+1 RT_MANIFEST "@VMTVIEWER_MANIFEST_PATH@"

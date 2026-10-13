@@ -27,6 +27,9 @@
 //   truncated.vtf         - optional: a truncated file; it must fail cleanly
 //   wrong_signature.vtf   - optional: a file whose "VTF" signature is corrupt
 //
+// The committed fixture set is regenerated with the maintenance tool in
+// vtf_reader/tools/make_vtf_fixtures.cpp (see vtf_reader/CMakeLists.txt).
+//
 // expected.json schema (extra keys are ignored):
 //
 //   {
@@ -646,8 +649,10 @@ UT_TEST_CASE("vtf: fixture files described by expected.json") {
         UT_CHECK(beyond.error().code == vmt::ErrorCode::InvalidArgument);
     }
 
+    // The committed fixture set is required to be complete: the manifest must
+    // cover the preview-relevant format matrix and the frame paths.
     if (!(saw_dxt1 && saw_dxt5 && saw_rgba8888 && saw_mipmaps && saw_alpha)) {
-        std::printf("  [NOTE] fixture coverage is still incomplete; missing:");
+        std::printf("  fixture coverage is incomplete; missing:");
         if (!saw_dxt1) {
             std::printf(" DXT1");
         }
@@ -663,12 +668,14 @@ UT_TEST_CASE("vtf: fixture files described by expected.json") {
         if (!saw_alpha) {
             std::printf(" alpha");
         }
-        std::printf(" (informational while the fixture set is partial)\n");
+        std::printf("\n");
     }
-    if (!saw_multiframe) {
-        std::printf("  [NOTE] no multi-frame fixture provided; multi-frame decoding is "
-                    "covered by the frame-index checks\n");
-    }
+    UT_CHECK(saw_dxt1);
+    UT_CHECK(saw_dxt5);
+    UT_CHECK(saw_rgba8888);
+    UT_CHECK(saw_mipmaps);
+    UT_CHECK(saw_alpha);
+    UT_CHECK(saw_multiframe);
 }
 
 UT_TEST_CASE("vtf: format support list is coherent") {
@@ -817,4 +824,150 @@ UT_TEST_CASE("vtf: fuzz - arbitrary bytes never crash or hang") {
 
     const double total_seconds = seconds_between(started, std::chrono::steady_clock::now());
     UT_CHECK(total_seconds < 60.0);
+}
+
+// --- memory-backed entry points ---------------------------------------------
+//
+// The Asset Browser decodes textures that live inside VPK archives, so the
+// decoder has to work on a buffer rather than a path. These tests pin the
+// equivalence with the file-based API and the input-validation contract.
+
+UT_TEST_CASE("vtf memory: decoding a buffer matches decoding the same file") {
+    const fs::path fixture = fixture_dir() / "brick05.vtf";
+    if (!fs::exists(fixture)) {
+        return;
+    }
+
+    std::ifstream stream(fixture, std::ios::binary);
+    std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(stream)),
+                                     std::istreambuf_iterator<char>());
+    UT_CHECK(!bytes.empty());
+
+    const auto from_file = vtf::decode_vtf_preview(fixture, 0, 64);
+    const auto from_memory =
+        vtf::decode_vtf_preview_from_memory(bytes.data(), bytes.size(), 0, 64, fixture);
+    UT_CHECK(from_file.ok());
+    UT_CHECK(from_memory.ok());
+    if (!from_file.ok() || !from_memory.ok()) {
+        return;
+    }
+
+    UT_CHECK_EQ(from_memory.value().width, from_file.value().width);
+    UT_CHECK_EQ(from_memory.value().height, from_file.value().height);
+    // Identical pixels, not merely plausible ones: the buffer path must not
+    // differ from the file path in any way the browser would notice.
+    UT_CHECK(from_memory.value().pixels == from_file.value().pixels);
+}
+
+UT_TEST_CASE("vtf memory: metadata matches the file-based read") {
+    const fs::path fixture = fixture_dir() / "brick05.vtf";
+    if (!fs::exists(fixture)) {
+        return;
+    }
+
+    std::ifstream stream(fixture, std::ios::binary);
+    std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(stream)),
+                                     std::istreambuf_iterator<char>());
+
+    const auto from_file = vtf::open_vtf_info(fixture);
+    const auto from_memory = vtf::open_vtf_info_from_memory(bytes.data(), bytes.size(), fixture);
+    UT_CHECK(from_file.ok());
+    UT_CHECK(from_memory.ok());
+    if (!from_file.ok() || !from_memory.ok()) {
+        return;
+    }
+
+    const vtf::VtfInfo& a = from_file.value();
+    const vtf::VtfInfo& b = from_memory.value();
+    UT_CHECK_EQ(b.width, a.width);
+    UT_CHECK_EQ(b.height, a.height);
+    UT_CHECK_EQ(b.mip_count, a.mip_count);
+    UT_CHECK_EQ(b.frame_count, a.frame_count);
+    UT_CHECK_EQ(b.face_count, a.face_count);
+    UT_CHECK_EQ(b.format_name, a.format_name);
+    UT_CHECK_EQ(b.has_alpha, a.has_alpha);
+    UT_CHECK_EQ(b.preview_supported, a.preview_supported);
+}
+
+UT_TEST_CASE("vtf memory: a null buffer is rejected, not dereferenced") {
+    const auto info = vtf::open_vtf_info_from_memory(nullptr, 0, "materials/none.vtf");
+    UT_CHECK(!info.ok());
+    if (!info.ok()) {
+        UT_CHECK_EQ(static_cast<int>(info.error().code),
+                    static_cast<int>(vmt::ErrorCode::InvalidArgument));
+        UT_CHECK(!info.error().message.empty());
+    }
+
+    const auto preview = vtf::decode_vtf_preview_from_memory(nullptr, 0, 0, 64);
+    UT_CHECK(!preview.ok());
+    if (!preview.ok()) {
+        UT_CHECK_EQ(static_cast<int>(preview.error().code),
+                    static_cast<int>(vmt::ErrorCode::InvalidArgument));
+    }
+}
+
+UT_TEST_CASE("vtf memory: header errors are classified the same as from a file") {
+    const fs::path dir = fresh_temp_dir();
+
+    // Wrong signature.
+    std::vector<std::uint8_t> bad_signature = make_file_header(7, 6, 32);
+    bad_signature[0] = 'X';
+    UT_CHECK_EQ(static_cast<int>(
+                    vtf::open_vtf_info_from_memory(bad_signature.data(), bad_signature.size())
+                        .error().code),
+                static_cast<int>(vmt::ErrorCode::VtfInvalidHeader));
+
+    // Unsupported version.
+    const std::vector<std::uint8_t> future = make_file_header(7, 7, 32);
+    const auto future_info = vtf::open_vtf_info_from_memory(future.data(), future.size());
+    UT_CHECK(!future_info.ok());
+    if (!future_info.ok()) {
+        UT_CHECK_EQ(static_cast<int>(future_info.error().code),
+                    static_cast<int>(vmt::ErrorCode::VtfUnsupportedVersion));
+    }
+
+    // Shorter than a header.
+    const std::vector<std::uint8_t> stub = { 'V', 'T', 'F', 0 };
+    const auto stub_info = vtf::open_vtf_info_from_memory(stub.data(), stub.size());
+    UT_CHECK(!stub_info.ok());
+    if (!stub_info.ok()) {
+        UT_CHECK_EQ(static_cast<int>(stub_info.error().code),
+                    static_cast<int>(vmt::ErrorCode::VtfTruncated));
+    }
+
+    UT_CHECK(!dir.empty());
+}
+
+UT_TEST_CASE("vtf memory: the origin label reaches the error") {
+    // The origin is only diagnostics, but the browser shows it in its status
+    // line, so a bad buffer must be attributable to the texture it came from.
+    // The message text is the decoder's to choose; the structured `file` field
+    // is the contract, so that is what is asserted.
+    const std::vector<std::uint8_t> stub = { 'V', 'T', 'F', 0 };
+    const auto info =
+        vtf::open_vtf_info_from_memory(stub.data(), stub.size(), "materials/brick/brick05.vtf");
+    UT_CHECK(!info.ok());
+    if (!info.ok()) {
+        UT_CHECK(info.error().file.find("brick05") != std::string::npos);
+        UT_CHECK(!info.error().message.empty());
+    }
+}
+
+UT_TEST_CASE("vtf memory: a frame index out of range is still InvalidArgument") {
+    const fs::path fixture = fixture_dir() / "brick05.vtf";
+    if (!fs::exists(fixture)) {
+        return;
+    }
+
+    std::ifstream stream(fixture, std::ios::binary);
+    std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(stream)),
+                                     std::istreambuf_iterator<char>());
+
+    const auto preview = vtf::decode_vtf_preview_from_memory(bytes.data(), bytes.size(), 99, 64,
+                                                            fixture);
+    UT_CHECK(!preview.ok());
+    if (!preview.ok()) {
+        UT_CHECK_EQ(static_cast<int>(preview.error().code),
+                    static_cast<int>(vmt::ErrorCode::InvalidArgument));
+    }
 }

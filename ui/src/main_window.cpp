@@ -14,17 +14,29 @@
 #include "ui/preview_sync.h"
 #include "ui/session.h"
 #include "ui/settings.h"
+#include "ui/material_info.h"
+#include "ui/shader_catalog.h"
 #include "ui/text_encoding.h"
+#include "ui/texture_thumbnail.h"
+#include "ui/theme_button.h"
+#include "ui/theme_combo.h"
+#include "ui/theme_slider.h"
 #include "ui/validate.h"
+#include "ui/win32_controls.h"
+#include "ui/win32_theme.h"
 #include "vmt/value.h"
+#include "vmt/document.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -46,6 +58,15 @@ constexpr int kBottomHeight = 220;
 constexpr int kRowHeight = 28;
 constexpr int kRowEditX = 122;
 constexpr int kRowEditWidth = 86;
+
+// Top of the right-hand column: the shader dropdown, then the "show advanced"
+// checkbox, then the parameter panel below them.
+constexpr int kShaderRowY = 4;
+constexpr int kShaderLabelX = 8;
+constexpr int kShaderLabelWidth = 54;
+constexpr int kShaderComboX = 64;
+constexpr int kAdvancedRowY = 30;
+constexpr int kPanelTop = 56;
 
 // Rebuilding the whole panel on every keystroke causes flicker; coalesce text
 // edits with a short timer instead.
@@ -75,16 +96,36 @@ enum ControlId : int {
     ID_ADVANCED,
     ID_PREVIEW,
     ID_VALIDATE,
+    ID_SHADER_COMBO,
     IDM_EXIT = 1100,
     IDM_ABOUT,
     IDM_GAME_CONNECTION,
     IDM_BROWSER,
     IDM_PREVIEW_OPTIONS,
     IDM_MODEL,
+    IDM_SAVE_TO_GAME,
+    IDM_UNDO,
+    IDM_REDO,
+    IDM_REVERT,
     IDM_SHAPE_SPHERE,
     IDM_SHAPE_CUBE,
     IDM_SHAPE_CYLINDER,
     IDM_SHAPE_PLANE,
+    IDM_SHAPE_BRUSH_WALL,
+    IDM_SHAPE_BRUSH_FLOOR,
+    IDM_SHAPE_BRUSH_CUBE,
+    IDM_SHAPE_BRUSH_DISPLACEMENT,
+    IDM_RENDER_MODE_SHADED,
+    IDM_RENDER_MODE_WIREFRAME,
+    IDM_RENDER_MODE_ALBEDO,
+    IDM_RENDER_MODE_NORMALS,
+    IDM_ANIM_PLAY,
+    IDM_ANIM_PAUSE,
+    IDM_ANIM_TOGGLE,
+    IDM_ANIM_SPEED_HALF,
+    IDM_ANIM_SPEED_1X,
+    IDM_ANIM_SPEED_2X,
+    IDM_DEBUG_CONSOLE,
     ID_ROW_EDIT_BASE = 2000,
     ID_ROW_SLIDER_BASE = 3000,
     ID_ROW_COMBO_BASE = 4000,
@@ -125,6 +166,8 @@ struct App {
     HWND recent_label = nullptr;
     HWND recent_list = nullptr;
     HWND viewport = nullptr;
+    HWND shader_label = nullptr;
+    HWND shader_combo = nullptr;
     HWND advanced_check = nullptr;
     HWND panel = nullptr;
     HWND text_edit = nullptr;
@@ -150,8 +193,13 @@ struct App {
 
     // Engine preview state.
     std::unique_ptr<bridge::EngineView> engine;
-    std::filesystem::path preview_root;
-    std::filesystem::path thumbnail_root;
+std::filesystem::path preview_root;
+std::filesystem::path thumbnail_root;
+// Folders searched on disk for "materials/..." texture paths, so browser
+// thumbnails work from a folder scan without any engine connection.
+std::vector<std::filesystem::path> material_roots;
+std::vector<std::filesystem::path> loose_material_roots;
+std::vector<std::filesystem::path> engine_mounted_roots;
     bool preview_mounted = false;
     bool preview_active = false;
     ui::PreviewSync preview_sync;
@@ -166,7 +214,10 @@ struct App {
     // file is written at ("brick/brickwall001a"), plus the engine's current one.
     std::string preview_material_name = ui::kPreviewMaterialName;
     std::string engine_material_name;
+    int preview_revision = 0;
+    std::string active_engine_material;
     ui::PreviewOptions preview_options;
+    std::string current_render_mode = "shaded";
 
     // Validation results (Phase 8). findings[i] is list row i.
     HWND validation_window = nullptr;
@@ -178,6 +229,8 @@ struct App {
 };
 
 App g;
+
+using app::refresh_material_roots;
 
 // --- Small helpers -----------------------------------------------------------
 
@@ -221,8 +274,95 @@ void set_font(HWND hwnd, HFONT font) {
     SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
-HFONT stock_font() {
+// UI fonts are built from an explicit DPI rather than taken from
+// DEFAULT_GUI_FONT: a stock GUI face is not rescaled under Per-Monitor V2, so
+// reusing one leaves every native control (STATIC, LISTBOX, EDIT, the status
+// bar, the tree view) at the wrong size once a window moves to a monitor with a
+// different scale.
+//
+// The cache is keyed on the DPI rather than on the main window's g.dpi because
+// auxiliary windows are top-level and independent: dragging the validation
+// window to a 150% monitor must not resize the main window's fonts.
+//
+// Entries are never deleted from here. WM_SETFONT does not transfer ownership
+// and DeleteObject silently fails on a font that a control still holds, so a
+// face is only retired once refresh_fonts() has pushed replacements out. With
+// at most a handful of distinct DPIs in a session the footprint is a few
+// hundred bytes.
+struct FontEntry {
+    int dpi;
+    HFONT regular;
+    HFONT bold;
+    HFONT mono;
+};
+
+HFONT build_face(int dpi, DWORD weight, bool mono) {
+    LOGFONTW lf{};
+    lf.lfHeight = -MulDiv(mono ? 13 : 9, dpi, 72); // 13pt mono / 9pt UI
+    lf.lfWeight = weight;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    if (mono) {
+        lf.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
+        lstrcpynW(lf.lfFaceName, L"Consolas", LF_FACESIZE);
+    } else {
+        lf.lfPitchAndFamily = FF_DONTCARE;
+        lstrcpynW(lf.lfFaceName, L"Segoe UI", LF_FACESIZE);
+    }
+    return CreateFontIndirectW(&lf);
+}
+
+FontEntry& font_entry(int dpi) {
+    static FontEntry cache[4] = {};
+    for (FontEntry& entry : cache) {
+        if (entry.dpi == dpi && entry.regular != nullptr) {
+            return entry;
+        }
+    }
+    for (FontEntry& entry : cache) {
+        if (entry.regular == nullptr) {
+            entry.dpi = dpi;
+            entry.regular = build_face(dpi, FW_NORMAL, false);
+            entry.bold = build_face(dpi, FW_BOLD, false);
+            entry.mono = build_face(dpi, FW_NORMAL, true);
+            return entry;
+        }
+    }
+    // More DPIs than cache slots (pathological, e.g. several monitors plus
+    // scale changes): reuse the first slot rather than growing unbounded.
+    cache[0].dpi = dpi;
+    cache[0].regular = build_face(dpi, FW_NORMAL, false);
+    cache[0].bold = build_face(dpi, FW_BOLD, false);
+    cache[0].mono = build_face(dpi, FW_NORMAL, true);
+    return cache[0];
+}
+
+HFONT ui_font_at(int dpi, DWORD weight) {
+    const HFONT face = (weight == FW_BOLD) ? font_entry(dpi).bold : font_entry(dpi).regular;
+    if (face != nullptr) {
+        return face;
+    }
     return static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+}
+
+HFONT ui_font(DWORD weight) {
+    return ui_font_at(g.dpi, weight);
+}
+
+HFONT mono_font_at(int dpi) {
+    const HFONT face = font_entry(dpi).mono;
+    if (face != nullptr) {
+        return face;
+    }
+    return static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+}
+
+HFONT mono_font() {
+    return mono_font_at(g.dpi);
+}
+
+HFONT stock_font() {
+    return ui_font(FW_NORMAL);
 }
 
 // Scales a 96-DPI design unit to the current system DPI.
@@ -230,28 +370,46 @@ int dp(int value) {
     return MulDiv(value, g.dpi, 96);
 }
 
-HFONT bold_font() {
-    static HFONT font = nullptr;
-    if (font == nullptr) {
-        LOGFONTW lf{};
-        GetObjectW(GetStockObject(DEFAULT_GUI_FONT), sizeof(lf), &lf);
-        lf.lfWeight = FW_BOLD;
-        font = CreateFontIndirectW(&lf);
+// Re-applies the UI fonts to every native control under `root`, using the DPI
+// of that window rather than the main window's. Call after handling
+// WM_DPICHANGED, once the window has been resized.
+void refresh_fonts(HWND root) {
+    if (!IsWindow(root)) {
+        return;
     }
-    return font;
-}
+    const int dpi = ui::theming::metrics_for(root).dpi;
+    FontEntry& entry = font_entry(dpi);
+    if (entry.regular == nullptr) {
+        return;
+    }
 
-HFONT mono_font() {
-    static HFONT font = nullptr;
-    if (font == nullptr) {
-        LOGFONTW lf{};
-        lf.lfHeight = -dp(13);
-        lf.lfCharSet = DEFAULT_CHARSET;
-        lf.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
-        lstrcpynW(lf.lfFaceName, L"Consolas", LF_FACESIZE);
-        font = CreateFontIndirectW(&lf);
+    struct Context {
+        HFONT regular;
+        HFONT bold;
+        HFONT mono;
+    } context{entry.regular, entry.bold, entry.mono};
+
+    ::EnumChildWindows(
+        root,
+        [](HWND child, LPARAM param) -> BOOL {
+            const auto* ctx = reinterpret_cast<Context*>(param);
+            wchar_t class_name[64] = {};
+            const int length = ::GetClassNameW(child, class_name, 64);
+            // Bold is reserved for the panel group titles, which are STATIC
+            // controls created through the panel rebuild path.
+            const bool is_title = length > 0 && _wcsicmp(class_name, L"Static") == 0;
+            ::SendMessageW(child, WM_SETFONT,
+                           reinterpret_cast<WPARAM>(is_title ? ctx->bold : ctx->regular),
+                           TRUE);
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&context));
+
+    // The raw VMT editor keeps the monospaced face; EnumChildWindows above gave
+    // it the proportional one along with everything else.
+    if (g.text_edit != nullptr && IsWindow(g.text_edit)) {
+        set_font(g.text_edit, context.mono);
     }
-    return font;
 }
 
 const char kBom[] = "\xEF\xBB\xBF";
@@ -347,7 +505,27 @@ void update_panel_scrollbar() {
 
 // --- Status / title ----------------------------------------------------------
 
+// Keeps the Edit menu's enabled state in sync with the session (called from
+// update_title(), which every edit path already calls).
+void sync_edit_menu() {
+    HMENU menu = GetMenu(g.main);
+    if (menu == nullptr) {
+        return;
+    }
+    EnableMenuItem(menu, IDM_UNDO,
+                   MF_BYCOMMAND | (g.session.can_undo() ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(menu, IDM_REDO,
+                   MF_BYCOMMAND | (g.session.can_redo() ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(menu, IDM_REVERT,
+                   MF_BYCOMMAND | (g.session.can_revert() ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(menu, IDM_SAVE_TO_GAME,
+                   MF_BYCOMMAND | (g.session.has_document() && !g.settings.last_game_dir.empty()
+                                       ? MF_ENABLED
+                                       : MF_GRAYED));
+}
+
 void update_title() {
+    sync_edit_menu();
     std::string title = g.session.display_name();
     if (g.session.dirty()) {
         title += " *";
@@ -364,6 +542,11 @@ void update_status() {
         if (!text.empty()) {
             text += "  |  shader: ";
             text += std::string(document->shader());
+        }
+        if (g.session.is_vtf() && g.session.vtf_info() != nullptr) {
+            const vtf::VtfInfo* info = g.session.vtf_info();
+            text += "  |  VTF " + info->format_name + " " +
+                    std::to_string(info->width) + "x" + std::to_string(info->height);
         }
         first = to_wide(text);
     } else {
@@ -411,6 +594,51 @@ void show_error_box(const vmt::Error& error) {
 }
 
 // --- Panel construction ------------------------------------------------------
+
+// Repopulates the shader dropdown and selects the document's current shader.
+// A shader outside the catalog (a game-specific one, or an empty document) is
+// prepended so it stays visible: otherwise picking a different shader would
+// silently replace it with whatever the combo happened to land on.
+void refresh_shader_combo() {
+    if (g.shader_combo == nullptr) {
+        return;
+    }
+
+    std::string current;
+    if (g.session.has_document()) {
+        current = std::string(g.session.document()->shader());
+    }
+
+    const std::vector<std::string> names =
+        ui::shader_picker_names(g.schemas_loaded ? &g.schemas : nullptr);
+
+    int selection = -1;
+    {
+        const int index = ui::find_shader_picker_index(names, current);
+        if (index < 0 && !current.empty()) {
+            selection = 0; // custom shader, inserted below before the catalog
+        } else {
+            selection = index;
+        }
+    }
+
+    const bool was_rebuilding = g.rebuilding;
+    g.rebuilding = true;
+    SendMessageW(g.shader_combo, CB_RESETCONTENT, 0, 0);
+    if (selection == 0) {
+        SendMessageW(g.shader_combo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(to_wide(current).c_str()));
+    }
+    for (const std::string& name : names) {
+        SendMessageW(g.shader_combo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(to_wide(name).c_str()));
+    }
+    SendMessageW(g.shader_combo, CB_SETCURSEL, selection, 0);
+    // Nothing to rename before a material is open: there is no header to
+    // rewrite, so the dropdown stays inert instead of failing on click.
+    EnableWindow(g.shader_combo, g.session.has_document() ? TRUE : FALSE);
+    g.rebuilding = was_rebuilding;
+}
 
 std::string format_number(vmt::ParamType type, double value) {
     if (type == vmt::ParamType::Int) {
@@ -493,7 +721,7 @@ void rebuild_panel() {
         HWND title = CreateWindowExW(0, L"STATIC", to_wide(group.name).c_str(),
                                      WS_CHILD | WS_VISIBLE, dp(8), y, content_width, dp(18),
                                      g.panel, nullptr, g.instance, nullptr);
-        set_font(title, bold_font());
+        set_font(title, ui_font(FW_BOLD));
         g.panel_items.push_back(PanelItem{title, dp(8), y, content_width, dp(18)});
         y += dp(22);
 
@@ -520,13 +748,11 @@ void rebuild_panel() {
             const int check_id = ID_ROW_CHECK_BASE + static_cast<int>(index);
 
             if (row.type == vmt::ParamType::Bool) {
-                ui_row.check = CreateWindowExW(0, L"BUTTON", L"",
-                                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                               dp(kRowEditX), y + dp(4), dp(22), dp(20),
-                                               g.panel, reinterpret_cast<HMENU>(
-                                                   static_cast<INT_PTR>(check_id)),
-                                               g.instance, nullptr);
-                set_font(ui_row.check, stock_font());
+                // Empty label: the row name is already drawn by the STATIC to
+                // the left, so only the box itself should be rendered.
+                ui_row.check = ui::controls::ThemeButton::create(
+                    g.panel, check_id, std::wstring(), dp(kRowEditX), y + dp(4), dp(22), dp(20),
+                    ui::controls::ButtonKind::Checkbox, ui::controls::ButtonStyle::Subtle);
                 g.panel_items.push_back(
                     PanelItem{ui_row.check, dp(kRowEditX), y + dp(4), dp(22), dp(20)});
                 bool checked = false;
@@ -537,16 +763,13 @@ void rebuild_panel() {
                 SendMessageW(ui_row.check, BM_SETCHECK,
                              checked ? BST_CHECKED : BST_UNCHECKED, 0);
             } else if (row.type == vmt::ParamType::Enum) {
-                ui_row.combo = CreateWindowExW(0, L"COMBOBOX", L"",
-                                               WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST |
-                                                   WS_VSCROLL,
-                                               dp(kRowEditX), y + dp(3),
-                                               content_width - dp(kRowEditX) + dp(8),
-                                               dp(200),
-                                               g.panel, reinterpret_cast<HMENU>(
-                                                   static_cast<INT_PTR>(combo_id)),
-                                               g.instance, nullptr);
-                set_font(ui_row.combo, stock_font());
+                // The old COMBOBOX spent its creation height on the drop-down
+                // list; ThemeCombo has no such reservation - it sizes its popup
+                // from the item list - so the height here is the closed control
+                // height, i.e. the row rect pushed into panel_items below.
+                ui_row.combo = ui::controls::ThemeCombo::create(
+                    g.panel, combo_id, dp(kRowEditX), y + dp(3),
+                    content_width - dp(kRowEditX) + dp(8), dp(24));
                 g.panel_items.push_back(
                     PanelItem{ui_row.combo, dp(kRowEditX), y + dp(3),
                               content_width - dp(kRowEditX) + dp(8), dp(24)});
@@ -618,14 +841,8 @@ void rebuild_panel() {
 
                     const int slider_x = dp(kRowEditX) + dp(kRowEditWidth) + dp(8);
                     const int slider_width = std::max(dp(40), content_width - slider_x + dp(8));
-                    ui_row.slider = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
-                                                    WS_CHILD | WS_VISIBLE | TBS_HORZ |
-                                                        TBS_NOTICKS,
-                                                    slider_x, y + dp(5), slider_width, dp(20),
-                                                    g.panel,
-                                                    reinterpret_cast<HMENU>(
-                                                        static_cast<INT_PTR>(slider_id)),
-                                                    g.instance, nullptr);
+                    ui_row.slider = ui::controls::ThemeSlider::create(
+                        g.panel, slider_id, slider_x, y + dp(5), slider_width, dp(20));
                     g.panel_items.push_back(
                         PanelItem{ui_row.slider, slider_x, y + dp(5), slider_width, dp(20)});
 
@@ -672,12 +889,17 @@ void rebuild_panel() {
     update_panel_scrollbar();
     set_panel_scroll(std::min(g.scroll_y, std::max(0, g.content_height - static_cast<int>(rc.bottom))));
     g.rebuilding = false;
+
+    // The dropdown follows the document, which rebuild_panel() is the single
+    // place every session change funnels through (open, panel edit, undo/redo
+    // and the raw text editor all end here).
+    refresh_shader_combo();
 }
 
 // --- Session -> UI -----------------------------------------------------------
 
-void refresh_text_control() {
-    if (GetFocus() == g.text_edit) {
+void refresh_text_control(bool force = false) {
+    if (!force && GetFocus() == g.text_edit) {
         return; // never fight the user's caret
     }
     const std::wstring text = make_control_text(g.session.text(), g.encoding);
@@ -710,7 +932,15 @@ UINT shape_menu_id(ui::PreviewShape shape) {
     case ui::PreviewShape::Cylinder:
         return IDM_SHAPE_CYLINDER;
     case ui::PreviewShape::Plane:
-        break;
+        return IDM_SHAPE_PLANE;
+    case ui::PreviewShape::BrushWall:
+        return IDM_SHAPE_BRUSH_WALL;
+    case ui::PreviewShape::BrushFloor:
+        return IDM_SHAPE_BRUSH_FLOOR;
+    case ui::PreviewShape::BrushCube:
+        return IDM_SHAPE_BRUSH_CUBE;
+    case ui::PreviewShape::BrushDisplacement:
+        return IDM_SHAPE_BRUSH_DISPLACEMENT;
     }
     return IDM_SHAPE_PLANE;
 }
@@ -718,8 +948,19 @@ UINT shape_menu_id(ui::PreviewShape shape) {
 void sync_shape_menu() {
     HMENU menu = GetMenu(g.main);
     if (menu != nullptr) {
-        CheckMenuRadioItem(menu, IDM_SHAPE_SPHERE, IDM_SHAPE_PLANE,
+        CheckMenuRadioItem(menu, IDM_SHAPE_SPHERE, IDM_SHAPE_BRUSH_DISPLACEMENT,
                            shape_menu_id(g.preview_options.shape), MF_BYCOMMAND);
+    }
+}
+
+void sync_render_mode_menu() {
+    HMENU menu = GetMenu(g.main);
+    if (menu != nullptr) {
+        UINT id = IDM_RENDER_MODE_SHADED;
+        if (g.current_render_mode == "wireframe") id = IDM_RENDER_MODE_WIREFRAME;
+        else if (g.current_render_mode == "albedo") id = IDM_RENDER_MODE_ALBEDO;
+        else if (g.current_render_mode == "normals") id = IDM_RENDER_MODE_NORMALS;
+        CheckMenuRadioItem(menu, IDM_RENDER_MODE_SHADED, IDM_RENDER_MODE_NORMALS, id, MF_BYCOMMAND);
     }
 }
 
@@ -754,11 +995,65 @@ std::filesystem::path thumbnail_root_dir() {
     return local_data_dir() / L"thumbnails";
 }
 
+std::string prepare_preview_text(const std::string& original_text) {
+    auto parsed = vmt::Document::parse(original_text);
+    if (!parsed) {
+        return original_text;
+    }
+    vmt::Document doc = std::move(parsed.value());
+    std::string shader(doc.shader());
+    std::string lower_shader = shader;
+    for (char& c : lower_shader) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    // Brush shapes natively support LightmappedGeneric, WorldVertexTransition, etc. with lightmaps!
+    if (g.preview_options.shape == ui::PreviewShape::BrushWall ||
+        g.preview_options.shape == ui::PreviewShape::BrushFloor ||
+        g.preview_options.shape == ui::PreviewShape::BrushCube ||
+        g.preview_options.shape == ui::PreviewShape::BrushDisplacement) {
+        return original_text;
+    }
+    if (lower_shader == "lightmappedgeneric" || lower_shader == "worldvertextransition" ||
+        lower_shader == "worldtwotextureblend") {
+        (void)doc.set_shader("VertexLitGeneric");
+        return doc.serialize();
+    }
+    return original_text;
+}
+
 bool write_preview_file(const std::string& text) {
     if (g.preview_root.empty()) {
         return false;
     }
-    return ui::write_preview_material_at(g.preview_root, g.preview_material_name, text).ok();
+    if (g.session.is_vtf() && !g.session.path().empty()) {
+        const std::string tex_name = vtf_texture_path(g.session.path());
+        std::error_code ec;
+        const std::filesystem::path target_vtf =
+            g.preview_root / L"materials" / to_wide(tex_name + ".vtf");
+        std::filesystem::create_directories(target_vtf.parent_path(), ec);
+        std::filesystem::copy_file(g.session.path(), target_vtf,
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+    }
+
+    const std::string preview_text = prepare_preview_text(text);
+
+    // Keep the named preview override on disk for reference
+    (void)ui::write_preview_material_at(g.preview_root, g.preview_material_name, preview_text);
+
+    // Unique sequence name to bypass Source Engine's in-memory shader immutability
+    ++g.preview_revision;
+    const std::string seq_name = "vmtviewer_preview_" + std::to_string(g.preview_revision);
+    const bool ok = ui::write_preview_material_at(g.preview_root, seq_name, preview_text).ok();
+    if (ok) {
+        if (g.preview_revision > 2) {
+            std::error_code ec;
+            const std::filesystem::path old_file =
+                g.preview_root / L"materials" / to_wide("vmtviewer_preview_" + std::to_string(g.preview_revision - 2) + ".vmt");
+            std::filesystem::remove(old_file, ec);
+        }
+        g.active_engine_material = seq_name;
+    }
+    return ok;
 }
 
 bridge::PreviewShape to_bridge_shape(ui::PreviewShape shape) {
@@ -770,7 +1065,15 @@ bridge::PreviewShape to_bridge_shape(ui::PreviewShape shape) {
     case ui::PreviewShape::Cylinder:
         return bridge::PreviewShape::Cylinder;
     case ui::PreviewShape::Plane:
-        break;
+        return bridge::PreviewShape::Plane;
+    case ui::PreviewShape::BrushWall:
+        return bridge::PreviewShape::BrushWall;
+    case ui::PreviewShape::BrushFloor:
+        return bridge::PreviewShape::BrushFloor;
+    case ui::PreviewShape::BrushCube:
+        return bridge::PreviewShape::BrushCube;
+    case ui::PreviewShape::BrushDisplacement:
+        return bridge::PreviewShape::BrushDisplacement;
     }
     return bridge::PreviewShape::Plane;
 }
@@ -796,6 +1099,71 @@ void apply_preview_to_engine() {
     }
     (void)g.engine->set_preview_shape(to_bridge_shape(g.preview_options.shape));
     (void)g.engine->set_lighting(to_bridge_lighting(g.preview_options.lighting));
+    (void)g.engine->set_render_mode(g.current_render_mode);
+}
+
+bool is_path_inside_game_dir(const std::filesystem::path& path, const std::filesystem::path& game_dir) {
+    if (path.empty() || game_dir.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    const std::filesystem::path game = std::filesystem::weakly_canonical(game_dir, ec);
+    if (ec) return false;
+    ec.clear();
+    const std::filesystem::path target = std::filesystem::weakly_canonical(path, ec);
+    if (ec) return false;
+    ec.clear();
+    const std::filesystem::path rel = std::filesystem::relative(target, game, ec);
+    if (ec || rel.empty() || rel.is_absolute() || rel.has_root_name()) {
+        return false;
+    }
+    const std::string generic = rel.generic_string();
+    return generic.rfind("..", 0) != 0;
+}
+
+void mount_loose_root_in_engine(const std::filesystem::path& mat_root) {
+    if (mat_root.empty() || !g.engine || !g.engine->initialized()) {
+        return;
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_directory(mat_root, ec)) {
+        return;
+    }
+
+    const auto already_mounted = [](const std::filesystem::path& p) {
+        for (const std::filesystem::path& mounted : g.engine_mounted_roots) {
+            if (mounted == p) return true;
+        }
+        return false;
+    };
+
+    if (!already_mounted(mat_root)) {
+        const vmt::Result<void> res = g.engine->mount_directory(mat_root, true);
+        if (!res) {
+            log_write("ENG ", "failed to mount loose material root '" + mat_root.string() +
+                                  "': " + res.error().message);
+        } else {
+            g.engine_mounted_roots.push_back(mat_root);
+            log_write("ENG ", "mounted loose material root: " + mat_root.string());
+        }
+    }
+
+    // Also mount game root if mat_root is inside one (e.g. contains gameinfo.txt or parent is a game root)
+    const std::filesystem::path parent = mat_root.parent_path();
+    if (!parent.empty() && parent != mat_root && parent != parent.parent_path()) {
+        std::error_code ec2;
+        const bool is_game = std::filesystem::is_regular_file(mat_root / L"gameinfo.txt", ec2) ||
+                             std::filesystem::is_regular_file(parent / L"gameinfo.txt", ec2) ||
+                             std::filesystem::is_directory(parent / L"materials", ec2) ||
+                             std::filesystem::is_directory(parent / L"bin", ec2);
+        if (is_game && !already_mounted(parent)) {
+            const vmt::Result<void> res_parent = g.engine->mount_directory(parent, false);
+            if (res_parent) {
+                g.engine_mounted_roots.push_back(parent);
+                log_write("ENG ", "mounted game root: " + parent.string());
+            }
+        }
+    }
 }
 
 // The material name the engine should preview for the current session:
@@ -847,7 +1215,20 @@ std::string preview_name_for_file(const std::filesystem::path& path) {
 void configure_preview_sync() {
     g.preview_sync.configure(
         [](const std::string& text) { return write_preview_file(text); },
-        []() { return g.engine != nullptr && g.engine->reload_material().ok(); });
+        []() {
+            if (!g.engine || !g.engine->initialized()) {
+                return false;
+            }
+            const std::string mat_name = !g.active_engine_material.empty()
+                                             ? g.active_engine_material
+                                             : g.preview_material_name;
+            const vmt::Result<void> applied = g.engine->set_material(mat_name);
+            if (applied) {
+                g.engine_material_name = mat_name;
+                return true;
+            }
+            return false;
+        });
 }
 
 // Records an edit in the sync controller and (re)arms or cancels the debounce
@@ -875,8 +1256,11 @@ void stop_engine_preview() {
     }
     g.preview_active = false;
     g.preview_mounted = false;
+    g.engine_mounted_roots.clear();
     g.engine_material_name.clear();
     g.engine_active_key.clear();
+    g.active_engine_material.clear();
+    g.preview_revision = 0;
     g.engine_note.clear();
 }
 
@@ -1067,6 +1451,14 @@ bool ensure_engine_running(std::wstring& error, bool interactive) {
         g.preview_mounted = true;
     }
 
+    for (const std::filesystem::path& loose : g.loose_material_roots) {
+        mount_loose_root_in_engine(loose);
+    }
+    if (!g.session.material_root().empty() &&
+        !is_path_inside_game_dir(g.session.path(), g.settings.last_game_dir)) {
+        mount_loose_root_in_engine(g.session.material_root());
+    }
+
     apply_preview_to_engine();
     return true;
 }
@@ -1118,15 +1510,18 @@ bool start_preview_impl(bool interactive) {
         return false;
     }
 
-    const bool name_changed = g.engine_material_name != g.preview_material_name;
+    const std::string mat_to_set = !g.active_engine_material.empty()
+                                       ? g.active_engine_material
+                                       : g.preview_material_name;
+    const bool name_changed = g.engine_material_name != mat_to_set;
     vmt::Result<void> applied = vmt::Ok();
     if (name_changed || !g.preview_active) {
-        applied = g.engine->set_material(g.preview_material_name);
+        applied = g.engine->set_material(mat_to_set);
         if (applied) {
-            g.engine_material_name = g.preview_material_name;
+            g.engine_material_name = mat_to_set;
         }
     } else {
-        applied = g.engine->reload_material();
+        applied = g.engine->set_material(mat_to_set);
     }
     if (!applied) {
         preview_report_failure(interactive, L"preview: the material could not be loaded (see engine.log)",
@@ -1162,8 +1557,7 @@ void refresh_preview_after_save() {
     const vmt::Result<void> flushed = g.preview_sync.flush_now(
         g.session.text(), g.session.text_is_valid(), g.session.last_error());
     if (flushed) {
-        g.engine_note = L"engine preview active (" +
-                        to_wide(std::string(ui::kPreviewMaterialName)) + L")";
+        g.engine_note = L"engine preview active (" + to_wide(g.preview_material_name) + L")";
     } else {
         g.engine_note = L"preview: " + to_wide(flushed.error().message);
     }
@@ -1226,6 +1620,7 @@ void refresh_validation_results() {
         if (g.validation_window == nullptr) {
             return;
         }
+        ui::controls::apply_chrome(g.validation_window);
         g.validation_list = CreateWindowExW(
             0, L"LISTBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
@@ -1255,6 +1650,8 @@ void run_validation() {
         return;
     }
 
+    app::refresh_material_roots();
+
     std::vector<ui::Finding> findings;
     if (!g.session.text_is_valid()) {
         const vmt::Error& error = g.session.last_error();
@@ -1263,8 +1660,16 @@ void run_validation() {
     } else {
         ui::ValidationOptions options;
         options.schemas = g.schemas_loaded ? &g.schemas : nullptr;
+        options.material_roots = g.material_roots;
         if (g.engine && g.engine->initialized()) {
             options.resolve_texture = [](const std::string& name) {
+                std::error_code ec;
+                const std::filesystem::path rel = "materials/" + name + ".vtf";
+                for (const auto& root : g.material_roots) {
+                    if (std::filesystem::is_regular_file(root / rel, ec)) {
+                        return ui::TextureStatus::Found;
+                    }
+                }
                 const vmt::Result<bool> exists =
                     g.engine->file_exists("materials/" + name + ".vtf");
                 if (!exists) {
@@ -1273,7 +1678,21 @@ void run_validation() {
                 return exists.value() ? ui::TextureStatus::Found
                                       : ui::TextureStatus::Missing;
             };
+        } else if (!g.material_roots.empty()) {
+            options.resolve_texture = [](const std::string& name) {
+                std::error_code ec;
+                const std::filesystem::path rel = "materials/" + name + ".vtf";
+                for (const auto& root : g.material_roots) {
+                    if (std::filesystem::is_regular_file(root / rel, ec)) {
+                        return ui::TextureStatus::Found;
+                    }
+                }
+                return ui::TextureStatus::Missing;
+            };
         }
+        options.suggest_texture = [](const std::string& name) {
+            return ui::find_similar_texture_name(name, g.material_roots);
+        };
         findings = ui::validate_document(*g.session.document(), options);
     }
 
@@ -1296,6 +1715,18 @@ void run_validation() {
     g.validation_summary = L"validation: " + std::to_wstring(errors) + L" error(s), " +
                            std::to_wstring(warnings) + L" warning(s), " +
                            std::to_wstring(infos) + L" info";
+    log_write("VAL ", "validation completed: " + std::to_string(errors) + " error(s), " +
+                          std::to_string(warnings) + " warning(s), " + std::to_string(infos) + " info");
+    for (const ui::Finding& finding : findings) {
+        const std::string loc = (finding.line > 0) ? ("line " + std::to_string(finding.line) + ": ") : "";
+        if (finding.severity == ui::Severity::Error) {
+            log_write("ERR ", loc + finding.message);
+        } else if (finding.severity == ui::Severity::Warning) {
+            log_write("WARN", loc + finding.message);
+        } else {
+            log_write("VAL ", loc + finding.message);
+        }
+    }
     g.findings = std::move(findings);
     refresh_validation_results();
     update_status();
@@ -1305,15 +1736,47 @@ void clear_validation_summary() {
     g.validation_summary.clear();
 }
 
+// Writes the chosen shader into the document header. The body is left alone: the
+// parameter panel below simply starts following the new shader's schema.
+void apply_shader(const std::string& name) {
+    if (g.rebuilding || name.empty()) {
+        return;
+    }
+    if (g.session.has_document() &&
+        ui::shader_name_equal(g.session.document()->shader(), name)) {
+        return; // already the active shader
+    }
+
+    const vmt::Result<void> result = g.session.set_shader(name);
+    if (!result) {
+        show_error_box(result.error());
+        refresh_shader_combo(); // put the real current shader back
+        update_status();
+        return;
+    }
+
+    log_write("FILE", "shader changed to " + name);
+    KillTimer(g.main, kPanelRebuildTimer);
+    refresh_text_control();
+    rebuild_panel();
+    clear_validation_summary();
+    note_preview_change();
+    update_title();
+    update_status();
+}
+
 void apply_panel_value(std::size_t index, const std::string& value) {
     if (g.rebuilding || index >= g.rows.size()) {
         return;
     }
-    const vmt::Result<void> result = g.session.set_parameter(g.rows[index].name, value);
+    const std::string& param_name = g.rows[index].name;
+    const vmt::Result<void> result = g.session.set_parameter(param_name, value);
     if (!result) {
+        log_write("WARN", "failed to set parameter '" + param_name + "': " + result.error().message);
         update_status();
         return;
     }
+    log_write("EDIT", "parameter '" + param_name + "' = '" + value + "'");
     refresh_text_control();
     note_preview_change();
     clear_validation_summary();
@@ -1321,16 +1784,49 @@ void apply_panel_value(std::size_t index, const std::string& value) {
     update_status();
 }
 
+// Defined after open_path(); the guard asks before the session is replaced.
+void do_save(bool save_as);
+bool confirm_discard(const wchar_t* question);
+
 bool open_path(const std::filesystem::path& path) {
+    if (!confirm_discard(L"Save before opening another material?")) {
+        return false;
+    }
+    log_write("FILE", "opening " + path.string());
     const vmt::Result<void> result = g.session.open_file(path);
     if (!result) {
         show_error_box(result.error());
+        log_write("ERR ", "failed to open " + path.string() + ": " + result.error().message);
         update_status();
         return false;
+    }
+    const std::filesystem::path mat_root = g.session.material_root();
+    const bool outside_game = !mat_root.empty() &&
+        !is_path_inside_game_dir(path, g.settings.last_game_dir);
+    if (outside_game) {
+        bool already_known = false;
+        for (const std::filesystem::path& existing : g.loose_material_roots) {
+            if (existing == mat_root) {
+                already_known = true;
+                break;
+            }
+        }
+        if (!already_known) {
+            g.loose_material_roots.push_back(mat_root);
+        }
+        refresh_material_roots();
+        mount_loose_root_in_engine(mat_root);
+    } else {
+        refresh_material_roots();
     }
     g.preview_material_name = preview_name_for_file(path);
     log_write("FILE", "opened " + path.string() + " (preview name '" +
                           g.preview_material_name + "')");
+    if (g.session.has_document()) {
+        const auto* doc = g.session.document();
+        log_write("FILE", "shader: " + std::string(doc->shader()) + ", " +
+                              std::to_string(doc->parameters().size()) + " parameter(s)");
+    }
     KillTimer(g.main, kPanelRebuildTimer);
     refresh_text_control();
     rebuild_panel();
@@ -1354,11 +1850,15 @@ void do_open_dialog() {
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g.main;
-    ofn.lpstrFilter = L"VMT materials (*.vmt)\0*.vmt\0All files (*.*)\0*.*\0\0";
+    ofn.lpstrFilter =
+        L"Source materials and textures (*.vmt;*.vtf)\0*.vmt;*.vtf\0"
+        L"VMT materials (*.vmt)\0*.vmt\0"
+        L"VTF textures (*.vtf)\0*.vtf\0"
+        L"All files (*.*)\0*.*\0\0";
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = 4 * MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    ofn.lpstrTitle = L"Open VMT material";
+    ofn.lpstrTitle = L"Open material or texture";
     if (GetOpenFileNameW(&ofn) != FALSE) {
         open_path(std::filesystem::path(buffer));
     }
@@ -1371,15 +1871,24 @@ void do_save(bool save_as) {
     }
 
     std::filesystem::path target = g.session.path();
-    if (save_as || target.empty()) {
+    const bool is_vtf = g.session.is_vtf() ||
+                        (!target.empty() && target.extension() == L".vtf");
+    if (save_as || target.empty() || is_vtf) {
         wchar_t buffer[4 * MAX_PATH] = {};
         if (!target.empty()) {
-            lstrcpynW(buffer, target.wstring().c_str(), 4 * MAX_PATH);
+            std::filesystem::path suggested = target;
+            if (is_vtf) {
+                suggested.replace_extension(L".vmt");
+            }
+            lstrcpynW(buffer, suggested.wstring().c_str(), 4 * MAX_PATH);
         } else if (g.session.has_document()) {
             // The document name may be a game-relative path ("brick/foo.vmt");
             // only the file name belongs in the dialog's file field.
-            const std::filesystem::path suggested(
+            std::filesystem::path suggested(
                 std::filesystem::path(g.session.document()->name()).filename());
+            if (suggested.extension() == L".vtf") {
+                suggested.replace_extension(L".vmt");
+            }
             lstrcpynW(buffer, suggested.wstring().c_str(), 4 * MAX_PATH);
         }
         OPENFILENAMEW ofn{};
@@ -1400,6 +1909,146 @@ void do_save(bool save_as) {
     const vmt::Result<void> result = save_as ? g.session.save_as(target) : g.session.save();
     if (!result) {
         show_error_box(result.error());
+        log_write("ERR ", "failed to save material: " + result.error().message);
+        update_status();
+        return;
+    }
+    log_write("FILE", "saved " + (save_as ? target.string() : g.session.path().string()));
+    if (save_as) {
+        g.preview_material_name = preview_name_for_file(target);
+        const std::filesystem::path mat_root = g.session.material_root();
+        if (!mat_root.empty() && !is_path_inside_game_dir(target, g.settings.last_game_dir)) {
+            bool already_known = false;
+            for (const std::filesystem::path& existing : g.loose_material_roots) {
+                if (existing == mat_root) {
+                    already_known = true;
+                    break;
+                }
+            }
+            if (!already_known) {
+                g.loose_material_roots.push_back(mat_root);
+            }
+            refresh_material_roots();
+            mount_loose_root_in_engine(mat_root);
+        } else {
+            refresh_material_roots();
+        }
+    }
+    g.settings.remember_file(target.string());
+    refresh_recent_list();
+    save_settings();
+    refresh_preview_after_save();
+    update_title();
+    update_status();
+}
+
+// Ask before replacing the current session. Returns true when it is safe to
+// continue: nothing is dirty, the user chose Discard, or Save succeeded.
+bool confirm_discard(const wchar_t* question) {
+    if (!g.session.dirty()) {
+        return true;
+    }
+    const int answer = MessageBoxW(g.main,
+                                   question != nullptr ? question : L"Save before continuing?",
+                                   kWindowTitle, MB_ICONWARNING | MB_YESNOCANCEL);
+    if (answer == IDCANCEL) {
+        return false;
+    }
+    if (answer == IDYES) {
+        do_save(false);
+        return !g.session.dirty(); // saving failed or the Save As dialog was cancelled
+    }
+    return true;
+}
+
+// Applies a history operation and refreshes every view that mirrors the
+// session (text box, panel, validation summary, live preview, title, status).
+void sync_after_history_change() {
+    KillTimer(g.main, kPanelRebuildTimer);
+    // Force the text box: undo/redo can be triggered while it holds the focus.
+    refresh_text_control(/*force=*/true);
+    rebuild_panel();
+    clear_validation_summary();
+    note_preview_change();
+    update_title();
+    update_status();
+}
+
+void do_undo() {
+    if (g.session.undo()) {
+        sync_after_history_change();
+    }
+}
+
+void do_redo() {
+    if (g.session.redo()) {
+        sync_after_history_change();
+    }
+}
+
+void do_revert() {
+    if (g.session.revert()) {
+        sync_after_history_change();
+    }
+}
+
+// Writes the edited material into the game's own materials/ folder as a loose
+// override (the standard modding practice: loose files beat VPK entries in the
+// engine search order). Only offered when the session maps to a game-relative
+// material name.
+void do_save_to_game() {
+    if (!g.session.has_document()) {
+        MessageBoxW(g.main, L"Open a VMT material first.", kWindowTitle,
+                    MB_ICONINFORMATION | MB_OK);
+        return;
+    }
+    if (g.settings.last_game_dir.empty()) {
+        MessageBoxW(g.main,
+                    L"Connect a game first (Game > Connection) so the materials folder is known.",
+                    kWindowTitle, MB_ICONINFORMATION | MB_OK);
+        return;
+    }
+
+    // The browser-opened name is authoritative; loose files fall back to the
+    // document's own name when it is a game-relative material path.
+    std::string name = g.preview_material_name;
+    if (name.empty() || name == ui::kPreviewMaterialName) {
+        name = g.session.document() != nullptr
+                   ? ui::material_name_from_game_path(g.session.document()->name())
+                   : std::string();
+    }
+    if (name.empty() || name == ui::kPreviewMaterialName) {
+        MessageBoxW(g.main,
+                    L"This material has no game-relative name, so it cannot be written into "
+                    L"the game folder. Use Save As instead.",
+                    kWindowTitle, MB_ICONINFORMATION | MB_OK);
+        return;
+    }
+
+    const std::filesystem::path target =
+        std::filesystem::path(g.settings.last_game_dir) / L"materials" /
+        std::filesystem::path(name + ".vmt");
+    std::error_code ec;
+    std::filesystem::create_directories(target.parent_path(), ec);
+    if (ec) {
+        MessageBoxW(g.main, L"The game materials folder could not be created.", kWindowTitle,
+                    MB_ICONERROR | MB_OK);
+        return;
+    }
+
+    std::wstring question = L"Write the edited material into the game folder?\n\n" +
+                            target.wstring();
+    if (std::filesystem::is_regular_file(target, ec)) {
+        question += L"\n\nThe existing file will be overwritten.";
+    }
+    if (MessageBoxW(g.main, question.c_str(), kWindowTitle,
+                    MB_ICONQUESTION | MB_OKCANCEL) != IDOK) {
+        return;
+    }
+
+    const vmt::Result<void> result = g.session.save_as(target);
+    if (!result) {
+        show_error_box(result.error());
         update_status();
         return;
     }
@@ -1409,6 +2058,7 @@ void do_save(bool save_as) {
     refresh_preview_after_save();
     update_title();
     update_status();
+    log_write("FILE", "saved material into the game folder: " + target.string());
 }
 
 // --- Layout ------------------------------------------------------------------
@@ -1452,10 +2102,15 @@ void layout() {
     MoveWindow(g.text_edit, left_width, viewport_height, center_width,
                std::max(dp(40), content_height - viewport_height), TRUE);
 
-    MoveWindow(g.advanced_check, left_width + center_width + dp(8), dp(6),
+    const int right_x = left_width + center_width;
+    MoveWindow(g.shader_label, right_x + dp(kShaderLabelX), dp(kShaderRowY),
+               dp(kShaderLabelWidth), dp(20), TRUE);
+    MoveWindow(g.shader_combo, right_x + dp(kShaderComboX), dp(kShaderRowY),
+               right_width - dp(kShaderComboX) - dp(8), dp(22), TRUE);
+    MoveWindow(g.advanced_check, right_x + dp(8), dp(kAdvancedRowY),
                right_width - dp(16), dp(22), TRUE);
-    MoveWindow(g.panel, left_width + center_width, dp(30), right_width,
-               std::max(dp(40), content_height - dp(30)), TRUE);
+    MoveWindow(g.panel, right_x, dp(kPanelTop), right_width,
+               std::max(dp(40), content_height - dp(kPanelTop)), TRUE);
 
     update_panel_scrollbar();
     set_panel_scroll(g.scroll_y);
@@ -1524,6 +2179,15 @@ void on_panel_hscroll(HWND slider) {
 
 LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
+    case WM_ERASEBKGND: {
+        // Painted here rather than through hbrBackground so the colour follows
+        // the live theme; a class background brush is captured at registration
+        // and cannot be re-pointed without re-registering the class.
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wparam), &rc, ui::theming::surface_brush());
+        return 1;
+    }
     case WM_VSCROLL: {
         SCROLLINFO si{};
         si.cbSize = sizeof(si);
@@ -1609,11 +2273,41 @@ LRESULT CALLBACK ViewportProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
 
 LRESULT CALLBACK ValidationProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
+    case WM_ERASEBKGND: {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wparam), &rc, ui::theming::surface_brush());
+        return 1;
+    }
     case WM_SIZE:
         if (g.validation_list != nullptr) {
             MoveWindow(g.validation_list, 0, 0, LOWORD(lparam), HIWORD(lparam), TRUE);
         }
         return 0;
+    case WM_SETTINGCHANGE:
+        if (ui::controls::handle_theme_change(hwnd, lparam)) {
+            return 0;
+        }
+        break;
+    case WM_DPICHANGED: {
+        const RECT* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested != nullptr) {
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        // The window lays its one child out by hand rather than through dp(),
+        // so the frame has to be handed the new client size directly.
+        if (g.validation_list != nullptr) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            MoveWindow(g.validation_list, 0, 0, rc.right, rc.bottom, TRUE);
+        }
+        ui::controls::handle_dpi_change(hwnd);
+        refresh_fonts(hwnd);
+        return 0;
+    }
     case WM_COMMAND:
         if (LOWORD(wparam) == 1 && HIWORD(wparam) == LBN_DBLCLK) {
             const LRESULT selection = SendMessageW(g.validation_list, LB_GETCURSEL, 0, 0);
@@ -1638,6 +2332,32 @@ LRESULT CALLBACK ValidationProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
 
 LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORBTN: {
+        // UxTheme's DarkMode_Explorer recolours these controls' borders and text
+        // but leaves the *background* to the parent, which is what kept the
+        // labels and the recent-files list white inside an otherwise dark
+        // window. Answering here is what actually makes them sit on the palette.
+        HDC dc = reinterpret_cast<HDC>(wparam);
+        SetBkMode(dc, TRANSPARENT);
+        const bool sunken = (message == WM_CTLCOLORLISTBOX || message == WM_CTLCOLOREDIT);
+        SetTextColor(dc, ui::theming::color(ui::theming::ColorRole::Text));
+        SetBkColor(dc, ui::theming::color(sunken ? ui::theming::ColorRole::SurfaceSunken
+                                                 : ui::theming::ColorRole::Surface));
+        return reinterpret_cast<LRESULT>(
+            sunken ? ui::theming::sunken_brush() : ui::theming::surface_brush());
+    }
+
+    case WM_ERASEBKGND: {
+        // See PanelProc: the background is drawn from the live palette so a
+        // theme switch repaints correctly without re-registering the class.
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wparam), &rc, ui::theming::surface_brush());
+        return 1;
+    }
     case WM_SIZE:
         layout();
         return 0;
@@ -1646,6 +2366,41 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
         MINMAXINFO* info = reinterpret_cast<MINMAXINFO*>(lparam);
         info->ptMinTrackSize.x = dp(900);
         info->ptMinTrackSize.y = dp(600);
+        return 0;
+    }
+
+    case WM_SETTINGCHANGE:
+        // lParam is forwarded untouched: the helper recognises the
+        // AppsUseLightTheme broadcast and only then re-themes and repaints.
+        if (ui::controls::handle_theme_change(hwnd, lparam)) {
+            return 0;
+        }
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+
+    case WM_DPICHANGED: {
+        // Per-Monitor V2 (ui/win32/app.manifest). dp() reads g.dpi, so it has
+        // to be refreshed *before* any layout runs or every dimension below
+        // would be computed for the DPI we are leaving.
+        const int new_dpi = LOWORD(wparam);
+        if (new_dpi > 0) {
+            g.dpi = new_dpi;
+        }
+        const RECT* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested != nullptr) {
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        layout();
+        // Panel rows are rebuilt rather than moved: they were sized in design
+        // units against the old g.dpi, and only rebuild_panel() recomputes
+        // both the row rects and the content height the scrollbar needs.
+        rebuild_panel();
+        ui::controls::handle_dpi_change(hwnd);
+        // After the rebuild: the new rows are the ones that need the new face,
+        // and rebuilding replaced every control that was holding the old one.
+        refresh_fonts(hwnd);
         return 0;
     }
 
@@ -1658,6 +2413,10 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
         case ID_OPEN: do_open_dialog(); return 0;
         case ID_SAVE: do_save(false); return 0;
         case ID_SAVE_AS: do_save(true); return 0;
+        case IDM_SAVE_TO_GAME: do_save_to_game(); return 0;
+        case IDM_UNDO: do_undo(); return 0;
+        case IDM_REDO: do_redo(); return 0;
+        case IDM_REVERT: do_revert(); return 0;
         case IDM_EXIT: PostMessageW(hwnd, WM_CLOSE, 0, 0); return 0;
         case IDM_ABOUT:
             show_about_dialog(hwnd);
@@ -1678,7 +2437,11 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
         case IDM_SHAPE_SPHERE:
         case IDM_SHAPE_CUBE:
         case IDM_SHAPE_CYLINDER:
-        case IDM_SHAPE_PLANE: {
+        case IDM_SHAPE_PLANE:
+        case IDM_SHAPE_BRUSH_WALL:
+        case IDM_SHAPE_BRUSH_FLOOR:
+        case IDM_SHAPE_BRUSH_CUBE:
+        case IDM_SHAPE_BRUSH_DISPLACEMENT: {
             ui::PreviewOptions options = g.preview_options;
             switch (id) {
             case IDM_SHAPE_SPHERE:
@@ -1690,6 +2453,21 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
             case IDM_SHAPE_CYLINDER:
                 options.shape = ui::PreviewShape::Cylinder;
                 break;
+            case IDM_SHAPE_PLANE:
+                options.shape = ui::PreviewShape::Plane;
+                break;
+            case IDM_SHAPE_BRUSH_WALL:
+                options.shape = ui::PreviewShape::BrushWall;
+                break;
+            case IDM_SHAPE_BRUSH_FLOOR:
+                options.shape = ui::PreviewShape::BrushFloor;
+                break;
+            case IDM_SHAPE_BRUSH_CUBE:
+                options.shape = ui::PreviewShape::BrushCube;
+                break;
+            case IDM_SHAPE_BRUSH_DISPLACEMENT:
+                options.shape = ui::PreviewShape::BrushDisplacement;
+                break;
             default:
                 options.shape = ui::PreviewShape::Plane;
                 break;
@@ -1697,13 +2475,67 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
             app::apply_preview_options(options);
             app::commit_preview_options();
             sync_shape_menu();
+            // Re-render preview text in case shader substitution needs updating
+            if (!g.session.text().empty()) {
+                (void)write_preview_file(g.session.text());
+                if (g.engine && g.engine->initialized()) {
+                    (void)g.engine->set_material(g.active_engine_material);
+                }
+            }
             return 0;
         }
+        case IDM_RENDER_MODE_SHADED:
+        case IDM_RENDER_MODE_WIREFRAME:
+        case IDM_RENDER_MODE_ALBEDO:
+        case IDM_RENDER_MODE_NORMALS: {
+            if (id == IDM_RENDER_MODE_SHADED) g.current_render_mode = "shaded";
+            else if (id == IDM_RENDER_MODE_WIREFRAME) g.current_render_mode = "wireframe";
+            else if (id == IDM_RENDER_MODE_ALBEDO) g.current_render_mode = "albedo";
+            else if (id == IDM_RENDER_MODE_NORMALS) g.current_render_mode = "normals";
+            sync_render_mode_menu();
+            if (g.engine && g.engine->initialized()) {
+                (void)g.engine->set_render_mode(g.current_render_mode);
+            }
+            return 0;
+        }
+        case IDM_ANIM_PLAY:
+            if (g.engine && g.engine->initialized()) (void)g.engine->set_animation("play");
+            return 0;
+        case IDM_ANIM_PAUSE:
+            if (g.engine && g.engine->initialized()) (void)g.engine->set_animation("pause");
+            return 0;
+        case IDM_ANIM_TOGGLE:
+            if (g.engine && g.engine->initialized()) (void)g.engine->set_animation("toggle");
+            return 0;
+        case IDM_ANIM_SPEED_HALF:
+            if (g.engine && g.engine->initialized()) (void)g.engine->set_speed(0.5f);
+            return 0;
+        case IDM_ANIM_SPEED_1X:
+            if (g.engine && g.engine->initialized()) (void)g.engine->set_speed(1.0f);
+            return 0;
+        case IDM_ANIM_SPEED_2X:
+            if (g.engine && g.engine->initialized()) (void)g.engine->set_speed(2.0f);
+            return 0;
+        case ID_SHADER_COMBO:
+        if (code == CBN_SELCHANGE) {
+            const LRESULT selection = SendMessageW(g.shader_combo, CB_GETCURSEL, 0, 0);
+            if (selection != CB_ERR) {
+                wchar_t value[128] = {};
+                SendMessageW(g.shader_combo, CB_GETLBTEXT, selection,
+                             reinterpret_cast<LPARAM>(value));
+                apply_shader(to_utf8(value));
+            }
+        }
+        return 0;
         case ID_PREVIEW:
             start_preview();
             return 0;
         case ID_VALIDATE:
             run_validation();
+            return 0;
+        case IDM_DEBUG_CONSOLE:
+            ui::console_open();
+            ui::console_focus();
             return 0;
         case ID_ADVANCED: {
             g.settings.show_advanced = !g.settings.show_advanced;
@@ -1773,7 +2605,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
                     const vmt::Result<void> flushed = g.preview_sync.flush(g.session.text());
                     if (flushed) {
                         g.engine_note = L"engine preview active (" +
-                                        to_wide(std::string(ui::kPreviewMaterialName)) + L")";
+                                        to_wide(g.preview_material_name) + L")";
                     } else {
                         g.engine_note = L"preview: " + to_wide(flushed.error().message);
                     }
@@ -1803,21 +2635,19 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
         }
         return DefWindowProcW(hwnd, message, wparam, lparam);
 
+    case WM_DROPFILES: {
+        HDROP drop = reinterpret_cast<HDROP>(wparam);
+        wchar_t buffer[4 * MAX_PATH] = {};
+        if (DragQueryFileW(drop, 0, buffer, 4 * MAX_PATH) > 0) {
+            open_path(std::filesystem::path(buffer));
+        }
+        DragFinish(drop);
+        return 0;
+    }
+
     case WM_CLOSE: {
-        if (g.session.dirty()) {
-            const int answer = MessageBoxW(hwnd,
-                                           L"The material has unsaved changes.\n\nSave before closing?",
-                                           kWindowTitle,
-                                           MB_ICONWARNING | MB_YESNOCANCEL);
-            if (answer == IDCANCEL) {
-                return 0;
-            }
-            if (answer == IDYES) {
-                do_save(false);
-                if (g.session.dirty()) {
-                    return 0; // saving failed or was cancelled
-                }
-            }
+        if (!confirm_discard(L"Save before closing?")) {
+            return 0;
         }
         stop_engine_preview();
         DestroyWindow(hwnd);
@@ -1896,31 +2726,24 @@ bool register_window_classes(HINSTANCE instance) {
 }
 
 void create_controls(HINSTANCE instance) {
-    g.open_button = CreateWindowExW(0, L"BUTTON", L"Open VMT...",
-                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                    0, 0, 0, 0, g.main,
-                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_OPEN)),
-                                    instance, nullptr);
-    g.save_button = CreateWindowExW(0, L"BUTTON", L"Save",
-                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                    0, 0, 0, 0, g.main,
-                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SAVE)),
-                                    instance, nullptr);
-    g.save_as_button = CreateWindowExW(0, L"BUTTON", L"Save As",
-                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                       0, 0, 0, 0, g.main,
-                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SAVE_AS)),
-                                       instance, nullptr);
-    g.preview_button = CreateWindowExW(0, L"BUTTON", L"Preview material",
-                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                       0, 0, 0, 0, g.main,
-                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_PREVIEW)),
-                                       instance, nullptr);
-    g.validate_button = CreateWindowExW(0, L"BUTTON", L"Validate",
-                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                        0, 0, 0, 0, g.main,
-                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_VALIDATE)),
-                                        instance, nullptr);
+    // Themed buttons: kind and style travel through lpCreateParams at creation
+    // time, so they can only be chosen here. layout() gives all of them their
+    // real rect right after this returns.
+    g.open_button = ui::controls::ThemeButton::create(
+        g.main, ID_OPEN, L"Open VMT...", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+        ui::controls::ButtonStyle::Accent);
+    g.save_button = ui::controls::ThemeButton::create(
+        g.main, ID_SAVE, L"Save", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+        ui::controls::ButtonStyle::Default);
+    g.save_as_button = ui::controls::ThemeButton::create(
+        g.main, ID_SAVE_AS, L"Save As", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+        ui::controls::ButtonStyle::Default);
+    g.preview_button = ui::controls::ThemeButton::create(
+        g.main, ID_PREVIEW, L"Preview material", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+        ui::controls::ButtonStyle::Accent);
+    g.validate_button = ui::controls::ThemeButton::create(
+        g.main, ID_VALIDATE, L"Validate", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+        ui::controls::ButtonStyle::Default);
     g.recent_label = CreateWindowExW(0, L"STATIC", L"Recent files",
                                      WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g.main, nullptr,
                                      instance, nullptr);
@@ -1935,11 +2758,15 @@ void create_controls(HINSTANCE instance) {
                                  0, 0, 0, 0, g.main,
                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_VIEWPORT)),
                                  instance, nullptr);
-    g.advanced_check = CreateWindowExW(0, L"BUTTON", L"Show advanced parameters",
-                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                       0, 0, 0, 0, g.main,
-                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_ADVANCED)),
-                                       instance, nullptr);
+    g.shader_label = CreateWindowExW(0, L"STATIC", L"Shader",
+                                    WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                                    0, 0, 0, 0, g.main, nullptr, instance, nullptr);
+    // Zero height asks ThemeCombo for the themed control height; layout() is
+    // the single place that decides the shader row's real rect.
+    g.shader_combo = ui::controls::ThemeCombo::create(g.main, ID_SHADER_COMBO, 0, 0, 0, 0);
+    g.advanced_check = ui::controls::ThemeButton::create(
+        g.main, ID_ADVANCED, L"Show advanced parameters", 0, 0, 0, 0,
+        ui::controls::ButtonKind::Checkbox, ui::controls::ButtonStyle::Subtle);
     g.panel = CreateWindowExW(0, kPanelClass, L"",
                               WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
                               0, 0, 0, 0, g.main,
@@ -1960,15 +2787,13 @@ void create_controls(HINSTANCE instance) {
     const int parts[2] = {dp(520), -1};
     SendMessageW(g.status, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
 
-    set_font(g.open_button, stock_font());
-    set_font(g.save_button, stock_font());
-    set_font(g.save_as_button, stock_font());
-    set_font(g.preview_button, stock_font());
-    set_font(g.validate_button, stock_font());
+    // Fonts only for the controls that still draw with GDI. ThemeButton /
+    // ThemeCombo / ThemeSlider paint through DirectWrite and size their own
+    // text, so a WM_SETFONT on them would be dead weight.
     set_font(g.recent_label, stock_font());
     set_font(g.recent_list, stock_font());
     set_font(g.viewport, stock_font());
-    set_font(g.advanced_check, stock_font());
+    set_font(g.shader_label, stock_font());
     set_font(g.panel, stock_font());
     set_font(g.text_edit, mono_font());
 
@@ -1983,9 +2808,17 @@ void create_menu() {
     AppendMenuW(file, MF_STRING, ID_OPEN, L"&Open...\tCtrl+O");
     AppendMenuW(file, MF_STRING, ID_SAVE, L"&Save\tCtrl+S");
     AppendMenuW(file, MF_STRING, ID_SAVE_AS, L"Save &As...");
+    AppendMenuW(file, MF_STRING, IDM_SAVE_TO_GAME, L"Save to &game folder...");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"E&xit");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
+
+    HMENU edit = CreatePopupMenu();
+    AppendMenuW(edit, MF_STRING, IDM_UNDO, L"&Undo\tCtrl+Z");
+    AppendMenuW(edit, MF_STRING, IDM_REDO, L"&Redo\tCtrl+Y");
+    AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(edit, MF_STRING, IDM_REVERT, L"&Revert to saved/opened");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), L"&Edit");
 
     HMENU view = CreatePopupMenu();
     AppendMenuW(view, MF_STRING, IDM_BROWSER, L"Material &browser\tF3");
@@ -2001,11 +2834,36 @@ void create_menu() {
     AppendMenuW(preview, MF_STRING, IDM_SHAPE_CYLINDER, L"Cylinder");
     AppendMenuW(preview, MF_STRING, IDM_SHAPE_PLANE, L"Plane");
     AppendMenuW(preview, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(preview, MF_STRING, IDM_SHAPE_BRUSH_WALL, L"Brush Wall (Lightmapped)");
+    AppendMenuW(preview, MF_STRING, IDM_SHAPE_BRUSH_FLOOR, L"Brush Floor");
+    AppendMenuW(preview, MF_STRING, IDM_SHAPE_BRUSH_CUBE, L"Brush Block");
+    AppendMenuW(preview, MF_STRING, IDM_SHAPE_BRUSH_DISPLACEMENT, L"Displacement (Blend)");
+    AppendMenuW(preview, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(preview, MF_STRING, IDM_MODEL, L"Load model (.mdl)...");
+    AppendMenuW(preview, MF_SEPARATOR, 0, nullptr);
+
+    HMENU render_mode_menu = CreatePopupMenu();
+    AppendMenuW(render_mode_menu, MF_STRING, IDM_RENDER_MODE_SHADED, L"&Shaded");
+    AppendMenuW(render_mode_menu, MF_STRING, IDM_RENDER_MODE_WIREFRAME, L"&Wireframe");
+    AppendMenuW(render_mode_menu, MF_STRING, IDM_RENDER_MODE_ALBEDO, L"&Albedo");
+    AppendMenuW(render_mode_menu, MF_STRING, IDM_RENDER_MODE_NORMALS, L"&Normals");
+    AppendMenuW(preview, MF_POPUP, reinterpret_cast<UINT_PTR>(render_mode_menu), L"Render &Mode");
+
+    HMENU anim_menu = CreatePopupMenu();
+    AppendMenuW(anim_menu, MF_STRING, IDM_ANIM_PLAY, L"&Play");
+    AppendMenuW(anim_menu, MF_STRING, IDM_ANIM_PAUSE, L"&Pause");
+    AppendMenuW(anim_menu, MF_STRING, IDM_ANIM_TOGGLE, L"&Toggle Playback");
+    AppendMenuW(anim_menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(anim_menu, MF_STRING, IDM_ANIM_SPEED_HALF, L"Speed 0.5x");
+    AppendMenuW(anim_menu, MF_STRING, IDM_ANIM_SPEED_1X, L"Speed 1.0x");
+    AppendMenuW(anim_menu, MF_STRING, IDM_ANIM_SPEED_2X, L"Speed 2.0x");
+    AppendMenuW(preview, MF_POPUP, reinterpret_cast<UINT_PTR>(anim_menu), L"&Animation");
+
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(preview), L"&Preview");
 
     HMENU tools = CreatePopupMenu();
     AppendMenuW(tools, MF_STRING, ID_VALIDATE, L"&Validate\tF7");
+    AppendMenuW(tools, MF_STRING, IDM_DEBUG_CONSOLE, L"&Debug console\tF12");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), L"&Tools");
 
     HMENU game = CreatePopupMenu();
@@ -2018,7 +2876,7 @@ void create_menu() {
 
     SetMenu(g.main, bar);
 
-    ACCEL entries[4] = {};
+    ACCEL entries[7] = {};
     entries[0].fVirt = FVIRTKEY | FCONTROL;
     entries[0].key = 'O';
     entries[0].cmd = ID_OPEN;
@@ -2031,7 +2889,16 @@ void create_menu() {
     entries[3].fVirt = FVIRTKEY;
     entries[3].key = VK_F3;
     entries[3].cmd = IDM_BROWSER;
-    g.accelerator = CreateAcceleratorTableW(entries, 4);
+    entries[4].fVirt = FVIRTKEY | FCONTROL;
+    entries[4].key = 'Z';
+    entries[4].cmd = IDM_UNDO;
+    entries[5].fVirt = FVIRTKEY | FCONTROL;
+    entries[5].key = 'Y';
+    entries[5].cmd = IDM_REDO;
+    entries[6].fVirt = FVIRTKEY;
+    entries[6].key = VK_F12;
+    entries[6].cmd = IDM_DEBUG_CONSOLE;
+    g.accelerator = CreateAcceleratorTableW(entries, 7);
 }
 
 void load_schemas() {
@@ -2042,18 +2909,26 @@ void load_schemas() {
         g.schemas = std::move(library.value());
         g.schemas_loaded = true;
         g.schema_error.clear();
+        log_write("APP ", "loaded " + std::to_string(g.schemas.shader_names().size()) + " shader schemas");
     } else {
         g.schema_error = library.error().message;
+        log_write("WARN", "failed to load schemas: " + g.schema_error);
     }
 #else
     g.schema_error = "VMT_SCHEMA_DIR was not defined at build time";
+    log_write("WARN", g.schema_error);
 #endif
 }
 
 } // namespace
 
 int run_app(HINSTANCE instance, int show_command) {
-    // System-DPI awareness: the layout below scales its metrics with dp().
+    // Launch debug console for diagnostics
+    console_open();
+
+    // Fallback DPI for before any window exists. The manifest already asks for
+    // Per-Monitor V2, so this is a system-wide value that gets corrected below
+    // (and again on every WM_DPICHANGED).
     SetProcessDPIAware();
     {
         HDC screen = GetDC(nullptr);
@@ -2072,6 +2947,13 @@ int run_app(HINSTANCE instance, int show_command) {
     InitCommonControlsEx(&controls);
 
     g.instance = instance;
+    // The themed control classes have to exist before create_controls() runs.
+    // register_all() is process-global and idempotent, so this single call at
+    // bootstrap is the only one the process ever needs.
+    (void)ui::controls::register_all(g.instance);
+    // Must precede window creation: this is the process-wide opt-in that makes
+    // the menu bar and the remaining common controls render dark.
+    ui::theming::enable_native_dark_mode();
     g.settings_path = compute_settings_path();
     g.settings = UISettings::load(g.settings_path);
     g.preview_options = options_from_settings(g.settings);
@@ -2086,7 +2968,16 @@ int run_app(HINSTANCE instance, int show_command) {
             log_open(log_dir);
             log_report_previous_session();
             log_session_begin();
-            log_write("APP ", "VMT Viewer starting");
+            log_write("APP ", "VMT Viewer starting (32-bit x86)");
+            log_write("APP ", "DPI: " + std::to_string(g.dpi) + " (" +
+                                  std::to_string(g.dpi * 100 / 96) + "% scaling)");
+            log_write("APP ", "settings path: " + g.settings_path.string());
+            if (!g.settings.last_game_dir.empty()) {
+                log_write("APP ", "last game dir: " + g.settings.last_game_dir);
+            }
+            if (!g.settings.last_bin_dir.empty()) {
+                log_write("APP ", "last bin dir: " + g.settings.last_bin_dir);
+            }
             install_crash_handler();
         }
     }
@@ -2107,9 +2998,16 @@ int run_app(HINSTANCE instance, int show_command) {
         return 1;
     }
 
+    // Under Per-Monitor V2 the window can land on a monitor whose DPI is not the
+    // system's, and no WM_DPICHANGED arrives for the initial placement - so take
+    // g.dpi from the window itself before the first layout() call scales with it.
+    g.dpi = ui::theming::metrics_for(g.main).dpi;
+    ui::controls::apply_chrome(g.main);
+
     create_controls(instance);
     create_menu();
     sync_shape_menu();
+    sync_render_mode_menu();
     configure_preview_sync();
     layout();
     refresh_recent_list();
@@ -2117,8 +3015,22 @@ int run_app(HINSTANCE instance, int show_command) {
     update_title();
     update_status();
 
+    DragAcceptFiles(g.main, TRUE);
     ShowWindow(g.main, show_command == 0 ? SW_SHOWDEFAULT : show_command);
     UpdateWindow(g.main);
+
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv != nullptr) {
+        if (argc >= 2 && argv[1][0] != L'-') {
+            std::filesystem::path file_arg(argv[1]);
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(file_arg, ec)) {
+                open_path(file_arg);
+            }
+        }
+        LocalFree(argv);
+    }
 
     MSG message{};
     BOOL result = 0;
@@ -2136,6 +3048,8 @@ int run_app(HINSTANCE instance, int show_command) {
         g.accelerator = nullptr;
     }
     save_settings();
+    log_close();
+    console_close();
 
     if (result == -1) {
         return 2;
@@ -2225,10 +3139,76 @@ bool engine_ready() {
     return g.engine != nullptr && g.engine->initialized();
 }
 
+// Disk roots searched for "materials/..." paths. The configured game folder is
+// searched first (it holds the real game content), then any addon roots the
+// game reports, then the folder the browser last scanned. This is what lets
+// texture thumbnails resolve without an engine connection.
+void refresh_material_roots() {
+    std::vector<std::filesystem::path> roots;
+    const auto add = [&roots](const std::filesystem::path& candidate) {
+        if (candidate.empty()) {
+            return;
+        }
+        std::error_code ec;
+        if (!std::filesystem::is_directory(candidate, ec)) {
+            return;
+        }
+        for (const std::filesystem::path& existing : roots) {
+            if (existing == candidate) {
+                return;
+            }
+        }
+        roots.push_back(candidate);
+    };
+
+    if (!g.settings.last_game_dir.empty()) {
+        add(std::filesystem::path(g.settings.last_game_dir));
+        const std::filesystem::path parent = std::filesystem::path(g.settings.last_game_dir).parent_path();
+        if (!parent.empty()) {
+            add(parent); // game root: holds addon folders next to the mod folder
+        }
+    }
+    if (!g.preview_root.empty()) {
+        add(g.preview_root);
+    }
+    if (!g.settings.browser_root.empty() && !g.settings.browser_scan_game) {
+        add(g.settings.browser_root);
+    }
+    for (const std::filesystem::path& loose : g.loose_material_roots) {
+        add(loose);
+        const std::filesystem::path parent = loose.parent_path();
+        if (!parent.empty() && parent != loose && parent != parent.parent_path()) {
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(loose / L"gameinfo.txt", ec) ||
+                std::filesystem::is_regular_file(parent / L"gameinfo.txt", ec) ||
+                std::filesystem::is_directory(parent / L"materials", ec) ||
+                std::filesystem::is_directory(parent / L"bin", ec)) {
+                add(parent);
+            }
+        }
+    }
+    const std::filesystem::path session_root = g.session.material_root();
+    if (!session_root.empty()) {
+        add(session_root);
+        const std::filesystem::path parent = session_root.parent_path();
+        if (!parent.empty() && parent != session_root && parent != parent.parent_path()) {
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(session_root / L"gameinfo.txt", ec) ||
+                std::filesystem::is_regular_file(parent / L"gameinfo.txt", ec) ||
+                std::filesystem::is_directory(parent / L"materials", ec) ||
+                std::filesystem::is_directory(parent / L"bin", ec)) {
+                add(parent);
+            }
+        }
+    }
+    g.material_roots = std::move(roots);
+}
+
 bool ensure_engine(std::wstring& error) {
     if (g.preview_root.empty()) {
         g.preview_root = preview_root_dir();
     }
+    refresh_material_roots();
     return ensure_engine_running(error, false);
 }
 
@@ -2266,6 +3246,10 @@ bool game_material_text(const std::string& material_name, std::string& text,
 }
 
 bool open_game_material(const std::string& material_name, std::wstring& error) {
+    if (!ui::confirm_discard(L"Save before opening another material?")) {
+        error = L"not opened (the current material keeps its unsaved changes)";
+        return false;
+    }
     std::string name = material_name_from_game_path(material_name);
     if (name.empty()) {
         name = material_name;
@@ -2301,7 +3285,171 @@ bool open_game_material(const std::string& material_name, std::wstring& error) {
 }
 
 bool open_material_file(const std::filesystem::path& path) {
+    refresh_material_roots();
     return open_path(path);
+}
+
+namespace {
+
+vmt::Result<std::vector<unsigned char>> read_disk_file_bytes(const std::filesystem::path& candidate) {
+    std::ifstream stream(candidate, std::ios::binary);
+    if (!stream) {
+        return vmt::Err<std::vector<unsigned char>>(vmt::make_error(
+            vmt::ErrorCode::PermissionDenied,
+            "the texture could not be opened: " + candidate.string(),
+            "Check that the file is readable and not locked by another program",
+            candidate.string()));
+    }
+    std::vector<unsigned char> bytes;
+    bytes.assign(std::istreambuf_iterator<char>(stream),
+                 std::istreambuf_iterator<char>());
+    return vmt::Ok(std::move(bytes));
+}
+
+// TextureSource implementation for the browser's thumbnails. Disk-backed
+// lookups go straight to the filesystem (so a folder scan works with no engine
+// at all); everything else is read through the engine file system, which is
+// what makes VPK-resident textures decodable.
+class AppTextureSource final : public TextureSource {
+public:
+    vmt::Result<std::vector<unsigned char>> read(const std::string& game_path) override {
+        std::error_code ec;
+
+        // Try disk first for each known material root, then the engine. Disk
+        // wins when present so the browser stays usable without a connection.
+        const std::filesystem::path relative(game_path);
+        for (const std::filesystem::path& root : g.material_roots) {
+            const std::filesystem::path candidate = root / relative;
+            if (std::filesystem::is_regular_file(candidate, ec)) {
+                return read_disk_file_bytes(candidate);
+            }
+            if (game_path.size() > 10 &&
+                (game_path.compare(0, 10, "materials/") == 0 ||
+                 game_path.compare(0, 10, "materials\\") == 0)) {
+                const std::filesystem::path loose_candidate = root / game_path.substr(10);
+                if (std::filesystem::is_regular_file(loose_candidate, ec)) {
+                    return read_disk_file_bytes(loose_candidate);
+                }
+            }
+        }
+
+        if (g.engine && g.engine->initialized()) {
+            const vmt::Result<std::vector<unsigned char>> read = g.engine->read_binary_file(game_path);
+            if (read) {
+                return read;
+            }
+        }
+
+        // Graceful resolution: if the texture is missing (e.g. typo like b_wallpaper1
+        // vs b_wallaper1, single/double letters, case mismatch), check if a similar
+        // texture file exists on disk.
+        const std::filesystem::path graceful =
+            ui::resolve_texture_file_gracefully(game_path, g.material_roots);
+        if (!graceful.empty() && std::filesystem::is_regular_file(graceful, ec)) {
+            log_write("TEX ", "gracefully resolved missing texture '" + game_path +
+                                  "' -> '" + graceful.string() + "'");
+            return read_disk_file_bytes(graceful);
+        }
+
+        return vmt::Err<std::vector<unsigned char>>(vmt::make_error(
+            vmt::ErrorCode::NotFound,
+            "the texture " + game_path + " was not found",
+            "Connect a game (Game > Connection) so textures inside VPKs can be read"));
+    }
+};
+
+} // namespace
+
+bool material_entry_text(const std::filesystem::path& vmt_path, const std::string& material_name,
+                         std::string& text, std::wstring& error) {
+    if (!vmt_path.empty()) {
+        std::ifstream stream(vmt_path, std::ios::binary);
+        if (!stream) {
+            error = L"the material file could not be read: " + vmt_path.wstring();
+            return false;
+        }
+        text.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+        return true;
+    }
+    return game_material_text(material_name, text, error);
+}
+// Schema parameter names are compared case-insensitively against the authored
+// spelling in a VMT.
+std::string lowercase(std::string text) {
+    for (char& c : text) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return text;
+}
+
+bool material_info_text(const std::filesystem::path& vmt_path,
+                        const std::string& material_name, std::string& text,
+                        std::wstring& error) {
+    std::string vmt_text;
+    if (!material_entry_text(vmt_path, material_name, vmt_text, error)) {
+        return false;
+    }
+
+    AppTextureSource source;
+
+    // Ask the schema which parameters are texture paths, so the panel can list
+    // every texture a material uses and not just $basetexture.
+    bool shader_known = false;
+    std::set<std::string> schema_textures;
+    const vmt::Result<vmt::Document> parsed = vmt::Document::parse(vmt_text);
+    if (parsed.ok() && !parsed.value().shader().empty()) {
+        const std::string shader(parsed.value().shader());
+        const vmt::ShaderSchema schema = g.schemas.schema_for(shader);
+        shader_known = g.schemas.has_shader(shader);
+        for (const vmt::SchemaGroup& group : schema.groups()) {
+            for (const vmt::SchemaParam& param : group.parameters) {
+                if (param.type == vmt::ParamType::Texture &&
+                    !param.name.empty() && param.name[0] == '$') {
+                    schema_textures.insert(lowercase(param.name));
+                }
+            }
+        }
+    }
+
+    const MaterialInfo info =
+        collect_material_info(vmt_text, source, shader_known, schema_textures);
+    text = format_material_info(info);
+    return true;
+}
+
+bool render_texture_thumbnail(const std::filesystem::path& vmt_path,
+                              const std::string& material_name,
+                              std::uint32_t max_pixels,
+                              std::filesystem::path& bmp_path,
+                              std::wstring& error) {
+    if (g.thumbnail_root.empty()) {
+        error = L"no thumbnail cache folder is available";
+        return false;
+    }
+    bmp_path = thumbnail_cache_path(g.thumbnail_root, material_name);
+
+    std::string vmt_text;
+    if (!material_entry_text(vmt_path, material_name, vmt_text, error)) {
+        return false;
+    }
+
+    AppTextureSource source;
+    const vmt::Result<TextureThumbnail> thumbnail =
+        make_texture_thumbnail(vmt_text, source, max_pixels);
+    if (!thumbnail) {
+        error = to_wide(thumbnail.error().message);
+        return false;
+    }
+
+    const TextureThumbnail& image = thumbnail.value();
+    if (!write_bmp_from_bgra(bmp_path, image.width, image.height, image.bgra.data(), true)) {
+        error = L"the thumbnail cache could not be written: " + bmp_path.wstring();
+        return false;
+    }
+    log_write("BRWS", "texture thumbnail decoded from '" + image.texture_name + "' for '" +
+                          material_name + "' (" + std::to_string(image.width) + "x" +
+                          std::to_string(image.height) + ")");
+    return true;
 }
 
 bool render_thumbnail(const std::string& material_name, std::filesystem::path& bmp_path,

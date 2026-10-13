@@ -85,6 +85,8 @@ int wmain(int argc, wchar_t* argv[]) {
     int size_h = 0;
     spike::MountMode mount_mode = spike::MountMode::All;
     std::string single_path;
+    std::string thumb_out;
+    std::string extra_mount;
     unsigned steam_appid = 0;
 
     for (int i = 3; i < argc; ++i) {
@@ -114,6 +116,10 @@ int wmain(int argc, wchar_t* argv[]) {
             }
             size_w = std::atoi(v.substr(0, x).c_str());
             size_h = std::atoi(v.substr(x + 1).c_str());
+        } else if (a.rfind("--thumb-out=", 0) == 0) {
+            thumb_out = a.substr(12);
+        } else if (a.rfind("--mount-dir=", 0) == 0) {
+            extra_mount = a.substr(12);
         } else if (!have_material) {
             material = a;
             have_material = true;
@@ -212,12 +218,79 @@ int wmain(int argc, wchar_t* argv[]) {
         return 1;
     }
     log_ok(init.message);
+    if (!extra_mount.empty()) {
+        spike::StepResult m = spike::mount_custom_path("GAME", extra_mount, true);
+        (m.ok ? log_ok : log_fail)("extra mount: " + m.message);
+    }
+    log_info("CHECK vmt: " + std::string(spike::file_exists("materials/" + material + ".vmt").exists ? "EXISTS" : "NOT FOUND"));
+    log_info("CHECK vtf: " + std::string(spike::file_exists("materials/" + material + ".vtf").exists ? "EXISTS" : "NOT FOUND"));
+    spike::TextFile tf = spike::read_text_file("materials/" + material + ".vmt");
+    log_info("VMT CONTENT:\n" + tf.text);
 
     if (mount_mode != spike::MountMode::All) {
         // Mount-mode experiments stop before the material system; the shutdown
         // path still drains the filesystem and window cleanly.
         spike::StepResult shut = spike::shutdown_engine();
         log_ok(shut.message);
+        return 0;
+    }
+
+    if (!thumb_out.empty()) {
+        // Diagnostic/CI screenshot: render the material offscreen with the
+        // engine's own ReadPixels path and write a 32-bit BMP (bottom-up).
+        const spike::ThumbnailResult thumb =
+            spike::render_material_thumbnail(material, 256, /*flip_vertical=*/false);
+        if (!thumb.ok) {
+            log_fail("thumbnail: " + thumb.message);
+            spike::shutdown_engine();
+            return 1;
+        }
+        FILE* file = nullptr;
+        fopen_s(&file, thumb_out.c_str(), "wb");
+        if (file == nullptr) {
+            log_fail("thumbnail: cannot write " + thumb_out);
+            spike::shutdown_engine();
+            return 1;
+        }
+        const int w = thumb.width;
+        const int h = thumb.height;
+        const int image_size = w * h * 4;
+        const int file_size = 54 + image_size;
+        unsigned char header[54] = {};
+        header[0] = 'B';
+        header[1] = 'M';
+        header[2] = (unsigned char)(file_size & 0xFF);
+        header[3] = (unsigned char)((file_size >> 8) & 0xFF);
+        header[4] = (unsigned char)((file_size >> 16) & 0xFF);
+        header[5] = (unsigned char)((file_size >> 24) & 0xFF);
+        header[10] = 54; // pixel data offset
+        header[14] = 40; // BITMAPINFOHEADER size
+        header[18] = (unsigned char)(w & 0xFF);
+        header[19] = (unsigned char)((w >> 8) & 0xFF);
+        header[22] = (unsigned char)(h & 0xFF);
+        header[23] = (unsigned char)((h >> 8) & 0xFF);
+        header[26] = 1; // planes
+        header[28] = 32; // bits per pixel
+        header[34] = (unsigned char)(image_size & 0xFF);
+        header[35] = (unsigned char)((image_size >> 8) & 0xFF);
+        header[36] = (unsigned char)((image_size >> 16) & 0xFF);
+        header[37] = (unsigned char)((image_size >> 24) & 0xFF);
+        std::fwrite(header, 1, sizeof(header), file);
+        std::vector<unsigned char> row((size_t)w * 4);
+        for (int y = h - 1; y >= 0; --y) {
+            const unsigned char* src = thumb.bgra.data() + (size_t)y * w * 4;
+            for (int x = 0; x < w; ++x) {
+                row[(size_t)x * 4 + 0] = src[x * 4 + 2]; // B
+                row[(size_t)x * 4 + 1] = src[x * 4 + 1]; // G
+                row[(size_t)x * 4 + 2] = src[x * 4 + 0]; // R
+                row[(size_t)x * 4 + 3] = 255;
+            }
+            std::fwrite(row.data(), 1, row.size(), file);
+        }
+        std::fclose(file);
+        log_ok("thumbnail written: " + thumb_out + " (" + std::to_string(w) + "x" +
+               std::to_string(h) + ")");
+        spike::shutdown_engine();
         return 0;
     }
 

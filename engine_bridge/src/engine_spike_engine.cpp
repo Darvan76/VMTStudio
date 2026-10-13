@@ -12,8 +12,11 @@
 #include "icvar.h"
 #include "vstdlib/cvar.h"
 #include "vstdlib/iprocessutils.h"
+#include "tier1/convar.h"
 #include "materialsystem/imaterialsystem.h"
 #include "materialsystem/imaterial.h"
+#include "materialsystem/imaterialvar.h"
+#include "materialsystem/itexture.h"
 #include "materialsystem/imesh.h"
 #include "materialsystem/materialsystem_config.h"
 #include "mathlib/lightdesc.h"
@@ -29,6 +32,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -40,6 +44,8 @@ namespace {
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
+static std::mutex g_engine_log_mutex;
+
 FILE* engine_log_file() {
     static FILE* file = [] () -> FILE* {
         wchar_t temp[MAX_PATH] = {};
@@ -48,21 +54,66 @@ FILE* engine_log_file() {
         const std::filesystem::path dir = std::filesystem::path(temp) / L"VMTViewer";
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
-        FILE* f = nullptr;
         const std::filesystem::path path = dir / L"engine.log";
-        _wfopen_s(&f, path.c_str(), L"a");
+        FILE* f = _wfsopen(path.c_str(), L"a", _SH_DENYNO);
         return f;
     }();
     return file;
 }
 
+std::string engine_now_stamp() {
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+    char buffer[64] = {};
+    std::snprintf(buffer, sizeof(buffer), "%04u-%02u-%02u %02u:%02u:%02u.%03u",
+                  time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute,
+                  time.wSecond, time.wMilliseconds);
+    return buffer;
+}
+
+bool engine_ansi_enabled() {
+    static bool checked = false;
+    static bool enabled = false;
+    if (!checked) {
+        checked = true;
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (hOut != INVALID_HANDLE_VALUE && hOut != nullptr) {
+            DWORD mode = 0;
+            if (GetConsoleMode(hOut, &mode)) {
+                if (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) {
+                    enabled = true;
+                }
+            }
+        }
+    }
+    return enabled;
+}
+
 void log_line(const char* tag, const std::string& msg) {
-    std::printf("[%s] %s\n", tag, msg.c_str());
+    std::lock_guard<std::mutex> lock(g_engine_log_mutex);
+    const std::string stamp = engine_now_stamp();
+    const std::string stag = tag ? tag : "ENG ";
+
+    if (engine_ansi_enabled()) {
+        const char* color = "\033[95;1m"; // bright magenta for ENG
+        if (stag == "OK  ") color = "\033[92;1m";
+        else if (stag == "FAIL" || stag == "CRSH") color = "\033[91;1m";
+        else if (stag == "WARN") color = "\033[93;1m";
+        else if (stag == "DIAG") color = "\033[96m";
+        else if (stag == "SRC ") color = "\033[35m";
+        else if (stag == "THMB") color = "\033[33m";
+
+        std::printf("\033[90m[%s]\033[0m %s[%s]\033[0m %s\n",
+                    stamp.c_str(), color, stag.c_str(), msg.c_str());
+    } else {
+        std::printf("[%s] [%s] %s\n", stamp.c_str(), stag.c_str(), msg.c_str());
+    }
     std::fflush(stdout);
+
     // A WIN32 GUI host has no console, so the same log goes to a file; the
     // crash handler also writes here, which makes engine faults diagnosable.
     if (FILE* file = engine_log_file()) {
-        std::fprintf(file, "[%s] %s\n", tag, msg.c_str());
+        std::fprintf(file, "[%s] [%s] %s\n", stamp.c_str(), stag.c_str(), msg.c_str());
         std::fflush(file);
     }
 }
@@ -213,6 +264,9 @@ struct State {
 
     IFileSystem* fs = nullptr;
     IMaterialSystem* matsys = nullptr;
+    ICvar* cvar = nullptr;        // for mat_dxlevel diagnostics
+    bool matsys_inited = false;   // IMaterialSystem::Init succeeded
+    bool view_added = false;      // IMaterialSystem::AddView succeeded
 
     IMaterial* material = nullptr;
     bool material_is_error = false;
@@ -238,6 +292,98 @@ struct State {
 
 State g;
 
+// --- Material ownership -------------------------------------------------------
+//
+// IMaterialSystem::FindMaterial hands back a material at reference count 0:
+// nothing in the engine owns it until a surface binds it. Binding one whose
+// count is not positive makes the engine log
+//
+//     Material <name> has bad reference count 0 when being bound
+//
+// which is why the preview is written the way it is.
+//
+// The obvious fix is IncrementReferenceCount/DecrementReferenceCount, which
+// the SDK does declare on IMaterial. DO NOT call them here. This host runs the
+// retail Half-Life 2 binaries (the configured game folder is ep2, a 2004
+// release), and that runtime's IMaterial vtable is not the one in the 2013 SDK
+// header this translation unit is compiled against. Calling IncrementReferenceCount
+// at the SDK's slot reads a different virtual entirely and faults: verified
+// empirically, it turns the engine probe into exit code 0xC0000005.
+//
+// The warning is cosmetic. Binding still works - the engine logs the complaint
+// and renders the material correctly - so the correct trade is to leave the
+// refcount alone and accept the console noise. If a warning-free path is ever
+// needed, the options are to obtain the matching retail interface header, or
+// to have the engine create and own the material (CreateMaterial +
+// DeleteMaterial), which is a larger change to how the preview is built.
+
+// Takes ownership of the current preview material, releasing whatever it held
+// before. The name is kept because the ownership is real even though the
+// engine-side reference count is deliberately not manipulated - see above.
+void adopt_material(IMaterial* material) {
+    g.material = material;
+}
+
+// TEMP diagnostics: reports the DX level the material system believes it runs
+// at, plus the load state of every texture parameter of the material. This is
+// how a "missing textures" render is attributed: an ITexture that reports
+// IsError or a 32x32 "error" mapping means the VTF never loaded.
+void log_texture_state(IMaterial* material, const char* when) {
+    if (material == nullptr) return;
+    const int dxlevel = g.cvar != nullptr
+        ? (g.cvar->FindVar("mat_dxlevel") != nullptr ? g.cvar->FindVar("mat_dxlevel")->GetInt() : -1)
+        : -2;
+    log_line("DIAG", std::string(when) + ": mat_dxlevel=" + std::to_string(dxlevel) +
+                         " shader=" + material->GetShaderName());
+
+    const int count = material->ShaderParamCount();
+    IMaterialVar** params = material->GetShaderParams();
+    if (params == nullptr || count <= 0) {
+        // Retail IMaterial ABI may drift from the SDK header (see the refcount
+        // note above); fall back to a by-name lookup for the common params.
+        log_line("DIAG", "  GetShaderParams empty (count=" + std::to_string(count) +
+                             ", params=" + (params != nullptr ? "set" : "null") + "), probing by name");
+        static const char* kTexVars[] = { "$basetexture", "$detail", "$bumpmap", "$envmap",
+                                          "$texture1", "$texture2" };
+        for (const char* name : kTexVars) {
+            bool found = false;
+            IMaterialVar* var = material->FindVar(name, &found, false);
+            if (!found || var == nullptr) continue;
+            if (!var->IsTexture()) continue;
+            ITexture* tex = var->GetTextureValue();
+            if (tex == nullptr) {
+                log_line("DIAG", std::string("  $") + name + " = (null texture)");
+                continue;
+            }
+            log_line("DIAG", std::string("  $") + name + " -> '" + tex->GetName() +
+                                 "' mapping=" + std::to_string(tex->GetMappingWidth()) + "x" +
+                                 std::to_string(tex->GetMappingHeight()) +
+                                 " actual=" + std::to_string(tex->GetActualWidth()) + "x" +
+                                 std::to_string(tex->GetActualHeight()) +
+                                 "  isError=" + (tex->IsError() ? "YES" : "no"));
+        }
+        return;
+    }
+    for (int i = 0; i < count; ++i) {
+        IMaterialVar* var = params[i];
+        if (var == nullptr || !var->IsTexture()) continue;
+        ITexture* tex = var->GetTextureValue();
+        if (tex == nullptr) {
+            log_line("DIAG", std::string("  $") + var->GetName() + " = (null texture)");
+            continue;
+        }
+        log_line("DIAG", std::string("  $") + var->GetName() + " -> '" + tex->GetName() +
+                             "' actual=" + std::to_string(tex->GetActualWidth()) + "x" +
+                             std::to_string(tex->GetActualHeight()) +
+                             "  isError=" + (tex->IsError() ? "YES" : "no"));
+    }
+}
+
+void release_current_material() {
+    g.material = nullptr;
+    g.material_is_error = true;
+}
+
 // Composite factory for IMaterialSystem::Connect. The engine's launcher passes
 // a factory that covers every engine interface; a tool provides only what it
 // has and answers null for the rest. Forwarding arbitrary engine-only names to
@@ -250,12 +396,15 @@ void* State::ConnectFactory(const char* name, int* return_code) {
     }
     // Hardware config comes from the shader DLL. The vstdlib names are served
     // from the cvar factory because matsys reuses this factory to connect the
-    // shader DLL, whose IAppSystem::Connect pulls ICvar through it.
+    // shader DLL, whose IAppSystem::Connect pulls ICvar through it. The cvar
+    // interface version differs per engine branch (SDK 2013 uses VEngineCvar004,
+    // Garry's Mod asks for VEngineCvar007), so any VEngineCvar0xx name is
+    // delegated and the factory answers with whatever version it provides.
     if (std::strcmp(name, MATERIALSYSTEM_HARDWARECONFIG_INTERFACE_VERSION) == 0 &&
         g.connect_factories[0] != nullptr) {
         return g.connect_factories[0](name, return_code);
     }
-    if ((std::strcmp(name, CVAR_INTERFACE_VERSION) == 0 ||
+    if ((std::strncmp(name, "VEngineCvar0", 12) == 0 ||
          std::strcmp(name, PROCESS_UTILS_INTERFACE_VERSION) == 0) &&
         g.connect_factories[1] != nullptr) {
         return g.connect_factories[1](name, return_code);
@@ -276,6 +425,75 @@ void heap_check(const std::string& where) {
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// IFileSystem primary-vtable layout compatibility
+// ---------------------------------------------------------------------------
+// Garry's Mod's filesystem_stdio (VFileSystem022) inserts four extra virtual
+// methods before IsSteam, so every IFileSystem method shifts by +4 slots
+// relative to the Source SDK 2013 layout (AddSearchPath 7 -> 11,
+// RemoveAllSearchPaths 9 -> 13, FindFirst..FindClose 27..30 -> 31..34).
+// Calling the wrong slot corrupts the stack because the real function pops a
+// different number of argument bytes. Every engine call that is affected goes
+// through the shims below; the layout delta is detected at runtime
+// (detect_fs_layout). FileExists/Open/Read/Close/Size live in the separate
+// IBaseFileSystem secondary vtable (this+4), which is unchanged in GMod, so
+// those keep using the normal compiled calls.
+struct FsLayout {
+    int delta = 0;      // 0 = SDK 2013, 4 = Garry's Mod VFileSystem022
+    std::string name;
+};
+FsLayout g_fs_layout;
+
+void** fs_primary_vtable() {
+    return *reinterpret_cast<void***>(g.fs);
+}
+
+void* fs_primary_slot(int sdk_slot) {
+    return fs_primary_vtable()[sdk_slot + g_fs_layout.delta];
+}
+
+// Calls `fn` as `self->fn(path, path_id, add_type)` and returns the ESP drift:
+// 0 bytes means the callee popped all three argument slots (a real 3-argument
+// __thiscall); -4/-8/-12 mean it popped two/one/none, i.e. the candidate has a
+// shorter signature. The stack pointer is restored before returning, so a
+// wrong-arity candidate can never corrupt the caller's frame.
+long long call_3arg_thunk(void* fn, const char* path, const char* path_id, int add_type) {
+    static unsigned long esp_before = 0;
+    static unsigned long esp_after = 0;
+    typedef void(__fastcall * Fn)(void* self, void* edx, const char* pPath, const char* pPathID, int addType);
+    Fn call = reinterpret_cast<Fn>(fn);
+    __asm { mov esp_before, esp }
+    call(g.fs, nullptr, path, path_id, add_type);
+    __asm { mov esp_after, esp }
+    const long long drift = (long long)esp_after - (long long)esp_before;
+    if (drift != 0) {
+        __asm { mov esp, esp_before }
+    }
+    return drift;
+}
+
+void fs_remove_all_search_paths() {
+    typedef void(__fastcall * Fn)(void* self, void* edx);
+    reinterpret_cast<Fn>(fs_primary_slot(9))(g.fs, nullptr);
+}
+
+const char* fs_find_first(const char* wildcard, FileFindHandle_t* handle) {
+    typedef const char*(__fastcall * Fn)(void* self, void* edx, const char* pWildCard, FileFindHandle_t* pHandle);
+    return reinterpret_cast<Fn>(fs_primary_slot(27))(g.fs, nullptr, wildcard, handle);
+}
+const char* fs_find_next(FileFindHandle_t handle) {
+    typedef const char*(__fastcall * Fn)(void* self, void* edx, FileFindHandle_t h);
+    return reinterpret_cast<Fn>(fs_primary_slot(28))(g.fs, nullptr, handle);
+}
+bool fs_find_is_directory(FileFindHandle_t handle) {
+    typedef bool(__fastcall * Fn)(void* self, void* edx, FileFindHandle_t h);
+    return reinterpret_cast<Fn>(fs_primary_slot(29))(g.fs, nullptr, handle);
+}
+void fs_find_close(FileFindHandle_t handle) {
+    typedef void(__fastcall * Fn)(void* self, void* edx, FileFindHandle_t h);
+    reinterpret_cast<Fn>(fs_primary_slot(30))(g.fs, nullptr, handle);
+}
+
 bool call_add_search_path(const std::string& path_id, const std::string& full_path, const char* origin,
                           bool to_head = false) {
     if (g_call_no >= kMaxCalls) {
@@ -286,20 +504,13 @@ bool call_add_search_path(const std::string& path_id, const std::string& full_pa
     log_line("CALL", "#" + std::to_string(g_call_no) + " BEFORE  id='" + path_id +
                          "'  path='" + full_path + "'  origin=" + origin +
                          (to_head ? "  [head]" : ""));
-    unsigned long esp_before = 0;
-    unsigned long esp_after = 0;
-#if defined(_M_IX86)
-    __asm { mov esp_before, esp }
-#endif
-    g.fs->AddSearchPath(full_path.c_str(), path_id.c_str(),
-                        to_head ? PATH_ADD_TO_HEAD : PATH_ADD_TO_TAIL);
-#if defined(_M_IX86)
-    __asm { mov esp_after, esp }
-    if (esp_after != esp_before) {
-        log_line("ESP ", "#" + std::to_string(g_call_no) + " ESP drift = " +
-                             std::to_string((long long)esp_after - (long long)esp_before) + " bytes");
+    const long long drift = call_3arg_thunk(fs_primary_slot(7), full_path.c_str(), path_id.c_str(),
+                                            to_head ? PATH_ADD_TO_HEAD : PATH_ADD_TO_TAIL);
+    if (drift != 0) {
+        log_line("FAIL", "AddSearchPath ESP drift = " + std::to_string(drift) +
+                             " bytes (wrong vtable slot?)");
+        return false;
     }
-#endif
     log_line("CALL", "#" + std::to_string(g_call_no) + " AFTER");
     heap_check("after call #" + std::to_string(g_call_no));
     return true;
@@ -362,16 +573,24 @@ void* find_interface(CreateInterfaceFn factory, const std::vector<std::string>& 
     return nullptr;
 }
 
-// Report where the IFileSystem vtable lives (addresses only, no disassembly).
-void log_iface_vtable() {
-    void** vtbl = *reinterpret_cast<void***>(g.fs);
-    unsigned long long rv = 0;
-    log_line("VTBL", "IFileSystem vtable " + module_of(vtbl, &rv) + "+0x" + hex64(rv));
-    const int slots[] = { 0, 3, 4, 5, 22, 23, 24, 25, 26 };
-    for (int s : slots) {
-        void* fn = vtbl[s];
-        log_line("VTBL", "  slot " + std::to_string(s) + " -> " + module_of(fn, &rv) + "+0x" + hex64(rv));
+// Logs the detected layout and the resolved slot addresses (diagnostics only).
+void log_fs_layout() {
+    log_line("VTBL", "IFileSystem layout: " + g_fs_layout.name + " (delta +" +
+                         std::to_string(g_fs_layout.delta) + ")");
+    const int sdk_slots[] = { 7, 9, 27, 28, 29, 30 };
+    for (int s : sdk_slots) {
+        void* fn = fs_primary_slot(s);
+        unsigned long long rva = 0;
+        const std::string mod = module_of(fn, &rva); // sequence explicitly: rva is an out-param
+        log_line("VTBL", "  sdk slot " + std::to_string(s) + " -> vtable[" +
+                             std::to_string(s + g_fs_layout.delta) + "]  " + mod + "+0x" + hex64(rva));
     }
+    // The IBaseFileSystem base sits right after IAppSystem (this+4); its vtable
+    // serves FileExists/Open/Read/Close/Size, which the spike calls directly.
+    void** secondary = *reinterpret_cast<void***>(reinterpret_cast<char*>(g.fs) + 4);
+    unsigned long long rva = 0;
+    const std::string mod = module_of(secondary, &rva); // sequence explicitly: rva is an out-param
+    log_line("VTBL", "  IBaseFileSystem vtable (this+4): " + mod + "+0x" + hex64(rva));
 }
 
 // ---------------------------------------------------------------------------
@@ -535,56 +754,86 @@ std::string mount_mode_name(MountMode m) {
     return "?";
 }
 
-// __thiscall == __fastcall with `this` in ECX, so this thunk calls a 2-arg
-// thiscall method exactly; then we check whether the path was really added.
-StepResult probe_slot24(const EngineOptions& opts) {
+// Identifies the runtime IFileSystem vtable layout by probing AddSearchPath
+// candidates with a 3-argument __thiscall and verifying that the call really
+// added the path (FileExists with the probe path ID). Slot 7 is AddSearchPath
+// in the SDK 2013 layout; Garry's Mod shifts it to slot 11. The probe leaves
+// the filesystem clean: the caller removes all search paths afterwards.
+StepResult detect_fs_layout(const EngineOptions& opts) {
+    const std::string probe_path = strip_trailing_slash(fix_slashes(opts.game_dir));
+    const char* probe_id = "FS_LAYOUT_PROBE";
+
+    struct Candidate {
+        int delta;
+        int slot;
+        const char* name;
+    };
+    const Candidate candidates[] = {
+        { 0, 7,  "SDK 2013 / VFileSystem0xx (AddSearchPath = slot 7)" },
+        { 4, 11, "Garry's Mod VFileSystem022 (AddSearchPath = slot 11)" },
+    };
+
+    for (const Candidate& candidate : candidates) {
+        void* fn = fs_primary_vtable()[candidate.slot];
+        unsigned long long rva = 0;
+        const std::string mod = module_of(fn, &rva); // sequence explicitly: rva is an out-param
+        const long long drift = call_3arg_thunk(fn, probe_path.c_str(), probe_id, PATH_ADD_TO_TAIL);
+        log_line("PROBE", "candidate slot " + std::to_string(candidate.slot) + " (" + mod + "+0x" +
+                              hex64(rva) + "): 3-arg call ESP drift = " + std::to_string(drift) +
+                              " bytes");
+        if (drift != 0) {
+            continue;
+        }
+        const bool added = g.fs->FileExists("gameinfo.txt", probe_id);
+        log_line("PROBE", std::string("  FileExists(gameinfo.txt, \"") + probe_id +
+                              "\") after call = " + (added ? "true" : "false"));
+        if (!added) {
+            continue;
+        }
+        g_fs_layout.delta = candidate.delta;
+        g_fs_layout.name = candidate.name;
+        log_line("OK  ", std::string("IFileSystem layout detected: ") + candidate.name);
+        return ok(std::string("layout detected: ") + candidate.name);
+    }
+    return fail("could not detect the IFileSystem vtable layout "
+                "(neither SDK slot 7 nor GMod slot 11 is a working AddSearchPath)");
+}
+
+// Mount-mode probe: confirms the detected layout end-to-end by mounting the
+// game folder through the resolved slots, then reading gameinfo.txt back
+// (FileExists + Open/Size/Read/Close) and running a bounded FindFirst/FindNext
+// scan, which exercises every shimmed slot plus the IBaseFileSystem vtable.
+StepResult probe_fs_layout(const EngineOptions& opts) {
     log_line("PROBE", "clean FS (RemoveAllSearchPaths already ran)");
     const bool before_any = g.fs->FileExists("gameinfo.txt", nullptr);
     log_line("PROBE", std::string("FileExists(gameinfo.txt, null) before mount = ") +
                           (before_any ? "true" : "false") + "  (expect false)");
 
-    void** vtbl = *reinterpret_cast<void***>(g.fs);
-    typedef void(__fastcall * Fn2)(void* self, void* edx, const char* pPath, const char* pathID);
-    Fn2 fn2 = reinterpret_cast<Fn2>(vtbl[24]);
+    const std::string game_dir = strip_trailing_slash(fix_slashes(opts.game_dir));
+    if (!call_add_search_path("GAME", game_dir, "probe")) return fail("probe mount stuck");
 
-    unsigned long esp_before = 0;
-    unsigned long esp_after = 0;
-    __asm { mov esp_before, esp }
-    fn2(g.fs, nullptr, opts.game_dir.c_str(), "GAME");
-    __asm { mov esp_after, esp }
-    const long long drift2 = (long long)esp_after - (long long)esp_before;
-    log_line("PROBE", "slot 24 called with 2 args (path, pathID); ESP drift = " +
-                          std::to_string(drift2) + " bytes");
+    const bool game_exists = g.fs->FileExists("gameinfo.txt", "GAME");
+    log_line("PROBE", std::string("FileExists(gameinfo.txt, \"GAME\") = ") +
+                          (game_exists ? "true" : "false"));
 
-    if (drift2 != 0) {
-        log_line("PROBE", "RESULT: slot 24 is NOT a 2-argument function");
-        return fail("probe: slot 24 is not 2-arg");
+    const TextFile text = read_text_file("gameinfo.txt");
+    log_line("PROBE", "read_text_file(gameinfo.txt): found=" +
+                          std::string(text.found ? "true" : "false") + "  bytes=" +
+                          std::to_string(text.text.size()));
+    if (!text.found || text.text.empty()) {
+        return fail("probe: gameinfo.txt could not be read back through the engine file system");
     }
+    const size_t eol = text.text.find('\n');
+    log_line("PROBE", "first line: " + text.text.substr(0, eol == std::string::npos ? text.text.size() : eol));
 
-    const bool after_game = g.fs->FileExists("gameinfo.txt", "GAME");
-    const bool after_any = g.fs->FileExists("gameinfo.txt", nullptr);
-    log_line("PROBE", std::string("FileExists(gameinfo.txt, \"GAME\") after 2-arg call = ") +
-                          (after_game ? "true" : "false"));
-    log_line("PROBE", std::string("FileExists(gameinfo.txt, null) after 2-arg call    = ") +
-                          (after_any ? "true" : "false"));
+    const MaterialList materials = list_materials();
+    log_line("PROBE", "list_materials: " + std::to_string(materials.names.size()) +
+                          " .vmt file(s) (bounded scan through the Find shims)");
 
-    if (after_game || after_any) {
-        log_line("PROBE", "RESULT: 2-arg call ADDED the path => GMod's AddSearchPath takes 2 parameters");
-        return ok("probe: AddSearchPath is 2-arg");
+    if (!game_exists) {
+        return fail("probe: FileExists did not see gameinfo.txt after mounting the game folder");
     }
-
-    log_line("PROBE", "RESULT: 2-arg call did NOT add the path => slot 24 is not AddSearchPath");
-    log_line("PROBE", "reference: calling slot 24 with the header's 3-arg signature");
-    unsigned long e0 = 0;
-    unsigned long e1 = 0;
-    __asm { mov e0, esp }
-    g.fs->AddSearchPath(opts.game_dir.c_str(), "GAME", PATH_ADD_TO_TAIL);
-    __asm { mov e1, esp }
-    log_line("PROBE", "3-arg drift = " + std::to_string((long long)e1 - (long long)e0) + " bytes");
-    const bool after3 = g.fs->FileExists("gameinfo.txt", "GAME");
-    log_line("PROBE", std::string("FileExists(gameinfo.txt, \"GAME\") after 3-arg call = ") +
-                          (after3 ? "true" : "false"));
-    return ok("probe complete");
+    return ok("probe: layout works end-to-end (mount + FileExists + read + find)");
 }
 
 StepResult mount_search_paths(const EngineOptions& opts) {
@@ -598,7 +847,7 @@ StepResult mount_search_paths(const EngineOptions& opts) {
     log_line("----", "mount mode   : " + mount_mode_name(opts.mount_mode));
 
     if (opts.mount_mode == MountMode::Probe) {
-        return probe_slot24(opts);
+        return probe_fs_layout(opts);
     }
 
     heap_check("before any AddSearchPath");
@@ -753,6 +1002,26 @@ StepResult init_filesystem(const EngineOptions& opts) {
     log_line("OK  ", std::string("command line initialized via ") + cmdline_export + ": " +
                          std::string(cmdline->GetCmdLine()));
 
+    typedef void (*PFNSpewOutputFunc)(SpewOutputFunc_t);
+    PFNSpewOutputFunc pfn_spew = reinterpret_cast<PFNSpewOutputFunc>(
+        GetProcAddress(g.tier0, "SpewOutputFunc"));
+    if (pfn_spew) {
+        pfn_spew([](SpewType_t type, const tchar* msg) -> SpewRetval_t {
+            if (!msg || !*msg) return SPEW_CONTINUE;
+            std::string text(msg);
+            while (!text.empty() && (text.back() == '\r' || text.back() == '\n')) {
+                text.pop_back();
+            }
+            if (text.empty()) return SPEW_CONTINUE;
+            const char* tag = "SRC ";
+            if (type == SPEW_WARNING) tag = "WARN";
+            else if (type == SPEW_ERROR || type == SPEW_ASSERT) tag = "FAIL";
+            log_line(tag, text);
+            return SPEW_CONTINUE;
+        });
+        log_line("OK  ", "installed Source engine spew output hook");
+    }
+
     g.fs_factory = load_factory(g.fs_mod);
     if (!g.fs_factory) return fail("filesystem_stdio.dll has no CreateInterface");
 
@@ -766,19 +1035,80 @@ StepResult init_filesystem(const EngineOptions& opts) {
                     std::to_string(fs_versions.size()) + " versions)");
     }
     log_line("OK  ", "IFileSystem resolved with " + fs_ver);
-    log_iface_vtable();
 
     // Init() without Connect(), matching filesystem_tools.cpp; Connect(fs_factory) corrupts AddSearchPath.
     if (g.fs->Init() != INIT_OK) return fail("IFileSystem::Init failed");
     log_line("OK  ", "IFileSystem init");
 
-    g.fs->RemoveAllSearchPaths();
+    // The SDK 2013 and Garry's Mod vtable layouts differ (see FsLayout); all
+    // affected calls go through the shims, so the layout must be known first.
+    StepResult layout = detect_fs_layout(opts);
+    if (!layout.ok) return layout;
+    log_fs_layout();
+
+    fs_remove_all_search_paths();
     return mount_search_paths(opts);
 }
 
+void patch_vtf_version_check(HMODULE mats_mod) {
+    if (mats_mod == nullptr) return;
+
+    const unsigned char* base = reinterpret_cast<const unsigned char*>(mats_mod);
+    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+    const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+    const size_t size = nt->OptionalHeader.SizeOfImage;
+
+    // Pattern in materialsystem.dll CVTFTexture::UnserializeHeader:
+    // 8B 40 08 83 F8 04 75 04 6A 40 EB 28 83 F8 03
+    static const unsigned char pattern[] = {
+        0x8B, 0x40, 0x08, 0x83, 0xF8, 0x04, 0x75, 0x04, 0x6A, 0x40, 0xEB, 0x28, 0x83, 0xF8, 0x03
+    };
+
+    for (size_t i = 0; i + sizeof(pattern) <= size; ++i) {
+        if (std::memcmp(base + i, pattern, sizeof(pattern)) == 0) {
+            unsigned char* target = const_cast<unsigned char*>(base + i + 3); // points to 83 F8 04...
+            DWORD old_protect = 0;
+            if (VirtualProtect(target, 32, PAGE_EXECUTE_READWRITE, &old_protect)) {
+                // 83 F8 02       cmp eax, 2
+                // 72 2A          jb +0x2A (to push 30h at +0x32)
+                // 6A 40          push 40h
+                // EB 28          jmp +0x28 (to do_call at +0x34)
+                target[0] = 0x83; target[1] = 0xF8; target[2] = 0x02; // cmp eax, 2
+                target[3] = 0x72; target[4] = 0x2A;                   // jb +0x2A
+                target[5] = 0x6A; target[6] = 0x40;                   // push 40h
+                target[7] = 0xEB; target[8] = 0x28;                   // jmp +0x28
+                for (int n = 9; n < 26; ++n) {
+                    target[n] = 0x90; // NOP
+                }
+                VirtualProtect(target, 32, old_protect, &old_protect);
+                FlushInstructionCache(GetCurrentProcess(), target, 32);
+                log_line("OK  ", "patched materialsystem.dll VTF version check to support VTF 7.5+");
+            }
+            break;
+        }
+    }
+}
+
 StepResult init_material_system(const EngineOptions& opts) {
+    // Garry's Mod's newer engine branch ships a material system whose Connect()
+    // hard-requires engine-only interfaces (QueuedLoader, texture streaming,
+    // ...; verified: it exits the process through tier0 Error -> TerminateProcess)
+    // and whose vtable layout drifted from SDK 2013. A tool process cannot
+    // provide those interfaces, so engine-rendered preview is unavailable
+    // there. Fail cleanly before loading anything: the file system side
+    // (material listing and reading files from VPKs) is fully supported.
+    if (g_fs_layout.delta != 0) {
+        return fail("this game's engine branch (Garry's Mod) requires engine-only "
+                    "interfaces to initialize its material system, so the engine "
+                    "renderer is unavailable for this install; the file system "
+                    "itself works (material lists and VPK reads are supported)");
+    }
+
     g.mats_mod = load_dll(opts.bin_dir, "materialsystem.dll");
     if (!g.mats_mod) return fail("failed to load materialsystem.dll");
+    patch_vtf_version_check(g.mats_mod);
 
     g.mats_factory = load_factory(g.mats_mod);
     if (!g.mats_factory) return fail("materialsystem.dll has no CreateInterface");
@@ -805,9 +1135,9 @@ StepResult init_material_system(const EngineOptions& opts) {
     // filesystem, and several engine-only ones: InputSystem, NetworkSystem,
     // QueuedLoader, ...). The engine's launcher passes a factory that covers
     // all of them; a tool can only provide the filesystem and the shader DLL
-    // ones. Engine-only interfaces stay null, which matsys tolerates, and its
-    // return value only reflects the last (engine-only) query, so it is
-    // ignored here; the hardware config is verified directly instead.
+    // ones. The SDK 2013 material system tolerates null for the engine-only
+    // ones, and its return value only reflects the last (engine-only) query, so
+    // it is ignored here; the hardware config is verified directly instead.
     // The real DX9 shader API registers convars during Init, so it needs the
     // cvar factory from vstdlib (NULL works only for shaderapiempty). Tools get
     // it through the documented entry point in public/vstdlib/cvar.h.
@@ -822,15 +1152,26 @@ StepResult init_material_system(const EngineOptions& opts) {
                          (cvar_factory ? "VStdLib_GetICVarFactory" : "NULL"));
 
     // The engine connects the cvar system before anything else uses it:
-    // ICvar::Connect initializes vstdlib's internal ICvarQuery (VCvarQuery001)
-    // with the engine's query, or with its built-in default when none exists.
-    // materialsystem registers its console variables during Init and calls
-    // through that query; without this connection vstdlib hits a null query
-    // and crashes (verified against HL2 and Source SDK Base 2013 binaries).
+    // ICvar::Connect (IAppSystem slot 0) initializes vstdlib's internal
+    // ICvarQuery (VCvarQuery001) with the engine's query, or with its built-in
+    // default when none exists. materialsystem registers its console variables
+    // during Init and calls through that query; without this connection
+    // vstdlib hits a null query and crashes (verified against HL2 and Source
+    // SDK Base 2013 binaries).
+    // The interface version differs per engine branch (the SDK 2013 header asks
+    // for VEngineCvar004, GMod's vstdlib only provides VEngineCvar007), so the
+    // version advertised by the DLL is used instead of the header constant.
     if (cvar_factory != nullptr) {
+        const std::string vstdlib_path = (std::filesystem::path(opts.bin_dir) / "vstdlib.dll").string();
+        std::vector<std::string> cvar_versions =
+            discover_versions(read_file_bytes(vstdlib_path), "VEngineCvar0");
+        if (cvar_versions.empty()) cvar_versions.push_back(CVAR_INTERFACE_VERSION);
+        std::string cvar_ver;
         ICvar* cvar_system =
-            reinterpret_cast<ICvar*>(cvar_factory(CVAR_INTERFACE_VERSION, nullptr));
+            reinterpret_cast<ICvar*>(find_interface(cvar_factory, cvar_versions, &cvar_ver));
         if (cvar_system != nullptr) {
+            g.cvar = cvar_system;
+            log_line("OK  ", "ICvar resolved with " + cvar_ver);
             if (cvar_system->Connect(cvar_factory)) {
                 log_line("OK  ", "ICvar connected (ICvarQuery initialized)");
             } else {
@@ -854,7 +1195,16 @@ StepResult init_material_system(const EngineOptions& opts) {
     // Init directly (utilmatlib.cpp pattern): Connect(fs_factory) is not safe here.
     CreateInterfaceFn shader_factory = g.matsys->Init("shaderapidx9.dll", nullptr, g.fs_factory, cvar_factory);
     if (!shader_factory) return fail("IMaterialSystem::Init(shaderapidx9.dll) failed");
+    g.matsys_inited = true;
     log_line("OK  ", "IMaterialSystem::Init (shaderapidx9) ok");
+
+    // TEMP diagnostics: material threading state.
+    log_line("THRD", "thread mode = " + std::to_string((int)g.matsys->GetThreadMode()) +
+                         "  renderThreadSafe = " +
+                         (g.matsys->IsRenderThreadSafe() ? "true" : "false"));
+    g.matsys->SetThreadMode(MATERIAL_SINGLE_THREADED);
+    log_line("THRD", "thread mode after SetThreadMode(SINGLETHREADED) = " +
+                         std::to_string((int)g.matsys->GetThreadMode()));
 
     // The device backbuffer is created once, here. Resizing the host window
     // later never calls SetMode again: the 2013 binaries fault inside
@@ -863,6 +1213,8 @@ StepResult init_material_system(const EngineOptions& opts) {
     // window size only drives the projection aspect; D3D presents the fixed
     // backbuffer scaled to the window.
     MaterialSystem_Config_t config = g.matsys->GetCurrentConfigForVideoCard();
+    log_line("DIAG", "config from GetCurrentConfigForVideoCard: dxSupportLevel=" +
+                         std::to_string(config.dxSupportLevel));
     config.m_VideoMode.m_Width = g.width;
     config.m_VideoMode.m_Height = g.height;
     config.SetFlag(MATSYS_VIDCFG_FLAGS_WINDOWED, true);
@@ -875,9 +1227,21 @@ StepResult init_material_system(const EngineOptions& opts) {
     log_line("OK  ", "device created via SetMode (" + std::to_string(g.width) + "x" +
                          std::to_string(g.height) + ")");
 
+    if (g.cvar != nullptr) {
+        ConVar* dx = g.cvar->FindVar("mat_dxlevel");
+        log_line("DIAG", "after SetMode: mat_dxlevel=" +
+                             (dx != nullptr ? std::to_string(dx->GetInt()) : std::string("<not registered>")));
+        // TEMP EXPERIMENT: force DX9 shader selection.
+        if (dx != nullptr) {
+            dx->SetValue(95);
+            log_line("DIAG", "forced mat_dxlevel=95, now=" + std::to_string(dx->GetInt()));
+        }
+    }
+
     if (!g.matsys->AddView(reinterpret_cast<void*>(g.hwnd))) {
         return fail("IMaterialSystem::AddView failed");
     }
+    g.view_added = true;
     g.matsys->SetView(reinterpret_cast<void*>(g.hwnd));
     log_line("OK  ", "view added + set on HWND");
 
@@ -897,23 +1261,23 @@ StepResult init_material_system(const EngineOptions& opts) {
         if (opts.material != m) candidates.push_back(m);
     }
 
-    g.material = nullptr;
-    g.material_is_error = true;
+    release_current_material();
     std::string chosen;
     for (const auto& name : candidates) {
         IMaterial* m = g.matsys->FindMaterial(name.c_str(), TEXTURE_GROUP_OTHER, false);
         if (m == nullptr) continue;
         if (!m->IsErrorMaterial()) {
-            g.material = m;
+            adopt_material(m);
             g.material_is_error = false;
             chosen = name;
             break;
         }
-        if (g.material == nullptr) g.material = m;
+        if (g.material == nullptr) adopt_material(m);
     }
 
     if (!g.material_is_error) {
         log_line("OK  ", "found material: " + chosen + " (shader " + g.material->GetShaderName() + ")");
+        log_texture_state(g.material, "init fallback material");
     } else {
         log_line("WARN", "no real material found from candidates; rendering error (checkerboard) material");
     }
@@ -942,6 +1306,21 @@ void apply_steam_appid(unsigned appid) {
     SetEnvironmentVariableA("SteamAppId", v.c_str());
     SetEnvironmentVariableA("steam_appid", v.c_str());
     log_line("DIAG", "SteamAppId environment variable set to " + v);
+}
+
+StepResult init_filesystem_only(const EngineOptions& opts) {
+    g = State{};
+    g.width = opts.width;
+    g.height = opts.height;
+    g.child_hwnd = opts.child_hwnd;
+    g.pump_messages = false;
+
+    StepResult r = init_filesystem(opts);
+    if (!r.ok) return r;
+    log_line("OK  ", r.message);
+
+    g.initialized = true;
+    return ok("filesystem initialized");
 }
 
 StepResult init_engine(const EngineOptions& opts) {
@@ -974,7 +1353,25 @@ StepResult init_engine(const EngineOptions& opts) {
 
 namespace {
 
-void build_sphere(CMeshBuilder& mb, int rings, int segments) {
+struct VertexExtra {
+    bool has_color = false;
+    bool has_lightmap_uv = false;
+    bool has_texcoord2 = false;
+
+    void emit(CMeshBuilder& mb) const {
+        if (has_color) {
+            mb.Color4ub(255, 255, 255, 255);
+        }
+        if (has_lightmap_uv) {
+            mb.TexCoord2f(1, 0.5f, 0.5f);
+        }
+        if (has_texcoord2) {
+            mb.TexCoord2f(2, 0.0f, 0.0f);
+        }
+    }
+};
+
+void build_sphere(CMeshBuilder& mb, int rings, int segments, const VertexExtra& extra) {
     for (int i = 0; i <= rings; ++i) {
         const float v = (float)i / rings;
         const float phi = v * 3.14159265f;
@@ -988,6 +1385,7 @@ void build_sphere(CMeshBuilder& mb, int rings, int segments) {
             mb.Position3f(x, y, z);
             mb.Normal3f(x, y, z);
             mb.TexCoord2f(0, u, v);
+            extra.emit(mb);
             mb.AdvanceVertex();
         }
     }
@@ -997,17 +1395,19 @@ void build_sphere(CMeshBuilder& mb, int rings, int segments) {
             const int b = a + 1;
             const int c = a + (segments + 1);
             const int d = c + 1;
+            // Source front faces are clockwise as seen from outside; the
+            // engine's default cull mode removes counter-clockwise windings.
             mb.Index((unsigned short)a); mb.AdvanceIndex();
-            mb.Index((unsigned short)c); mb.AdvanceIndex();
-            mb.Index((unsigned short)b); mb.AdvanceIndex();
             mb.Index((unsigned short)b); mb.AdvanceIndex();
             mb.Index((unsigned short)c); mb.AdvanceIndex();
+            mb.Index((unsigned short)b); mb.AdvanceIndex();
             mb.Index((unsigned short)d); mb.AdvanceIndex();
+            mb.Index((unsigned short)c); mb.AdvanceIndex();
         }
     }
 }
 
-void build_cube(CMeshBuilder& mb) {
+void build_cube(CMeshBuilder& mb, const VertexExtra& extra) {
     const float h = 0.9f;
     // normal, U tangent, V tangent per face; U x V == normal so the quad
     // corner order below is front-facing (clockwise) from outside.
@@ -1029,6 +1429,7 @@ void build_cube(CMeshBuilder& mb) {
                           (f[2] + f[5] * su[i] + f[8] * sv[i]) * h);
             mb.Normal3f(f[0], f[1], f[2]);
             mb.TexCoord2f(0, (su[i] + 1.0f) * 0.5f, (1.0f - sv[i]) * 0.5f);
+            extra.emit(mb);
             mb.AdvanceVertex();
         }
         const unsigned short base = (unsigned short)(face * 4);
@@ -1041,7 +1442,7 @@ void build_cube(CMeshBuilder& mb) {
     }
 }
 
-void build_cylinder(CMeshBuilder& mb, int segments) {
+void build_cylinder(CMeshBuilder& mb, int segments, const VertexExtra& extra) {
     const float radius = 0.7f;
     const float half = 0.9f;
     for (int j = 0; j <= segments; ++j) {
@@ -1052,10 +1453,12 @@ void build_cylinder(CMeshBuilder& mb, int segments) {
         mb.Position3f(x * radius, half, z * radius);
         mb.Normal3f(x, 0.0f, z);
         mb.TexCoord2f(0, u, 0.0f);
+        extra.emit(mb);
         mb.AdvanceVertex();
         mb.Position3f(x * radius, -half, z * radius);
         mb.Normal3f(x, 0.0f, z);
         mb.TexCoord2f(0, u, 1.0f);
+        extra.emit(mb);
         mb.AdvanceVertex();
     }
     for (int j = 0; j < segments; ++j) {
@@ -1079,6 +1482,7 @@ void build_cylinder(CMeshBuilder& mb, int segments) {
         mb.Position3f(0.0f, y, 0.0f);
         mb.Normal3f(0.0f, ny, 0.0f);
         mb.TexCoord2f(0, 0.5f, 0.5f);
+        extra.emit(mb);
         mb.AdvanceVertex();
         for (int j = 0; j <= segments; ++j) {
             const float theta = (float)j / segments * 2.0f * 3.14159265f;
@@ -1087,6 +1491,7 @@ void build_cylinder(CMeshBuilder& mb, int segments) {
             mb.Position3f(x * radius, y, z * radius);
             mb.Normal3f(0.0f, ny, 0.0f);
             mb.TexCoord2f(0, 0.5f + x * 0.5f, 0.5f + z * 0.5f);
+            extra.emit(mb);
             mb.AdvanceVertex();
         }
         for (int j = 0; j < segments; ++j) {
@@ -1102,7 +1507,7 @@ void build_cylinder(CMeshBuilder& mb, int segments) {
     }
 }
 
-void build_plane(CMeshBuilder& mb, int grid) {
+void build_plane(CMeshBuilder& mb, int grid, const VertexExtra& extra) {
     for (int i = 0; i <= grid; ++i) {
         const float v = (float)i / grid;
         for (int j = 0; j <= grid; ++j) {
@@ -1110,6 +1515,7 @@ void build_plane(CMeshBuilder& mb, int grid) {
             mb.Position3f((u - 0.5f) * 1.8f, (0.5f - v) * 1.8f, 0.0f);
             mb.Normal3f(0.0f, 0.0f, 1.0f);
             mb.TexCoord2f(0, u, v);
+            extra.emit(mb);
             mb.AdvanceVertex();
         }
     }
@@ -1171,19 +1577,19 @@ int shape_index_count(PreviewShape shape) {
     return kPlaneGrid * kPlaneGrid * 12;
 }
 
-void build_shape(CMeshBuilder& mb, PreviewShape shape) {
+void build_shape(CMeshBuilder& mb, PreviewShape shape, const VertexExtra& extra) {
     switch (shape) {
     case PreviewShape::Sphere:
-        build_sphere(mb, kSphereRings, kSphereSegments);
+        build_sphere(mb, kSphereRings, kSphereSegments, extra);
         break;
     case PreviewShape::Cube:
-        build_cube(mb);
+        build_cube(mb, extra);
         break;
     case PreviewShape::Cylinder:
-        build_cylinder(mb, kCylinderSegments);
+        build_cylinder(mb, kCylinderSegments, extra);
         break;
     case PreviewShape::Plane:
-        build_plane(mb, kPlaneGrid);
+        build_plane(mb, kPlaneGrid, extra);
         break;
     }
 }
@@ -1221,14 +1627,24 @@ void apply_lighting(IMatRenderContext* ctx) {
 // Draws a material on the given shape. Uses the caller's render context inside
 // an open BeginFrame/EndFrame block.
 bool draw_mesh(IMatRenderContext* ctx, IMaterial* material, PreviewShape shape) {
+    if (material == nullptr) {
+        return false;
+    }
     ctx->Bind(material);
+    ctx->BindLightmapPage(MATERIAL_SYSTEM_LIGHTMAP_PAGE_WHITE);
     IMesh* mesh = ctx->GetDynamicMesh(true, nullptr, nullptr, material);
     if (mesh == nullptr) {
         return false;
     }
+    const VertexFormat_t fmt = material->GetVertexFormat();
+    VertexExtra extra;
+    extra.has_color = (fmt & VERTEX_COLOR) != 0;
+    extra.has_lightmap_uv = TexCoordSize(1, fmt) > 0;
+    extra.has_texcoord2 = TexCoordSize(2, fmt) > 0;
+
     CMeshBuilder mb;
     mb.Begin(mesh, MATERIAL_TRIANGLES, shape_vertex_count(shape), shape_index_count(shape));
-    build_shape(mb, shape);
+    build_shape(mb, shape, extra);
     mb.End();
     mesh->Draw();
     return true;
@@ -1291,8 +1707,14 @@ StepResult shutdown_engine() {
     if (!g.initialized && !g.matsys && !g.fs) return ok("nothing to shut down");
 
     if (g.matsys) {
-        if (g.hwnd) g.matsys->RemoveView(reinterpret_cast<void*>(g.hwnd));
-        g.matsys->Shutdown();
+        // Only call into the material system methods that are known to be safe:
+        // RemoveView after a successful AddView, Shutdown after a successful
+        // Init. Calling them on a partially initialized matsys (e.g. its
+        // shader DLL failed to init, as on GMod) dereferences null interfaces
+        // inside materialsystem.dll and crashes.
+        release_current_material();
+        if (g.hwnd && g.view_added) g.matsys->RemoveView(reinterpret_cast<void*>(g.hwnd));
+        if (g.matsys_inited) g.matsys->Shutdown();
         g.matsys = nullptr;
         log_line("OK  ", "material system shutdown");
     }
@@ -1310,7 +1732,16 @@ StepResult shutdown_engine() {
     if (g.mats_mod) { FreeLibrary(g.mats_mod); g.mats_mod = nullptr; }
     if (g.shader_mod) { FreeLibrary(g.shader_mod); g.shader_mod = nullptr; }
     if (g.vstdlib) { FreeLibrary(g.vstdlib); g.vstdlib = nullptr; }
-    if (g.tier0) { FreeLibrary(g.tier0); g.tier0 = nullptr; }
+    if (g.tier0) {
+        typedef void (*PFNSpewOutputFunc)(SpewOutputFunc_t);
+        PFNSpewOutputFunc pfn_spew = reinterpret_cast<PFNSpewOutputFunc>(
+            GetProcAddress(g.tier0, "SpewOutputFunc"));
+        if (pfn_spew) {
+            pfn_spew(nullptr);
+        }
+        FreeLibrary(g.tier0);
+        g.tier0 = nullptr;
+    }
 
     g.initialized = false;
     return ok("engine shutdown complete");
@@ -1334,13 +1765,12 @@ StepResult set_material(const std::string& material_name) {
     if (material->IsErrorMaterial()) {
         return fail("material resolved to the error material: " + material_name);
     }
-    // NOTE: no IncrementReferenceCount here. The runtime IMaterial layout does
-    // not match the SDK 2013 header closely enough for manual refcounting; the
-    // engine only logs a benign "bad reference count 0" warning when binding.
-    g.material = material;
+    // Hand the previous material back before adopting the new one.
+    adopt_material(material);
     g.material_is_error = false;
     log_line("OK  ", "preview material: " + material_name + " (shader " +
                          material->GetShaderName() + ")");
+    log_texture_state(material, "set_material");
     return ok("material set: " + material_name);
 }
 
@@ -1454,17 +1884,17 @@ MaterialList list_materials() {
     //    indices), so this catches whichever side the walk below misses.
     {
         FileFindHandle_t handle = FILESYSTEM_INVALID_FIND_HANDLE;
-        const char* entry = g.fs->FindFirst("materials/*.vmt", &handle);
+        const char* entry = fs_find_first("materials/*.vmt", &handle);
         size_t guard = 0;
         while (entry != nullptr && guard < 400000) {
             ++guard;
-            if (!g.fs->FindIsDirectory(handle)) {
+            if (!fs_find_is_directory(handle)) {
                 add_path(entry);
             }
-            entry = g.fs->FindNext(handle);
+            entry = fs_find_next(handle);
         }
         if (handle != FILESYSTEM_INVALID_FIND_HANDLE) {
-            g.fs->FindClose(handle);
+            fs_find_close(handle);
         }
     }
 
@@ -1478,21 +1908,21 @@ MaterialList list_materials() {
             const std::string dir = pending.back();
             pending.pop_back();
             FileFindHandle_t handle = FILESYSTEM_INVALID_FIND_HANDLE;
-            const char* entry = g.fs->FindFirst((dir + "/*").c_str(), &handle);
+            const char* entry = fs_find_first((dir + "/*").c_str(), &handle);
             while (entry != nullptr && guard < 400000) {
                 ++guard;
                 const std::string name = entry;
                 if (name != "." && name != "..") {
-                    if (g.fs->FindIsDirectory(handle)) {
+                    if (fs_find_is_directory(handle)) {
                         pending.push_back(dir + "/" + name);
                     } else {
                         add_path((dir + "/" + name).c_str());
                     }
                 }
-                entry = g.fs->FindNext(handle);
+                entry = fs_find_next(handle);
             }
             if (handle != FILESYSTEM_INVALID_FIND_HANDLE) {
-                g.fs->FindClose(handle);
+                fs_find_close(handle);
             }
         }
     }
@@ -1580,6 +2010,19 @@ ThumbnailResult render_material_thumbnail(const std::string& material_name, int 
                        to_byte(g.lighting.background[2]));
     ctx->ClearBuffers(true, true, true);
 
+    // TEMP diagnostics: does ReadPixels see the clear at all?
+    {
+        unsigned char probe[4] = { 111, 112, 113, 114 };
+        ctx->ReadPixels(0, 0, 1, 1, probe, IMAGE_FORMAT_BGRA8888);
+        log_line("THMB", "after clear, readback = " + std::to_string(probe[0]) + "," +
+                             std::to_string(probe[1]) + "," + std::to_string(probe[2]));
+        ctx->Flush(true);
+        unsigned char probe2[4] = { 121, 122, 123, 124 };
+        ctx->ReadPixels(0, 0, 1, 1, probe2, IMAGE_FORMAT_BGRA8888);
+        log_line("THMB", "after clear+flush, readback = " + std::to_string(probe2[0]) + "," +
+                             std::to_string(probe2[1]) + "," + std::to_string(probe2[2]));
+    }
+
     ctx->MatrixMode(MATERIAL_PROJECTION);
     ctx->LoadIdentity();
     ctx->PerspectiveX(60.0, 1.0, 0.1, 1000.0);
@@ -1588,12 +2031,19 @@ ThumbnailResult render_material_thumbnail(const std::string& material_name, int 
     ctx->Translate(0.0f, 0.0f, -4.0f);
     apply_lighting(ctx);
 
-    // Thumbnails always use the sphere so the grid stays comparable.
     result.ok = draw_mesh(ctx, material, PreviewShape::Sphere);
 
     if (result.ok) {
+        ctx->Flush(true);
+        std::vector<unsigned char> rgb((size_t)size * (size_t)size * 3);
+        ctx->ReadPixels(0, 0, size, size, rgb.data(), IMAGE_FORMAT_RGB888);
         result.bgra.resize((size_t)size * (size_t)size * 4);
-        ctx->ReadPixels(0, 0, size, size, result.bgra.data(), IMAGE_FORMAT_RGBA8888);
+        for (int i = 0; i < size * size; ++i) {
+            result.bgra[(size_t)i * 4 + 0] = rgb[(size_t)i * 3 + 2]; // B
+            result.bgra[(size_t)i * 4 + 1] = rgb[(size_t)i * 3 + 1]; // G
+            result.bgra[(size_t)i * 4 + 2] = rgb[(size_t)i * 3 + 0]; // R
+            result.bgra[(size_t)i * 4 + 3] = 255;
+        }
         result.width = size;
         result.height = size;
 
@@ -1611,6 +2061,46 @@ ThumbnailResult render_material_thumbnail(const std::string& material_name, int 
     }
 
     g.matsys->EndFrame(); // no SwapBuffers: the on-screen image is untouched
+    return result;
+}
+
+BinaryFile read_binary_file(const std::string& game_path) {
+    BinaryFile result;
+    if (!g.fs) {
+        result.message = "file system not initialized";
+        return result;
+    }
+    result.ok = true;
+    const std::string fixed = fix_slashes(game_path);
+    FileHandle_t file = g.fs->Open(fixed.c_str(), "rb", nullptr);
+    if (file == FILESYSTEM_INVALID_HANDLE) {
+        result.message = "not found: " + game_path;
+        return result;
+    }
+
+    const unsigned int size = g.fs->Size(file);
+    // Textures are far below this; the cap only stops a corrupt Size() from
+    // triggering an unbounded allocation.
+    if (size > (256u << 20)) {
+        g.fs->Close(file);
+        result.message = "the file is too large to read: " + game_path;
+        return result;
+    }
+
+    if (size > 0) {
+        result.bytes.resize(size);
+        const int read = g.fs->Read(result.bytes.data(), (int)size, file);
+        if (read < 0) {
+            result.bytes.clear();
+            g.fs->Close(file);
+            result.message = "the file could not be read: " + game_path;
+            return result;
+        }
+        result.bytes.resize((size_t)read);
+    }
+
+    g.fs->Close(file);
+    result.found = true;
     return result;
 }
 

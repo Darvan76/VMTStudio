@@ -6,3 +6,5 @@ build/
 
 # Local tool state
 .omo/
+hlmv_debug.log
+*.tga

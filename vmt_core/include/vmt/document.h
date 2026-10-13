@@ -112,6 +112,11 @@ public:
     Result<void> set_parameter(std::string_view name, std::string_view value_text);
     Result<void> remove_parameter(std::string_view name);
 
+    // Replaces the shader name that precedes the opening brace. Only the name
+    // token is spliced, so the body (and its parameters) is left untouched and
+    // the document stays lossless. The original quoting style is preserved.
+    Result<void> set_shader(std::string_view name);
+
     // Typed helpers (body-level parameters).
     Result<int>    get_int(std::string_view name) const;
     Result<float>  get_float(std::string_view name) const;

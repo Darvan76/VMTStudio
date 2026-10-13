@@ -202,7 +202,15 @@ const char* shape_id(PreviewShape shape) {
     case PreviewShape::Cylinder:
         return "cylinder";
     case PreviewShape::Plane:
-        break;
+        return "plane";
+    case PreviewShape::BrushWall:
+        return "brush_wall";
+    case PreviewShape::BrushFloor:
+        return "brush_floor";
+    case PreviewShape::BrushCube:
+        return "brush_cube";
+    case PreviewShape::BrushDisplacement:
+        return "brush_displacement";
     }
     return "plane";
 }
@@ -222,6 +230,22 @@ bool parse_shape(const std::string& id, PreviewShape& out) {
     }
     if (id == "plane") {
         out = PreviewShape::Plane;
+        return true;
+    }
+    if (id == "brush_wall" || id == "wall") {
+        out = PreviewShape::BrushWall;
+        return true;
+    }
+    if (id == "brush_floor" || id == "floor") {
+        out = PreviewShape::BrushFloor;
+        return true;
+    }
+    if (id == "brush_cube") {
+        out = PreviewShape::BrushCube;
+        return true;
+    }
+    if (id == "brush_displacement" || id == "displacement") {
+        out = PreviewShape::BrushDisplacement;
         return true;
     }
     return false;

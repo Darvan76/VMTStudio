@@ -100,6 +100,25 @@ vmt::Result<RgbaImage> decode_vtf_preview(const std::filesystem::path& path,
                                           std::uint32_t frame,
                                           std::uint32_t max_size);
 
+// Memory-backed variants, for textures that do not live on the filesystem (a
+// VPK archive read through the game filesystem, for example). The buffer is
+// copied by VTFLib++ and is not retained after the call returns.
+//
+// `origin` is only used to label errors and file paths in diagnostics; it does
+// not have to exist on disk. Pass the archive-relative name.
+//
+// Errors: identical to the path-based variants. InvalidArgument is returned
+// when `data` is null.
+vmt::Result<VtfInfo> open_vtf_info_from_memory(const std::uint8_t* data,
+                                               std::size_t size,
+                                               const std::filesystem::path& origin = {});
+
+vmt::Result<RgbaImage> decode_vtf_preview_from_memory(const std::uint8_t* data,
+                                                      std::size_t size,
+                                                      std::uint32_t frame,
+                                                      std::uint32_t max_size,
+                                                      const std::filesystem::path& origin = {});
+
 // Module identity; also gives the static library a guaranteed symbol.
 const char* vtf_reader_version_string() noexcept;
 

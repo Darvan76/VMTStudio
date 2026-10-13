@@ -2,12 +2,15 @@
 
 #include "ui/connection_model.h"
 #include "ui/material_browser.h"
+#include "ui/material_info.h"
 #include "ui/panel_model.h"
 #include "ui/preview_options.h"
 #include "ui/preview_sync.h"
 #include "ui/session.h"
 #include "ui/settings.h"
+#include "ui/shader_catalog.h"
 #include "ui/text_encoding.h"
+#include "ui/texture_thumbnail.h"
 #include "ui/validate.h"
 #include "vmt/schema.h"
 
@@ -25,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -43,11 +47,22 @@ std::string read_all(const fs::path& path) {
 }
 
 fs::path fresh_temp_dir() {
+    static unsigned counter = 0;
     std::error_code ec;
-    const fs::path dir = fs::temp_directory_path(ec) / "vmtviewer_ui_tests";
+    const fs::path dir = fs::temp_directory_path(ec) /
+        ("vmtviewer_ui_tests_" + std::to_string(GetCurrentProcessId()) + "_" +
+         std::to_string(++counter));
     fs::remove_all(dir, ec);
     fs::create_directories(dir, ec);
     return dir;
+}
+
+std::string lower_ascii(std::string_view text) {
+    std::string result(text);
+    for (char& c : result) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return result;
 }
 
 std::vector<std::string> split_lines(const std::string& text) {
@@ -255,6 +270,115 @@ UT_TEST_CASE("ui session: save writes exactly the session text") {
     UT_CHECK_EQ(read_all(out), session.text());
 }
 
+UT_TEST_CASE("ui session: undo and redo cover typing bursts and panel edits") {
+    ui::EditorSession session;
+    UT_CHECK(session.open_file(data_path("vertexlitgeneric_phong.vmt")).ok());
+    UT_CHECK(!session.can_undo());
+    UT_CHECK(!session.can_redo());
+    const std::string original = session.text();
+
+    const std::string marker = "\"$phongexponent\" \"25\"";
+    UT_CHECK(original.find(marker) != std::string::npos);
+    std::string edit1 = original;
+    edit1.replace(edit1.find(marker), marker.size(), "\"$phongexponent\" \"40\"");
+    const std::string marker2 = "\"$phongexponent\" \"40\"";
+    std::string edit2 = edit1;
+    edit2.replace(edit2.find(marker2), marker2.size(), "\"$phongexponent\" \"50\"");
+
+    // Two rapid text edits (a typing burst) coalesce into one undo step.
+    UT_CHECK(session.set_text(edit1, session.display_name()).ok());
+    UT_CHECK(session.set_text(edit2, session.display_name()).ok());
+    UT_CHECK_EQ(session.text(), edit2);
+    UT_CHECK(session.dirty());
+    UT_CHECK(session.can_undo());
+    UT_CHECK(session.undo().ok());
+    UT_CHECK_EQ(session.text(), original);
+    UT_CHECK(!session.dirty());
+    UT_CHECK(!session.can_undo());
+    UT_CHECK(session.can_redo());
+    UT_CHECK(session.redo().ok());
+    UT_CHECK_EQ(session.text(), edit2);
+
+    // A panel edit is its own step even right after the burst.
+    UT_CHECK(session.set_parameter("$phongboost", "5").ok());
+    const std::string with_boost = session.text();
+    UT_CHECK(session.undo().ok());
+    UT_CHECK_EQ(session.text(), edit2);
+    UT_CHECK(session.undo().ok());
+    UT_CHECK_EQ(session.text(), original);
+    UT_CHECK(!session.can_undo());
+    UT_CHECK(session.redo().ok());
+    UT_CHECK_EQ(session.text(), edit2);
+    UT_CHECK(session.redo().ok());
+    UT_CHECK_EQ(session.text(), with_boost);
+    UT_CHECK(!session.can_redo());
+
+    // A degenerate edit (empty text) is still a full history step and comes
+    // back exactly; the parser reports it through diagnostics, not failure.
+    const std::string good = session.text();
+    UT_CHECK(session.set_text("", session.display_name()).ok());
+    UT_CHECK(session.text().empty());
+    UT_CHECK(session.undo().ok());
+    UT_CHECK_EQ(session.text(), good);
+    UT_CHECK(session.text_is_valid());
+    UT_CHECK(session.can_redo());
+    UT_CHECK(session.redo().ok());
+    UT_CHECK(session.text().empty());
+}
+
+UT_TEST_CASE("ui session: revert restores the last saved revision and is undoable") {
+    ui::EditorSession session;
+    UT_CHECK(session.open_file(data_path("vertexlitgeneric_phong.vmt")).ok());
+    const fs::path dir = fresh_temp_dir();
+    const fs::path out = dir / "revert.vmt";
+    UT_CHECK(session.save_as(out).ok());
+    const std::string saved = session.text();
+    UT_CHECK(!session.can_revert());
+
+    UT_CHECK(session.set_parameter("$phongboost", "7").ok());
+    UT_CHECK(session.dirty());
+    UT_CHECK(session.can_revert());
+    UT_CHECK(session.revert().ok());
+    UT_CHECK(!session.dirty());
+    UT_CHECK_EQ(session.text(), saved);
+    UT_CHECK(!session.can_revert());
+    UT_CHECK(session.can_undo());
+    UT_CHECK(session.undo().ok());
+    UT_CHECK(session.dirty());
+    UT_CHECK(session.text() != saved);
+}
+
+UT_TEST_CASE("ui session: opening a material clears the edit history") {
+    ui::EditorSession session;
+    UT_CHECK(session.open_file(data_path("vertexlitgeneric_phong.vmt")).ok());
+    UT_CHECK(session.set_parameter("$phongboost", "5").ok());
+    UT_CHECK(session.can_undo());
+    UT_CHECK(session.open_file(data_path("vertexlitgeneric_phong.vmt")).ok());
+    UT_CHECK(!session.can_undo());
+    UT_CHECK(!session.can_redo());
+    UT_CHECK(!session.dirty());
+}
+
+UT_TEST_CASE("ui session: saving is atomic and leaves no temp file") {
+    ui::EditorSession session;
+    UT_CHECK(session.open_file(data_path("vertexlitgeneric_phong.vmt")).ok());
+    UT_CHECK(session.set_parameter("$phongboost", "5").ok());
+
+    const fs::path dir = fresh_temp_dir();
+    const fs::path out = dir / "atomic.vmt";
+    UT_CHECK(session.save_as(out).ok());
+    UT_CHECK_EQ(read_all(out), session.text());
+    fs::path temp = out;
+    temp += L".tmp";
+    UT_CHECK(!fs::exists(temp));
+
+    // Overwriting exercises the remove + retry rename path.
+    UT_CHECK(session.set_parameter("$phongboost", "6").ok());
+    UT_CHECK(session.save().ok());
+    UT_CHECK_EQ(read_all(out), session.text());
+    UT_CHECK(!fs::exists(temp));
+}
+
 UT_TEST_CASE("ui panel: groups, values and defaults come from schema and document") {
     const vmt::SchemaLibrary schemas = load_schemas();
     ui::EditorSession session;
@@ -391,7 +515,7 @@ UT_TEST_CASE("ui settings: roundtrip, dedupe and cap") {
 }
 
 UT_TEST_CASE("ui encoding: utf8, ansi and invalid buffers behave") {
-    // "café ✓" as explicit UTF-8 bytes (source escapes are charset-dependent).
+    // "cafÃ© âœ“" as explicit UTF-8 bytes (source escapes are charset-dependent).
     std::string utf8;
     utf8 += "caf";
     utf8.push_back(static_cast<char>(0xC3));
@@ -1080,6 +1204,525 @@ UT_TEST_CASE("ui browser: thumbnail cache name is stable and a bmp round-trips")
     UT_CHECK(!ui::read_bmp_size(text, width, height));
 }
 
+// --- texture thumbnails (VTF decoding without the engine) ----------------------
+
+namespace {
+
+// TextureSource backed by an in-memory map, so the tests never touch the game
+// files. Records every path it was asked for.
+class FakeTextureSource final : public ui::TextureSource {
+public:
+    std::vector<std::pair<std::string, std::vector<unsigned char>>> files;
+    mutable std::vector<std::string> requests;
+
+    void add(const std::string& path, std::vector<unsigned char> bytes) {
+        files.emplace_back(path, std::move(bytes));
+    }
+
+    vmt::Result<std::vector<unsigned char>> read(const std::string& game_path) override {
+        requests.push_back(game_path);
+        for (const auto& entry : files) {
+            if (entry.first == game_path) {
+                return vmt::Ok(entry.second);
+            }
+        }
+        return vmt::Err<std::vector<unsigned char>>(
+            vmt::make_error(vmt::ErrorCode::NotFound, "not found: " + game_path));
+    }
+};
+
+// Builds a minimal but genuinely decodable DXT1 VTF so the tests do not depend
+// on a binary fixture existing.
+//
+// Field offsets follow SVTFHeader_70 as VTFLib++ declares it (VTFFormat.h):
+// the 16-byte base header (signature, version[2], header size) is followed by
+// Width/Height as UShort, then a 32-bit Flags, Frames, StartFrame, the
+// 16-byte-aligned reflectivity block, and the format/mip fields. The struct is
+// padded to 16 bytes, so a VTF 7.0 header is 64 bytes and the image payload
+// starts there.
+//
+// `width`/`height` must be multiples of 4; `blocks_wide` blocks are emitted per
+// row so 16x4 textures work.
+std::vector<unsigned char> make_dxt1_vtf(std::uint16_t width, std::uint16_t height,
+                                         int blocks_wide = 1) {
+    constexpr std::size_t kHeaderSize = 64;
+    const std::size_t blocks = static_cast<std::size_t>(blocks_wide) * (height / 4);
+    std::vector<unsigned char> bytes(kHeaderSize + blocks * 8, 0);
+
+    const auto put16 = [&bytes](std::size_t at, std::uint16_t value) {
+        bytes[at + 0] = static_cast<unsigned char>(value & 0xFFu);
+        bytes[at + 1] = static_cast<unsigned char>((value >> 8) & 0xFFu);
+    };
+    const auto put32 = [&bytes](std::size_t at, std::uint32_t value) {
+        bytes[at + 0] = static_cast<unsigned char>(value & 0xFFu);
+        bytes[at + 1] = static_cast<unsigned char>((value >> 8) & 0xFFu);
+        bytes[at + 2] = static_cast<unsigned char>((value >> 16) & 0xFFu);
+        bytes[at + 3] = static_cast<unsigned char>((value >> 24) & 0xFFu);
+    };
+
+    bytes[0] = 'V';
+    bytes[1] = 'T';
+    bytes[2] = 'F';
+    bytes[3] = 0;
+    put32(4, 7);              // version major
+    put32(8, 0);              // version minor
+    put32(12, kHeaderSize);   // header size
+    put16(16, width);         // width
+    put16(18, height);        // height
+    put32(20, 4);             // flags: TEXTUREFLAGS_NOMIPMAPS
+    put16(24, 1);             // frames
+    put16(26, 0);             // start frame
+    put32(28, 0);             // padding (16-byte alignment)
+    // Reflectivity[3] floats, Padding1 and BumpScale occupy 32..51; zero is a
+    // valid neutral value.
+    // VTFImageFormat is a plain C enum, so MSVC gives it 4 bytes, not 2. That
+    // is what shifts every later field down: with a 16-bit format value, VTFLib++
+    // reads the mip count as the format and reports garbage.
+    put32(52, 13);            // ImageFormat: IMAGE_FORMAT_DXT1
+    bytes[56] = 1;            // MipCount
+    put32(57, 0);             // LowResImageFormat (none)
+    bytes[61] = 0;            // LowResImageWidth
+    bytes[62] = 0;            // LowResImageHeight
+
+    // Each DXT1 block in RGB565: colour0 = 0xF800 (pure red), colour1 = 0x001F
+    // (pure blue), and all four 2-bit indices 0, so every texel decodes to
+    // opaque red.
+    for (std::size_t block = 0; block < blocks; ++block) {
+        const std::size_t at = kHeaderSize + block * 8;
+        put16(at + 0, 0xF800);      // colour0 = red
+        put16(at + 2, 0x001F);      // colour1 = blue
+        put32(at + 4, 0x00000000);  // indices all 0 -> colour0
+    }
+    return bytes;
+}
+
+std::vector<unsigned char> make_dxt1_4x4() {
+    return make_dxt1_vtf(4, 4, 1);
+}
+
+std::string vmt_with_base_texture(const std::string& texture) {
+    return "\"UnlitGeneric\"\n{\n\t\"$basetexture\" \"" + texture + "\"\n}\n";
+}
+
+} // namespace
+
+UT_TEST_CASE("ui texture: texture references are normalized like the engine") {
+    const std::vector<std::string> refs =
+        ui::texture_references_from_vmt(vmt_with_base_texture("brick/Brick05"));
+    UT_CHECK_EQ(refs.size(), static_cast<std::size_t>(1));
+    if (!refs.empty()) {
+        UT_CHECK_EQ(refs[0], std::string("materials/brick/brick05.vtf"));
+    }
+
+    // Already-prefixed and extension-carrying values must not be mangled.
+    const std::vector<std::string> prefixed =
+        ui::texture_references_from_vmt(vmt_with_base_texture("materials/dev/dev01.vtf"));
+    UT_CHECK_EQ(prefixed.size(), static_cast<std::size_t>(1));
+    if (!prefixed.empty()) {
+        UT_CHECK_EQ(prefixed[0], std::string("materials/dev/dev01.vtf"));
+    }
+
+    // Backslashes are the most common authoring mistake; accept them.
+    const std::vector<std::string> slashes =
+        ui::texture_references_from_vmt(vmt_with_base_texture("brick\\brick05"));
+    UT_CHECK_EQ(slashes.size(), static_cast<std::size_t>(1));
+    if (!slashes.empty()) {
+        UT_CHECK_EQ(slashes[0], std::string("materials/brick/brick05.vtf"));
+    }
+}
+
+UT_TEST_CASE("ui texture: $basetexture wins over $texture2") {
+    const std::string vmt = "\"UnlitGeneric\"\n{\n"
+                            "\t\"$texture2\" \"decals/decals001\"\n"
+                            "\t\"$basetexture\" \"brick/brick05\"\n"
+                            "\t\"$texture3\" \"metal/metalwall001\"\n"
+                            "}\n";
+    const std::vector<std::string> refs = ui::texture_references_from_vmt(vmt);
+    UT_CHECK_EQ(refs.size(), static_cast<std::size_t>(3));
+    if (refs.size() == 3) {
+        UT_CHECK_EQ(refs[0], std::string("materials/brick/brick05.vtf"));
+        UT_CHECK_EQ(refs[1], std::string("materials/decals/decals001.vtf"));
+        UT_CHECK_EQ(refs[2], std::string("materials/metal/metalwall001.vtf"));
+    }
+}
+
+UT_TEST_CASE("ui texture: render targets and env_cubemap are skipped") {
+    const std::string vmt = "\"UnlitGeneric\"\n{\n"
+                            "\t\"$basetexture\" \"_rt_fullscreen\"\n"
+                            "\t\"$texture2\" \"env_cubemap\"\n"
+                            "}\n";
+    UT_CHECK(ui::texture_references_from_vmt(vmt).empty());
+}
+
+UT_TEST_CASE("ui texture: a duplicated texture reference is only listed once") {
+    const std::string vmt = "\"UnlitGeneric\"\n{\n"
+                            "\t\"$basetexture\" \"brick/brick05\"\n"
+                            "\t\"$texture2\" \"BRICK/Brick05\"\n"
+                            "}\n";
+    UT_CHECK_EQ(ui::texture_references_from_vmt(vmt).size(), static_cast<std::size_t>(1));
+}
+
+UT_TEST_CASE("ui texture: a material with no texture reports NotFound") {
+    FakeTextureSource source;
+    const auto thumbnail =
+        ui::make_texture_thumbnail("\"UnlitGeneric\"\n{\n}\n", source, 64);
+    UT_CHECK(!thumbnail.ok());
+    if (!thumbnail.ok()) {
+        UT_CHECK_EQ(static_cast<int>(thumbnail.error().code),
+                    static_cast<int>(vmt::ErrorCode::NotFound));
+    }
+}
+
+UT_TEST_CASE("ui texture: a real VTF decodes to a non-empty BGRA thumbnail") {
+    FakeTextureSource source;
+    source.add("materials/brick/test05.vtf", make_dxt1_4x4());
+
+    const auto thumbnail =
+        ui::make_texture_thumbnail(vmt_with_base_texture("brick/test05"), source, 64);
+    UT_CHECK(thumbnail.ok());
+    if (!thumbnail.ok()) {
+        return;
+    }
+
+    const ui::TextureThumbnail& image = thumbnail.value();
+    UT_CHECK_EQ(image.width, 4);
+    UT_CHECK_EQ(image.height, 4);
+    UT_CHECK_EQ(image.bgra.size(), static_cast<std::size_t>(4 * 4 * 4));
+    UT_CHECK_EQ(image.texture_name, std::string("materials/brick/test05.vtf"));
+
+    // DXT1 block above is colour0=red, colour1=blue, all indices 0, so every
+    // texel must decode to opaque red. An all-zero buffer would mean the
+    // channel order or the decode went wrong, which is exactly the failure this
+    // pipeline replaces.
+    std::size_t red_pixels = 0;
+    for (std::size_t i = 0; i + 3 < image.bgra.size(); i += 4) {
+        if (image.bgra[i + 0] == 0 && image.bgra[i + 1] == 0 && image.bgra[i + 2] == 255 &&
+            image.bgra[i + 3] == 255) {
+            ++red_pixels;
+        }
+    }
+    UT_CHECK_EQ(red_pixels, image.bgra.size() / 4);
+    UT_CHECK(!image.has_alpha);
+}
+
+UT_TEST_CASE("ui texture: a decoded thumbnail writes a valid BMP") {
+    FakeTextureSource source;
+    source.add("materials/brick/test05.vtf", make_dxt1_4x4());
+    const auto thumbnail =
+        ui::make_texture_thumbnail(vmt_with_base_texture("brick/test05"), source, 64);
+    UT_CHECK(thumbnail.ok());
+    if (!thumbnail.ok()) {
+        return;
+    }
+
+    const fs::path bmp = fresh_temp_dir() / "thumb.bmp";
+    const ui::TextureThumbnail& image = thumbnail.value();
+    UT_CHECK(ui::write_bmp_from_bgra(bmp, image.width, image.height, image.bgra.data(), true));
+
+    int width = 0;
+    int height = 0;
+    UT_CHECK(ui::read_bmp_size(bmp, width, height));
+    UT_CHECK_EQ(width, 4);
+    UT_CHECK_EQ(height, 4);
+}
+
+UT_TEST_CASE("ui texture: a missing texture reports NotFound, an empty buffer does not crash") {
+    FakeTextureSource source;
+    source.add("materials/brick/test05.vtf", {});
+
+    const auto missing =
+        ui::make_texture_thumbnail(vmt_with_base_texture("brick/nothere"), source, 64);
+    UT_CHECK(!missing.ok());
+    if (!missing.ok()) {
+        UT_CHECK_EQ(static_cast<int>(missing.error().code),
+                    static_cast<int>(vmt::ErrorCode::NotFound));
+    }
+
+    // An empty file is a real failure and must be reported, not dereferenced.
+    const auto empty =
+        ui::make_texture_thumbnail(vmt_with_base_texture("brick/test05"), source, 64);
+    UT_CHECK(!empty.ok());
+    if (!empty.ok()) {
+        UT_CHECK(!empty.error().message.empty());
+    }
+}
+
+UT_TEST_CASE("ui texture: a failure names every texture it attempted") {
+    // The browser decides whether to fall back to the engine render from this
+    // message, so it has to name each file and say why that one failed. The
+    // "why" text belongs to whichever layer rejected it (the source for a read
+    // failure, the decoder for a bad header), so the test only pins the parts
+    // this module owns: both paths listed, and each carrying its own reason.
+    FakeTextureSource source;
+    const std::string vmt = "\"UnlitGeneric\"\n{\n"
+                            "\t\"$basetexture\" \"hdr/skies_hdr\"\n"
+                            "\t\"$texture2\" \"gone/missing\"\n"
+                            "}\n";
+    const auto thumbnail = ui::make_texture_thumbnail(vmt, source, 64);
+    UT_CHECK(!thumbnail.ok());
+    if (!thumbnail.ok()) {
+        const std::string& message = thumbnail.error().message;
+        UT_CHECK(message.find("hdr/skies_hdr") != std::string::npos);
+        UT_CHECK(message.find("gone/missing") != std::string::npos);
+        // The unreadable texture contributes the source's own "not found".
+        UT_CHECK(message.find("not found") != std::string::npos);
+        // The present-but-broken one contributes a reason too, so the two are
+        // distinguishable in the status line.
+        UT_CHECK(message.find("hdr/skies_hdr") < message.find("gone/missing"));
+    }
+}
+
+UT_TEST_CASE("ui texture: a corrupt texture does not stop a later valid one") {
+    // $basetexture is corrupt; $texture2 is fine. The thumbnail must come from
+    // $texture2 rather than reporting failure.
+    FakeTextureSource source;
+    std::vector<unsigned char> garbage(128, 0xAB);
+    source.add("materials/broken/broken05.vtf", garbage);
+    source.add("materials/brick/test05.vtf", make_dxt1_4x4());
+
+    const std::string vmt = "\"UnlitGeneric\"\n{\n"
+                            "\t\"$basetexture\" \"broken/broken05\"\n"
+                            "\t\"$texture2\" \"brick/test05\"\n"
+                            "}\n";
+    const auto thumbnail = ui::make_texture_thumbnail(vmt, source, 64);
+    UT_CHECK(thumbnail.ok());
+    if (thumbnail.ok()) {
+        UT_CHECK_EQ(thumbnail.value().texture_name,
+                    std::string("materials/brick/test05.vtf"));
+    }
+}
+
+UT_TEST_CASE("ui texture: references are tried in order and stop at the first hit") {
+    FakeTextureSource source;
+    source.add("materials/decals/decals001.vtf", make_dxt1_4x4());
+
+    const std::string vmt = "\"UnlitGeneric\"\n{\n"
+                            "\t\"$basetexture\" \"brick/absent\"\n"
+                            "\t\"$texture2\" \"decals/decals001\"\n"
+                            "}\n";
+    const auto thumbnail = ui::make_texture_thumbnail(vmt, source, 64);
+    UT_CHECK(thumbnail.ok());
+    if (thumbnail.ok()) {
+        UT_CHECK_EQ(thumbnail.value().texture_name,
+                    std::string("materials/decals/decals001.vtf"));
+    }
+    // It must not keep asking after a success.
+    UT_CHECK_EQ(source.requests.size(), static_cast<std::size_t>(2));
+}
+
+UT_TEST_CASE("ui texture: max_size downscales while preserving aspect") {
+    // 16x4 texture, so an 8-pixel cap must yield 8x2 and not 8x8.
+    FakeTextureSource source;
+    source.add("materials/wide/wide05.vtf", make_dxt1_vtf(16, 4, 4));
+    const auto thumbnail =
+        ui::make_texture_thumbnail(vmt_with_base_texture("wide/wide05"), source, 8);
+    UT_CHECK(thumbnail.ok());
+    if (thumbnail.ok()) {
+        UT_CHECK_EQ(thumbnail.value().width, 8);
+        UT_CHECK_EQ(thumbnail.value().height, 2);
+        UT_CHECK_EQ(thumbnail.value().bgra.size(), static_cast<std::size_t>(8 * 2 * 4));
+    }
+}
+
+// --- material info panel -------------------------------------------------------
+
+UT_TEST_CASE("ui info: non-base texture parameters are discovered too") {
+    // $basetexture alone is not enough: bump/normal/detail/envmap all reference
+    // files the user wants sized. The schema drives this when available, and the
+    // name heuristic covers shaders with no schema.
+    FakeTextureSource source;
+    source.add("materials/cleantextures/brick01.vtf", make_dxt1_vtf(8, 8, 2));
+    source.add("materials/cleantextures/brickbumpmap.vtf", make_dxt1_vtf(8, 8, 2));
+
+    const std::string vmt = "\"LightmappedGeneric\"\n{\n"
+                            "\t\"$basetexture\" \"cleantextures/brick01\"\n"
+                            "\t\"$bumpmap\" \"cleantextures/brickbumpmap\"\n"
+                            "\t\"$surfaceprop\" \"brick\"\n"
+                            "}\n";
+    const ui::MaterialInfo info = ui::collect_material_info(vmt, source, false);
+    UT_CHECK_EQ(info.textures.size(), static_cast<std::size_t>(2));
+    if (info.textures.size() == 2) {
+        UT_CHECK_EQ(info.textures[0].parameter, std::string("$basetexture"));
+        UT_CHECK_EQ(info.textures[1].parameter, std::string("$bumpmap"));
+    }
+    // $surfaceprop must not be mistaken for a texture.
+    UT_CHECK(!ui::is_texture_parameter_name("$surfaceprop"));
+    UT_CHECK(ui::is_texture_parameter_name("$bumpmap"));
+    UT_CHECK(ui::is_texture_parameter_name("$normalmap"));
+    UT_CHECK(ui::is_texture_parameter_name("$detail"));
+    UT_CHECK(ui::is_texture_parameter_name("$basetexture2"));
+    UT_CHECK(!ui::is_texture_parameter_name("$color"));
+    UT_CHECK(!ui::is_texture_parameter_name("$phong"));
+}
+
+UT_TEST_CASE("ui info: schema-declared textures are followed even without a known suffix") {
+    // A schema can name a texture parameter that the heuristic would miss.
+    FakeTextureSource source;
+    source.add("materials/a/alpha.vtf", make_dxt1_vtf(8, 8, 2));
+
+    const std::string vmt = "\"LightmappedGeneric\"\n{\n"
+                            "\t\"$alphamaskmodulate\" \"a/alpha\"\n"
+                            "}\n";
+    const std::set<std::string> schema = { "$alphamaskmodulate" };
+    const ui::MaterialInfo info = ui::collect_material_info(vmt, source, true, schema);
+    UT_CHECK_EQ(info.textures.size(), static_cast<std::size_t>(1));
+    if (!info.textures.empty()) {
+        UT_CHECK_EQ(info.textures[0].parameter, std::string("$alphamaskmodulate"));
+        UT_CHECK(info.textures[0].found);
+    }
+}
+
+UT_TEST_CASE("ui info: a plain material reports its shader and one texture") {
+    FakeTextureSource source;
+    source.add("materials/brick/test05.vtf", make_dxt1_vtf(16, 16, 4));
+
+    const ui::MaterialInfo info =
+        ui::collect_material_info(vmt_with_base_texture("brick/test05"), source, true);
+    UT_CHECK_EQ(info.shader, std::string("UnlitGeneric"));
+    UT_CHECK(info.shader_known);
+    UT_CHECK_EQ(info.textures.size(), static_cast<std::size_t>(1));
+    UT_CHECK(!info.any_texture_missing);
+    UT_CHECK(!info.any_texture_undecodable);
+
+    const ui::TextureInfo& texture = info.textures[0];
+    UT_CHECK_EQ(texture.parameter, std::string("$basetexture"));
+    UT_CHECK_EQ(texture.game_path, std::string("materials/brick/test05.vtf"));
+    UT_CHECK(texture.found);
+    UT_CHECK(texture.decoded);
+    UT_CHECK_EQ(texture.format_name, std::string("DXT1"));
+    UT_CHECK_EQ(texture.width, 16u);
+    UT_CHECK_EQ(texture.height, 16u);
+    UT_CHECK_EQ(texture.vram_size, 16u * 16u * 4u);
+    UT_CHECK(!texture.is_cubemap);
+    UT_CHECK(!texture.is_hdr);
+}
+
+UT_TEST_CASE("ui info: every referenced texture is described, not just the first") {
+    FakeTextureSource source;
+    source.add("materials/brick/test05.vtf", make_dxt1_vtf(8, 8, 2));
+    source.add("materials/decals/decals001.vtf", make_dxt1_vtf(8, 8, 2));
+
+    const std::string vmt = "\"UnlitGeneric\"\n{\n"
+                            "\t\"$basetexture\" \"brick/test05\"\n"
+                            "\t\"$texture2\" \"decals/decals001\"\n"
+                            "}\n";
+    const ui::MaterialInfo info = ui::collect_material_info(vmt, source, true);
+    UT_CHECK_EQ(info.textures.size(), static_cast<std::size_t>(2));
+    if (info.textures.size() == 2) {
+        // The parameter each texture came from must survive, since that is how
+        // the panel explains what the material is doing.
+        UT_CHECK_EQ(info.textures[0].parameter, std::string("$basetexture"));
+        UT_CHECK_EQ(info.textures[1].parameter, std::string("$texture2"));
+        UT_CHECK(info.textures[1].found);
+    }
+    UT_CHECK_EQ(info.vram_total, 8u * 8u * 4u * 2u);
+}
+
+UT_TEST_CASE("ui info: a missing texture is reported but does not fail the scan") {
+    FakeTextureSource source;
+    source.add("materials/brick/test05.vtf", make_dxt1_vtf(8, 8, 2));
+
+    const std::string vmt = "\"UnlitGeneric\"\n{\n"
+                            "\t\"$basetexture\" \"brick/test05\"\n"
+                            "\t\"$texture2\" \"gone/absent\"\n"
+                            "}\n";
+    const ui::MaterialInfo info = ui::collect_material_info(vmt, source, true);
+    UT_CHECK_EQ(info.textures.size(), static_cast<std::size_t>(2));
+    if (info.textures.size() == 2) {
+        UT_CHECK(info.textures[0].found);
+        UT_CHECK(!info.textures[1].found);
+        UT_CHECK(!info.textures[1].note.empty());
+    }
+    UT_CHECK(info.any_texture_missing);
+    // The good texture still contributes its VRAM.
+    UT_CHECK(info.vram_total > 0);
+}
+
+UT_TEST_CASE("ui info: a corrupt texture keeps its size but is marked undecodable") {
+    FakeTextureSource source;
+    std::vector<unsigned char> garbage(2048, 0x5A);
+    source.add("materials/broken/broken05.vtf", garbage);
+
+    const ui::MaterialInfo info =
+        ui::collect_material_info(vmt_with_base_texture("broken/broken05"), source, true);
+    UT_CHECK_EQ(info.textures.size(), static_cast<std::size_t>(1));
+    if (!info.textures.empty()) {
+        const ui::TextureInfo& texture = info.textures[0];
+        UT_CHECK(texture.found);
+        UT_CHECK(!texture.decoded);
+        UT_CHECK(!texture.note.empty());
+        UT_CHECK_EQ(texture.file_size, static_cast<std::uint64_t>(garbage.size()));
+    }
+    UT_CHECK(info.any_texture_undecodable);
+}
+
+UT_TEST_CASE("ui info: a material with no texture still reports its shader") {
+    FakeTextureSource source;
+    const ui::MaterialInfo info =
+        ui::collect_material_info("\"UnlitGeneric\"\n{\n\t\"$color\" \"[1 1 1]\"\n}\n",
+                                  source, true);
+    UT_CHECK_EQ(info.shader, std::string("UnlitGeneric"));
+    UT_CHECK(info.textures.empty());
+    UT_CHECK_EQ(info.parameter_count, static_cast<std::size_t>(1));
+    UT_CHECK(!info.parameter_keys.empty());
+}
+
+UT_TEST_CASE("ui info: an unknown shader is flagged") {
+    FakeTextureSource source;
+    const ui::MaterialInfo info =
+        ui::collect_material_info("\"SomeCustomShader\"\n{\n}\n", source, false);
+    UT_CHECK_EQ(info.shader, std::string("SomeCustomShader"));
+    UT_CHECK(!info.shader_known);
+}
+
+UT_TEST_CASE("ui info: parse diagnostics are counted") {
+    FakeTextureSource source;
+    // An unterminated string is a parse diagnostic; the parser still recovers.
+    const ui::MaterialInfo info =
+        ui::collect_material_info("\"UnlitGeneric\"\n{\n\t\"$basetexture\" \"oops\n}\n",
+                                  source, true);
+    UT_CHECK(info.diagnostic_count > 0);
+}
+
+UT_TEST_CASE("ui info: formatting includes size, format and the texture path") {
+    FakeTextureSource source;
+    source.add("materials/brick/test05.vtf", make_dxt1_vtf(16, 16, 4));
+
+    const ui::MaterialInfo info =
+        ui::collect_material_info(vmt_with_base_texture("brick/test05"), source, true);
+    const std::string text = ui::format_material_info(info);
+
+    UT_CHECK(text.find("UnlitGeneric") != std::string::npos);
+    UT_CHECK(text.find("materials/brick/test05.vtf") != std::string::npos);
+    UT_CHECK(text.find("$basetexture") != std::string::npos);
+    UT_CHECK(text.find("16x16") != std::string::npos);
+    UT_CHECK(text.find("DXT1") != std::string::npos);
+    UT_CHECK(text.find("VTF 7") != std::string::npos);
+    // The whole point of the panel: a human-readable size for both disk and VRAM.
+    UT_CHECK(text.find("file ") != std::string::npos);
+    UT_CHECK(text.find("vram ") != std::string::npos);
+    UT_CHECK(text.find("VRAM") != std::string::npos);
+}
+
+UT_TEST_CASE("ui info: byte formatting switches units") {
+    UT_CHECK_EQ(ui::format_bytes(0), std::string("0 B"));
+    UT_CHECK_EQ(ui::format_bytes(312), std::string("312 B"));
+    UT_CHECK_EQ(ui::format_bytes(1024), std::string("1 KB"));
+    UT_CHECK_EQ(ui::format_bytes(853504), std::string("834 KB"));
+    // 1.5 MB keeps one decimal; 12 MB does not need one.
+    UT_CHECK_EQ(ui::format_bytes(1572864), std::string("1.5 MB"));
+    UT_CHECK_EQ(ui::format_bytes(12582912), std::string("12 MB"));
+}
+
+UT_TEST_CASE("ui info: a material without textures formats without crashing") {
+    FakeTextureSource source;
+    const ui::MaterialInfo info =
+        ui::collect_material_info("\"UnlitGeneric\"\n{\n}\n", source, true);
+    const std::string text = ui::format_material_info(info);
+    UT_CHECK(text.find("Textures") != std::string::npos);
+    UT_CHECK(!text.empty());
+}
+
 // --- Phase 9: preview options --------------------------------------------------
 
 UT_TEST_CASE("ui preview options: environments pick rigs and directions") {
@@ -1136,6 +1779,10 @@ UT_TEST_CASE("ui preview options: ids and settings round-trip") {
 
     ui::PreviewShape shape;
     UT_CHECK(ui::parse_shape("plane", shape) && shape == ui::PreviewShape::Plane);
+    UT_CHECK(ui::parse_shape("brush_wall", shape) && shape == ui::PreviewShape::BrushWall);
+    UT_CHECK(ui::parse_shape("brush_floor", shape) && shape == ui::PreviewShape::BrushFloor);
+    UT_CHECK(ui::parse_shape("brush_cube", shape) && shape == ui::PreviewShape::BrushCube);
+    UT_CHECK(ui::parse_shape("brush_displacement", shape) && shape == ui::PreviewShape::BrushDisplacement);
     UT_CHECK(!ui::parse_shape("dodecahedron", shape));
 }
 
@@ -1205,4 +1852,621 @@ UT_TEST_CASE("ui preview: override writes at the material's own path and is atom
     UT_CHECK(!ui::write_preview_material_at(root, "C:\\windows\\evil", "x").ok());
     UT_CHECK(!ui::write_preview_material_at(root, "", "x").ok());
     UT_CHECK(!fs::exists(root / "evil.vmt"));
+}
+
+UT_TEST_CASE("ui session: set_shader rewrites the header and is undoable") {
+    ui::EditorSession session;
+    const std::string text =
+        "\"VertexLitGeneric\"\n"
+        "{\n"
+        "    \"$basetexture\" \"brick/brick05\"\n"
+        "    \"$vertexcolor\" 1\n"
+        "}\n";
+    UT_CHECK(session.open_text(text, "brick/test.vmt"));
+    UT_CHECK(!session.dirty());
+
+    UT_CHECK(session.set_shader("UnlitGeneric"));
+    UT_CHECK(session.dirty());
+    UT_CHECK(session.text_is_valid());
+    UT_CHECK(session.document() != nullptr);
+    if (session.document() != nullptr) {
+        UT_CHECK(session.document()->shader() == "UnlitGeneric");
+    }
+    // Parameters survive the shader switch: the switch never deletes data.
+    UT_CHECK(session.text().find("\"$basetexture\" \"brick/brick05\"") != std::string::npos);
+    UT_CHECK(session.text().find("VertexLitGeneric") == std::string::npos);
+
+    UT_CHECK(session.undo());
+    UT_CHECK_EQ(session.text(), text);
+    if (session.document() != nullptr) {
+        UT_CHECK(session.document()->shader() == "VertexLitGeneric");
+    }
+    UT_CHECK(session.redo());
+    if (session.document() != nullptr) {
+        UT_CHECK(session.document()->shader() == "UnlitGeneric");
+    }
+}
+
+UT_TEST_CASE("ui session: set_shader refuses names that are not a single token") {
+    ui::EditorSession session;
+    const std::string text = "\"VertexLitGeneric\"\n{\n}\n";
+    UT_CHECK(session.open_text(text, "a.vmt"));
+
+    UT_CHECK(!session.set_shader("Vertex Lit").ok());
+    UT_CHECK(!session.set_shader("").ok());
+    UT_CHECK(!session.set_shader("Vertex{Lit").ok());
+
+    // A rejected name leaves the document, the text and the dirty flag alone.
+    if (session.document() != nullptr) {
+        UT_CHECK(session.document()->shader() == "VertexLitGeneric");
+    }
+    UT_CHECK_EQ(session.text(), text);
+    UT_CHECK(!session.dirty());
+    UT_CHECK(session.last_error().code != vmt::ErrorCode::Ok);
+
+    // ...and a valid one still works afterwards.
+    UT_CHECK(session.set_shader("UnlitGeneric"));
+    if (session.document() != nullptr) {
+        UT_CHECK(session.document()->shader() == "UnlitGeneric");
+    }
+}
+
+UT_TEST_CASE("shader catalog: names are sorted, unique and cover the schema set") {
+    const std::vector<std::string>& known = ui::known_shader_names();
+    UT_CHECK(known.size() > 20);
+
+    // Sorted case-insensitively and free of duplicates, as documented.
+    std::string previous_key;
+    for (std::size_t i = 0; i < known.size(); ++i) {
+        UT_CHECK(!known[i].empty());
+        const std::string key = lower_ascii(known[i]);
+        if (i > 0) {
+            UT_CHECK(previous_key < key);
+        }
+        previous_key = key;
+    }
+
+    UT_CHECK(ui::find_shader_picker_index(known, "VertexLitGeneric") >= 0);
+    UT_CHECK(ui::find_shader_picker_index(known, "vertexlitgeneric") >= 0);
+    UT_CHECK_EQ(ui::find_shader_picker_index(known, "vertexlitgeneric"),
+                ui::find_shader_picker_index(known, "VertexLitGeneric"));
+    UT_CHECK_EQ(ui::find_shader_picker_index(known, "NotAShader"), -1);
+    UT_CHECK_EQ(ui::find_shader_picker_index(known, ""), -1);
+}
+
+UT_TEST_CASE("shader catalog: the picker merges the loaded schema shaders in") {
+    const auto library = vmt::SchemaLibrary::load_dir(fs::path(VMT_SCHEMA_DIR));
+    UT_CHECK(library.ok());
+    if (!library.ok()) return;
+
+    const std::vector<std::string> picker = ui::shader_picker_names(&library.value());
+    UT_CHECK(picker.size() >= ui::known_shader_names().size());
+    for (const std::string& name : library.value().shader_names()) {
+        UT_CHECK(ui::find_shader_picker_index(picker, name) >= 0);
+        // A shader the editor has a schema for must also be offered without the
+        // schema library loaded, i.e. the catalog itself covers it.
+        UT_CHECK(ui::find_shader_picker_index(ui::known_shader_names(), name) >= 0);
+    }
+
+    // Sorted and free of duplicates, case-insensitively.
+    std::string previous_key;
+    for (std::size_t i = 0; i < picker.size(); ++i) {
+        const std::string key = lower_ascii(picker[i]);
+        if (i > 0) {
+            UT_CHECK(previous_key < key);
+        }
+        previous_key = key;
+    }
+
+    // A null library is valid and yields the bare catalog.
+    const std::vector<std::string> bare = ui::shader_picker_names(nullptr);
+    UT_CHECK_EQ(bare.size(), ui::known_shader_names().size());
+}
+
+UT_TEST_CASE("shader catalog: applying a shader repopulates the panel from its schema") {
+    auto library = vmt::SchemaLibrary::load_dir(fs::path(VMT_SCHEMA_DIR));
+    UT_CHECK(library.ok());
+    if (!library.ok()) return;
+
+    ui::EditorSession session;
+    UT_CHECK(session.open_text(
+        "\"UnlitGeneric\"\n"
+        "{\n"
+        "    \"$basetexture\" \"stone/stonefloor\"\n"
+        "    \"$translucent\" 1\n"
+        "}\n", "test.vmt"));
+
+    UT_CHECK(session.set_shader("VertexLitGeneric"));
+    const vmt::ShaderSchema schema =
+        library.value().schema_for(session.document()->shader());
+
+    const std::vector<ui::PanelGroup> groups = ui::build_panel_model(
+        session.document(), schema, /*show_advanced=*/false);
+
+    // The panel now offers VertexLitGeneric's parameters, and the parameters
+    // carried over from the previous shader are still there.
+    bool has_selfillum = false;
+    bool shows_basetexture = false;
+    for (const ui::PanelGroup& group : groups) {
+        for (const ui::PanelRow& row : group.rows) {
+            if (row.name == "$selfillum") has_selfillum = true;
+            if (row.name == "$basetexture" && row.present) shows_basetexture = true;
+        }
+    }
+    UT_CHECK(has_selfillum);
+    UT_CHECK(shows_basetexture);
+}
+
+// --- Texture typo detection and graceful resolution tests -------------------
+
+UT_TEST_CASE("ui validate: edit distance and string similarity metrics") {
+    // Exact & Case
+    UT_CHECK_EQ(ui::texture_edit_distance("b_wallpaper1", "b_wallpaper1"), std::size_t(0));
+    UT_CHECK_EQ(ui::texture_edit_distance("B_Wallpaper1", "b_wallpaper1"), std::size_t(0));
+    UT_CHECK(ui::are_texture_names_similar("B_Wallpaper1", "b_wallpaper1"));
+
+    // Prompt example: b_wallpaper1 vs b_wallaper1 (single vs double letter, edit distance 1)
+    UT_CHECK_EQ(ui::texture_edit_distance("b_wallpaper1", "b_wallaper1"), std::size_t(1));
+    UT_CHECK(ui::are_texture_names_similar("b_wallpaper1", "b_wallaper1"));
+    UT_CHECK(ui::are_texture_names_similar("b_wallaper1", "b_wallpaper1"));
+
+    // Transposition
+    UT_CHECK_EQ(ui::texture_edit_distance("b_wallpaer1", "b_wallpaper1"), std::size_t(1));
+    UT_CHECK(ui::are_texture_names_similar("b_wallpaer1", "b_wallpaper1"));
+
+    // Single vs double letters
+    UT_CHECK(ui::are_texture_names_similar("wood_flor", "wood_floor"));
+    UT_CHECK(ui::are_texture_names_similar("metal_gratte", "metal_grate"));
+    UT_CHECK(ui::are_texture_names_similar("wood_plannk", "wood_plank"));
+
+    // Distinct numbered textures should NOT be considered typos for one another
+    UT_CHECK(!ui::are_texture_names_similar("wall1", "wall2"));
+    UT_CHECK(!ui::are_texture_names_similar("b_wallaper1", "b_wallpaper2"));
+
+    // Unrelated textures
+    UT_CHECK(!ui::are_texture_names_similar("concrete", "brick"));
+    UT_CHECK(!ui::are_texture_names_similar("dev_measuregeneric01", "metal_grate"));
+}
+
+UT_TEST_CASE("ui validate: find_similar_texture_name and graceful resolution on disk") {
+    const fs::path root = fresh_temp_dir() / "typo_test";
+    std::error_code ec;
+    fs::create_directories(root / "materials" / "wallpaper", ec);
+    fs::create_directories(root / "materials" / "wood", ec);
+    fs::create_directories(root / "materials" / "metal", ec);
+
+    // Create dummy texture files on disk
+    std::ofstream(root / "materials" / "b_wallpaper1.vtf") << "vtf";
+    std::ofstream(root / "materials" / "wallpaper" / "floral_pattern.vtf") << "vtf";
+    std::ofstream(root / "materials" / "wood" / "wood_floor.vtf") << "vtf";
+    std::ofstream(root / "materials" / "metal" / "metal_grate.vtf") << "vtf";
+
+    const std::vector<fs::path> roots = { root };
+
+    // 1. Missing 'p': b_wallaper1 -> b_wallpaper1
+    UT_CHECK_EQ(ui::find_similar_texture_name("b_wallaper1", roots), std::string("b_wallpaper1"));
+
+    // 2. Extra/omitted letters in subfolder: wood/wood_flor -> wood/wood_floor
+    UT_CHECK_EQ(ui::find_similar_texture_name("wood/wood_flor", roots), std::string("wood/wood_floor"));
+
+    // 3. Doubled letter: metal/metal_gratte -> metal/metal_grate
+    UT_CHECK_EQ(ui::find_similar_texture_name("metal/metal_gratte", roots), std::string("metal/metal_grate"));
+
+    // 4. Subfolder typo: wallpapers/floral_pattern -> wallpaper/floral_pattern
+    UT_CHECK_EQ(ui::find_similar_texture_name("wallpapers/floral_pattern", roots),
+                std::string("wallpaper/floral_pattern"));
+
+    // 5. Case difference: B_WALLPAPER1 -> b_wallpaper1
+    UT_CHECK_EQ(ui::find_similar_texture_name("B_WALLPAPER1", roots), std::string("b_wallpaper1"));
+
+    // 6. Redundant materials/ and .vtf prefixes:
+    UT_CHECK_EQ(ui::find_similar_texture_name("materials/b_wallaper1.vtf", roots),
+                std::string("b_wallpaper1"));
+
+    // 7. Graceful resolution to actual filesystem path:
+    const fs::path resolved_typo = ui::resolve_texture_file_gracefully("materials/b_wallaper1.vtf", roots);
+    UT_CHECK(!resolved_typo.empty());
+    UT_CHECK(fs::is_regular_file(resolved_typo, ec));
+    UT_CHECK_EQ(resolved_typo.filename().string(), std::string("b_wallpaper1.vtf"));
+
+    const fs::path resolved_exact = ui::resolve_texture_file_gracefully("materials/b_wallpaper1.vtf", roots);
+    UT_CHECK(!resolved_exact.empty());
+    UT_CHECK(fs::is_regular_file(resolved_exact, ec));
+
+    // 8. Completely missing texture returns empty
+    UT_CHECK_EQ(ui::find_similar_texture_name("totally_nonexistent_texture_xyz", roots), std::string());
+    UT_CHECK(ui::resolve_texture_file_gracefully("materials/totally_nonexistent.vtf", roots).empty());
+}
+
+UT_TEST_CASE("ui validate: missing texture suggestions in validation findings") {
+    auto library = vmt::SchemaLibrary::load_dir(fs::path(VMT_SCHEMA_DIR));
+    UT_CHECK(library.ok());
+    if (!library.ok()) return;
+
+    const fs::path root = fresh_temp_dir() / "val_typo_test";
+    std::error_code ec;
+    fs::create_directories(root / "materials", ec);
+    std::ofstream(root / "materials" / "b_wallpaper1.vtf") << "vtf";
+
+    const std::string text =
+        "\"VertexLitGeneric\"\n"
+        "{\n"
+        "    \"$basetexture\" \"b_wallaper1\"\n"
+        "}\n";
+
+    // 1. Validation with material_roots (offline/disk): finds the disk file, detects typo, suggests fix
+    ui::ValidationOptions disk_opts;
+    disk_opts.schemas = &library.value();
+    disk_opts.material_roots = { root };
+
+    const std::vector<ui::Finding> findings = ui::validate_text(text, disk_opts);
+    UT_CHECK_EQ(findings.size(), std::size_t(1));
+    const ui::Finding* missing = find_finding(findings, "missing-texture");
+    UT_CHECK(missing != nullptr);
+    if (missing != nullptr) {
+        UT_CHECK(missing->severity == ui::Severity::Error);
+        UT_CHECK(missing->message.find("materials/b_wallaper1.vtf") != std::string::npos);
+        UT_CHECK(missing->message.find("; did you mean \"b_wallpaper1\"?") != std::string::npos);
+    }
+
+    // 2. Validation with custom suggest_texture callback
+    ui::ValidationOptions custom_opts;
+    custom_opts.schemas = &library.value();
+    custom_opts.resolve_texture = [](const std::string&) { return ui::TextureStatus::Missing; };
+    custom_opts.suggest_texture = [](const std::string& name) {
+        return name == "b_wallaper1" ? "b_wallpaper1" : "";
+    };
+
+    const std::vector<ui::Finding> custom_findings = ui::validate_text(text, custom_opts);
+    UT_CHECK_EQ(custom_findings.size(), std::size_t(1));
+    const ui::Finding* custom_missing = find_finding(custom_findings, "missing-texture");
+    UT_CHECK(custom_missing != nullptr);
+    if (custom_missing != nullptr) {
+        UT_CHECK(custom_missing->message.find("; did you mean \"b_wallpaper1\"?") != std::string::npos);
+    }
+
+    // 3. When texture is missing and NO similar texture exists on disk, no suggestion is appended
+    const std::string missing_text =
+        "\"VertexLitGeneric\"\n"
+        "{\n"
+        "    \"$basetexture\" \"definitely_not_on_disk_xyz\"\n"
+        "}\n";
+
+    const std::vector<ui::Finding> no_suggest_findings = ui::validate_text(missing_text, disk_opts);
+    UT_CHECK_EQ(no_suggest_findings.size(), std::size_t(1));
+    const ui::Finding* no_suggest = find_finding(no_suggest_findings, "missing-texture");
+    UT_CHECK(no_suggest != nullptr);
+    if (no_suggest != nullptr) {
+        UT_CHECK(no_suggest->message.find("materials/definitely_not_on_disk_xyz.vtf") != std::string::npos);
+        UT_CHECK(no_suggest->message.find("did you mean") == std::string::npos);
+    }
+}
+
+// --- Loose material folder and material root detection tests -----------------
+
+UT_TEST_CASE("ui session: detect_material_root detects folder containing materials or file dir") {
+    // 1. Path containing "materials" directory
+    const fs::path p1 = fs::path("C:/games/hl2/hl2/materials/models/props/box.vmt");
+    UT_CHECK_EQ(ui::detect_material_root(p1), fs::path("C:/games/hl2/hl2"));
+
+    // 2. Case-insensitivity ("Materials", "MATERIALS")
+    const fs::path p2 = fs::path("D:/my_addon/Materials/brick/wall01.vmt");
+    UT_CHECK_EQ(ui::detect_material_root(p2), fs::path("D:/my_addon"));
+
+    const fs::path p3 = fs::path("E:/stuff/MATERIALS/concrete.vmt");
+    UT_CHECK_EQ(ui::detect_material_root(p3), fs::path("E:/stuff"));
+
+    // 3. Nested path inside materials
+    const fs::path p4 = fs::path("C:/custom/materials/a/b/c/d/deep.vmt");
+    UT_CHECK_EQ(ui::detect_material_root(p4), fs::path("C:/custom"));
+
+    // 4. File directory with a "materials" subfolder on disk
+    const fs::path temp_dir = fresh_temp_dir() / "root_test";
+    const fs::path mats_sub = temp_dir / "materials" / "wood";
+    fs::create_directories(mats_sub);
+    const fs::path loose_file = temp_dir / "loose.vmt";
+    {
+        std::ofstream out(loose_file);
+        out << "\"LightmappedGeneric\"\n{}\n";
+    }
+    UT_CHECK_EQ(ui::detect_material_root(loose_file), temp_dir);
+
+    // 5. File directory without "materials" anywhere (returns the file directory itself)
+    const fs::path no_mats_dir = fresh_temp_dir() / "isolated" / "textures";
+    fs::create_directories(no_mats_dir);
+    const fs::path solo_file = no_mats_dir / "test.vmt";
+    {
+        std::ofstream out(solo_file);
+        out << "\"LightmappedGeneric\"\n{}\n";
+    }
+    UT_CHECK_EQ(ui::detect_material_root(solo_file), no_mats_dir);
+
+    // 6. Empty path returns empty
+    UT_CHECK(ui::detect_material_root("").empty());
+}
+
+UT_TEST_CASE("ui session: open_file, save_as and open_text maintain material_root") {
+    const fs::path base = fresh_temp_dir() / "session_root";
+    const fs::path mats_dir = base / "materials" / "metal";
+    fs::create_directories(mats_dir);
+
+    const fs::path vmt_file = mats_dir / "iron.vmt";
+    const std::string text = "\"VertexLitGeneric\"\n{\n    \"$basetexture\" \"metal/iron\"\n}\n";
+    {
+        std::ofstream out(vmt_file);
+        out << text;
+    }
+
+    ui::EditorSession session;
+    UT_CHECK(session.open_file(vmt_file).ok());
+    UT_CHECK_EQ(session.material_root(), base);
+
+    // open_text clears material_root
+    UT_CHECK(session.open_text(text, "virtual.vmt").ok());
+    UT_CHECK(session.material_root().empty());
+
+    // save_as updates material_root
+    const fs::path save_target = base / "materials" / "saved.vmt";
+    UT_CHECK(session.save_as(save_target).ok());
+    UT_CHECK_EQ(session.material_root(), base);
+
+    // save_as to a loose folder without materials
+    const fs::path loose_dir = fresh_temp_dir() / "loose_dest";
+    fs::create_directories(loose_dir);
+    const fs::path loose_target = loose_dir / "loose_saved.vmt";
+    UT_CHECK(session.save_as(loose_target).ok());
+    UT_CHECK_EQ(session.material_root(), loose_dir);
+}
+
+// --- Direct VTF opening tests ------------------------------------------------
+
+UT_TEST_CASE("ui session: vtf_texture_path helper extracts correct relative texture paths") {
+    // 1. Path with /materials/
+    UT_CHECK_EQ(ui::vtf_texture_path("C:/game/materials/brick/wall01.vtf"),
+                std::string("brick/wall01"));
+    UT_CHECK_EQ(ui::vtf_texture_path("C:\\game\\garrysmod\\materials\\models\\props\\crate.vtf"),
+                std::string("models/props/crate"));
+
+    // 2. Path starting with materials/
+    UT_CHECK_EQ(ui::vtf_texture_path("materials/decals/blood.vtf"),
+                std::string("decals/blood"));
+    UT_CHECK_EQ(ui::vtf_texture_path("materials\\custom\\test.vtf"),
+                std::string("custom/test"));
+
+    // 3. Redundant leading materials/materials/
+    UT_CHECK_EQ(ui::vtf_texture_path("C:/foo/materials/materials/metal/iron.vtf"),
+                std::string("metal/iron"));
+
+    // 4. Loose file outside materials/
+    UT_CHECK_EQ(ui::vtf_texture_path("C:/Downloads/loose_wood.vtf"),
+                std::string("loose_wood"));
+    UT_CHECK_EQ(ui::vtf_texture_path("texture.vtf"),
+                std::string("texture"));
+
+    // 5. Case-insensitivity for .vtf extension
+    UT_CHECK_EQ(ui::vtf_texture_path("C:/game/materials/stone/floor.VTF"),
+                std::string("stone/floor"));
+    UT_CHECK_EQ(ui::vtf_texture_path("plain.VTF"),
+                std::string("plain"));
+
+    // 6. Empty path returns empty
+    UT_CHECK(ui::vtf_texture_path("").empty());
+}
+
+UT_TEST_CASE("ui session: opening a valid VTF file generates an in-memory VMT document and reads metadata") {
+    const fs::path vtf_file = fs::path(VMT_TEST_DATA_DIR) / "vtf" / "dxt1.vtf";
+    UT_CHECK(fs::exists(vtf_file));
+
+    ui::EditorSession session;
+    UT_CHECK(!session.is_vtf());
+    UT_CHECK(session.vtf_info() == nullptr);
+
+    const vmt::Result<void> result = session.open_file(vtf_file);
+    UT_CHECK(result.ok());
+    UT_CHECK(session.is_vtf());
+    UT_CHECK(session.vtf_info() != nullptr);
+    if (session.vtf_info() != nullptr) {
+        UT_CHECK_EQ(session.vtf_info()->width, 64u);
+        UT_CHECK_EQ(session.vtf_info()->height, 64u);
+        UT_CHECK_EQ(session.vtf_info()->format_name, std::string("DXT1"));
+    }
+
+    UT_CHECK(session.has_document());
+    UT_CHECK(session.text_is_valid());
+    UT_CHECK(!session.dirty());
+    UT_CHECK_EQ(session.display_name(), std::string("dxt1.vtf"));
+
+    const vmt::Document* doc = session.document();
+    UT_CHECK(doc != nullptr);
+    if (doc != nullptr) {
+        UT_CHECK_EQ(std::string(doc->shader()), std::string("UnlitGeneric"));
+        const vmt::Node* base = doc->find("$basetexture");
+        UT_CHECK(base != nullptr);
+        if (base != nullptr) {
+            UT_CHECK_EQ(std::string(base->value()), std::string("dxt1"));
+        }
+    }
+
+    // The text buffer contains the auto-generated VMT content
+    UT_CHECK(session.text().find("\"UnlitGeneric\"") != std::string::npos);
+    UT_CHECK(session.text().find("\"$basetexture\"") != std::string::npos);
+    UT_CHECK(session.text().find("\"dxt1\"") != std::string::npos);
+}
+
+UT_TEST_CASE("ui session: opening a VTF in materials directory generates correct relative texture path") {
+    const fs::path temp_dir = fresh_temp_dir() / "vtf_test";
+    const fs::path mats_dir = temp_dir / "materials" / "models" / "props";
+    fs::create_directories(mats_dir);
+
+    const fs::path src_vtf = fs::path(VMT_TEST_DATA_DIR) / "vtf" / "dxt1.vtf";
+    const fs::path dst_vtf = mats_dir / "crate01.vtf";
+    std::error_code ec;
+    fs::copy_file(src_vtf, dst_vtf, fs::copy_options::overwrite_existing, ec);
+    UT_CHECK(!ec);
+
+    ui::EditorSession session;
+    const vmt::Result<void> result = session.open_file(dst_vtf);
+    UT_CHECK(result.ok());
+    UT_CHECK(session.is_vtf());
+    UT_CHECK_EQ(session.display_name(), std::string("crate01.vtf"));
+    UT_CHECK_EQ(session.material_root(), temp_dir);
+
+    const vmt::Document* doc = session.document();
+    UT_CHECK(doc != nullptr);
+    if (doc != nullptr) {
+        UT_CHECK_EQ(std::string(doc->shader()), std::string("UnlitGeneric"));
+        const vmt::Node* base = doc->find("$basetexture");
+        UT_CHECK(base != nullptr);
+        if (base != nullptr) {
+            UT_CHECK_EQ(std::string(base->value()), std::string("models/props/crate01"));
+        }
+    }
+}
+
+UT_TEST_CASE("ui session: saving VTF directly is rejected, Save As to VMT succeeds and clears is_vtf") {
+    const fs::path vtf_file = fs::path(VMT_TEST_DATA_DIR) / "vtf" / "dxt1.vtf";
+    ui::EditorSession session;
+    UT_CHECK(session.open_file(vtf_file).ok());
+    UT_CHECK(session.is_vtf());
+
+    // Saving directly over a VTF is rejected to protect the binary texture
+    const vmt::Result<void> save_res = session.save();
+    UT_CHECK(!save_res.ok());
+    UT_CHECK_EQ(save_res.error().code, vmt::ErrorCode::InvalidArgument);
+
+    // Saving as .vtf is also rejected
+    const fs::path bad_vtf_dest = fresh_temp_dir() / "cannot_save.vtf";
+    const vmt::Result<void> bad_res = session.save_as(bad_vtf_dest);
+    UT_CHECK(!bad_res.ok());
+    UT_CHECK_EQ(bad_res.error().code, vmt::ErrorCode::InvalidArgument);
+
+    // Save As with a .vmt file succeeds
+    const fs::path vmt_dest = fresh_temp_dir() / "exported.vmt";
+    const vmt::Result<void> good_res = session.save_as(vmt_dest);
+    UT_CHECK(good_res.ok());
+    UT_CHECK(!session.is_vtf());
+    UT_CHECK(session.vtf_info() == nullptr);
+    UT_CHECK(!session.dirty());
+    UT_CHECK_EQ(session.display_name(), std::string("exported.vmt"));
+    UT_CHECK(fs::exists(vmt_dest));
+    UT_CHECK_EQ(read_all(vmt_dest), session.text());
+
+    // Subsequent normal save works since it's now a VMT file
+    UT_CHECK(session.set_parameter("$basetexture", "new/tex").ok());
+    UT_CHECK(session.dirty());
+    UT_CHECK(session.save().ok());
+    UT_CHECK(!session.dirty());
+}
+
+UT_TEST_CASE("ui session: editing auto-generated VMT supports undo, redo and revert") {
+    const fs::path vtf_file = fs::path(VMT_TEST_DATA_DIR) / "vtf" / "dxt1.vtf";
+    ui::EditorSession session;
+    UT_CHECK(session.open_file(vtf_file).ok());
+
+    const std::string initial_text = session.text();
+    UT_CHECK(!session.can_undo());
+
+    // Edit parameter
+    UT_CHECK(session.set_parameter("$basetexture", "custom/crate").ok());
+    UT_CHECK(session.dirty());
+    UT_CHECK(session.can_undo());
+
+    // Switch shader
+    UT_CHECK(session.set_shader("VertexLitGeneric").ok());
+    UT_CHECK_EQ(std::string(session.document()->shader()), std::string("VertexLitGeneric"));
+
+    // Undo shader change
+    UT_CHECK(session.undo().ok());
+    UT_CHECK_EQ(std::string(session.document()->shader()), std::string("UnlitGeneric"));
+
+    // Undo parameter change -> back to initial generated state
+    UT_CHECK(session.undo().ok());
+    UT_CHECK_EQ(session.text(), initial_text);
+    UT_CHECK(!session.dirty());
+
+    // Redo restores
+    UT_CHECK(session.redo().ok());
+    UT_CHECK(session.dirty());
+
+    // Revert restores the initial opened revision
+    UT_CHECK(session.can_revert());
+    UT_CHECK(session.revert().ok());
+    UT_CHECK_EQ(session.text(), initial_text);
+    UT_CHECK(!session.dirty());
+}
+
+UT_TEST_CASE("ui session: opening corrupt or non-VTF files fails cleanly with proper error") {
+    const fs::path temp_dir = fresh_temp_dir() / "corrupt_vtf";
+    fs::create_directories(temp_dir);
+
+    // 1. File with .vtf extension but bad signature
+    const fs::path fake_vtf = temp_dir / "fake.vtf";
+    {
+        std::ofstream out(fake_vtf, std::ios::binary);
+        out << "NOT_A_VTF_FILE_HEADER_DATA_1234567890";
+    }
+    ui::EditorSession session;
+    const vmt::Result<void> res1 = session.open_file(fake_vtf);
+    UT_CHECK(!res1.ok());
+    UT_CHECK_EQ(res1.error().code, vmt::ErrorCode::VtfInvalidHeader);
+
+    // 2. Truncated .vtf file (< 4 bytes)
+    const fs::path truncated_vtf = temp_dir / "truncated.vtf";
+    {
+        std::ofstream out(truncated_vtf, std::ios::binary);
+        out << "VT";
+    }
+    const vmt::Result<void> res2 = session.open_file(truncated_vtf);
+    UT_CHECK(!res2.ok());
+    UT_CHECK_EQ(res2.error().code, vmt::ErrorCode::VtfTruncated);
+}
+
+UT_TEST_CASE("ui texture: thumbnail decodes gracefully when texture has a typo on disk") {
+    const fs::path root = fresh_temp_dir() / "thumb_typo";
+    std::error_code ec;
+    fs::create_directories(root / "materials" / "wallpaper", ec);
+
+    // Copy valid VTF to b_wallpaper1.vtf
+    const fs::path src_vtf = data_path("vtf/dxt1.vtf");
+    const fs::path dst_vtf = root / "materials" / "wallpaper" / "b_wallpaper1.vtf";
+    fs::copy_file(src_vtf, dst_vtf, fs::copy_options::overwrite_existing, ec);
+    UT_CHECK(!ec);
+
+    // TextureSource that implements graceful typo resolution using resolve_texture_file_gracefully
+    class TestGracefulSource final : public ui::TextureSource {
+    public:
+        std::vector<fs::path> roots;
+        vmt::Result<std::vector<unsigned char>> read(const std::string& game_path) override {
+            const fs::path resolved = ui::resolve_texture_file_gracefully(game_path, roots);
+            if (resolved.empty()) {
+                return vmt::Err<std::vector<unsigned char>>(
+                    vmt::make_error(vmt::ErrorCode::NotFound, "not found"));
+            }
+            std::ifstream stream(resolved, std::ios::binary);
+            if (!stream) {
+                return vmt::Err<std::vector<unsigned char>>(
+                    vmt::make_error(vmt::ErrorCode::PermissionDenied, "cannot open"));
+            }
+            std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(stream)),
+                                             std::istreambuf_iterator<char>());
+            return vmt::Ok(std::move(bytes));
+        }
+    } source;
+    source.roots = { root };
+
+    // VMT referencing "wallpaper/b_wallaper1" (missing 'p' typo)
+    const std::string vmt_text =
+        "\"LightmappedGeneric\"\n"
+        "{\n"
+        "    \"$basetexture\" \"wallpaper/b_wallaper1\"\n"
+        "}\n";
+
+    const vmt::Result<ui::TextureThumbnail> thumb =
+        ui::make_texture_thumbnail(vmt_text, source, 64);
+    UT_CHECK(thumb.ok());
+    if (thumb.ok()) {
+        UT_CHECK(thumb.value().width > 0);
+        UT_CHECK(thumb.value().height > 0);
+        UT_CHECK(!thumb.value().bgra.empty());
+    }
 }

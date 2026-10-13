@@ -2,6 +2,12 @@
 
 #include "app_hooks.h"
 
+#include <ui/theme_button.h>
+#include <ui/theme_combo.h>
+#include <ui/theme_slider.h>
+#include <ui/win32_controls.h>
+#include <ui/win32_theme.h>
+
 #include <commctrl.h>
 
 #include <cwchar>
@@ -244,7 +250,9 @@ void layout_options() {
     y += dp(34);
     MoveWindow(GetDlgItem(g_options->hwnd, IDC_ENV_LABEL), dp(16), y + dp(3), label_w, dp(20),
                TRUE);
-    MoveWindow(g_options->env_combo, slider_x, y, dp(200), dp(200), TRUE);
+    // The height is the closed-field height, not the native 200px drop list:
+    // ThemeCombo opens a popup it sizes itself.
+    MoveWindow(g_options->env_combo, slider_x, y, dp(200), dp(24), TRUE);
 
     const int slider_h = dp(22);
     const OptionsId label_ids[] = { IDC_AMBIENT_LABEL, IDC_AZIMUTH_LABEL, IDC_ELEVATION_LABEL,
@@ -280,13 +288,32 @@ void create_label(HWND hwnd, int id, const wchar_t* text) {
 }
 
 HWND create_slider(HWND hwnd, int id, int lo, int hi) {
-    HWND slider = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
-                                  WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS, 0, 0, 0, 0,
-                                  hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-                                  GetModuleHandleW(nullptr), nullptr);
+    // ThemeSlider speaks the trackbar protocol, so the TBM_* calls below and the
+    // TBM_GETPOS reads in on_slider_change() are exactly as before. It also sends
+    // WM_HSCROLL with its own HWND in lParam, which is what the WM_HSCROLL case
+    // below tests.
+    HWND slider = ui::controls::ThemeSlider::create(hwnd, id, 0, 0, 0, 0);
     SendMessageW(slider, TBM_SETRANGEMIN, FALSE, static_cast<LPARAM>(lo));
     SendMessageW(slider, TBM_SETRANGEMAX, FALSE, static_cast<LPARAM>(hi));
     return slider;
+}
+
+// BS_DEFPUSHBUTTON used to make Close this window's default button: Enter
+// anywhere that did not consume it (a slider, the frame itself) pressed it via
+// IsDialogMessage's DM_GETDEFID path. ThemeButton is not a native button and
+// carries no BS_DEFPUSHBUTTON style for DefWindowProc to find, so the routing is
+// restored by hand. The button keeps WS_TABSTOP (ThemeButton always sets it), so
+// the tab order is unchanged.
+void press_default_button(HWND hwnd) {
+    HWND button = GetDlgItem(hwnd, IDOK);
+    if (button == nullptr) {
+        return;
+    }
+    // ThemeButton has no BM_CLICK, so the notification a real click produces is
+    // raised directly - the same WM_COMMAND the button sends from the mouse.
+    SendMessageW(hwnd, WM_COMMAND,
+                 MAKEWPARAM(static_cast<WORD>(IDOK), static_cast<WORD>(BN_CLICKED)),
+                 reinterpret_cast<LPARAM>(button));
 }
 
 LRESULT CALLBACK OptionsProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -314,11 +341,12 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SHAPE_PLANE)),
             GetModuleHandleW(nullptr), nullptr);
         create_label(hwnd, IDC_ENV_LABEL, L"Environment:");
-        state->env_combo = CreateWindowExW(
-            0, L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | WS_GROUP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, 0, 0, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ENV_COMBO)),
-            GetModuleHandleW(nullptr), nullptr);
+        // Dropdown-list semantics (no edit field) with the stock CB_* protocol,
+        // so the CB_ADDSTRING loop and the CB_SETCURSEL/CB_GETCURSEL calls below
+        // are unchanged. The shape radio buttons stay native BUTTONs: they rely
+        // on BS_AUTORADIOBUTTON's automatic sibling unchecking, which no
+        // ButtonKind reproduces. apply_subtree() themes them like any other.
+        state->env_combo = ui::controls::ThemeCombo::create(hwnd, IDC_ENV_COMBO, 0, 0, 0, 0);
         for (const wchar_t* item :
              { L"Studio dark", L"Studio light", L"Outdoor", L"Flat", L"(custom)" }) {
             SendMessageW(state->env_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
@@ -355,21 +383,20 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BACKGROUND_VALUE)),
             GetModuleHandleW(nullptr), nullptr);
 
-        HWND model = CreateWindowExW(
-            0, L"BUTTON", L"Load model (.mdl)...",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, 0, 0, 0, 0, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MODEL)), GetModuleHandleW(nullptr),
-            nullptr);
-        HWND ok = CreateWindowExW(0, L"BUTTON", L"Close",
-                                  WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 0, 0,
-                                  0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)),
-                                  GetModuleHandleW(nullptr), nullptr);
+        ui::controls::ThemeButton::create(hwnd, IDC_MODEL, L"Load model (.mdl)...", 0, 0, 0, 0,
+                                          ui::controls::ButtonKind::Push,
+                                          ui::controls::ButtonStyle::Default);
+        // The confirm action of this window, so it carries the accent weight.
+        ui::controls::ThemeButton::create(hwnd, IDOK, L"Close", 0, 0, 0, 0,
+                                          ui::controls::ButtonKind::Push,
+                                          ui::controls::ButtonStyle::Accent);
 
+        // Only the native controls get a GDI font: the themed buttons, sliders
+        // and the combo draw their labels through DirectWrite and ignore
+        // WM_SETFONT.
         for (HWND control : { state->sphere, state->cube, state->cylinder, state->plane,
-                              state->env_combo, state->ambient, state->azimuth, state->elevation,
-                              state->intensity, state->background, state->ambient_value,
-                              state->azimuth_value, state->elevation_value,
-                              state->intensity_value, state->background_value, model, ok }) {
+                              state->ambient_value, state->azimuth_value, state->elevation_value,
+                              state->intensity_value, state->background_value }) {
             SendMessageW(control, WM_SETFONT,
                          reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
         }
@@ -381,6 +408,39 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_SIZE:
         layout_options();
         return 0;
+
+    // Per-monitor V2: take the suggested rect, refresh the dpi that dp() scales
+    // with, then lay the hardcoded rects out again.
+    case WM_DPICHANGED: {
+        const RECT* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested != nullptr) {
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if (g_options != nullptr) {
+            g_options->dpi = ui::theming::metrics_for(hwnd).dpi;
+        }
+        layout_options();
+        ui::controls::handle_dpi_change(hwnd);
+        return 0;
+    }
+
+    // Only reached when no child wanted VK_RETURN: a focused ThemeButton claims
+    // it for itself and the combo uses it to commit a selection, so the default
+    // action cannot fire twice.
+    case WM_KEYDOWN:
+        if (wparam == VK_RETURN) {
+            press_default_button(hwnd);
+            return 0;
+        }
+        break;
+
+    case WM_SETTINGCHANGE:
+        if (ui::controls::handle_theme_change(hwnd, lparam)) {
+            return 0;
+        }
+        break;
 
     case WM_HSCROLL:
         if (reinterpret_cast<HWND>(lparam) != nullptr) {
@@ -426,8 +486,9 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         return 0;
 
     default:
-        return DefWindowProcW(hwnd, message, wparam, lparam);
+        break;
     }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 } // namespace
@@ -471,6 +532,13 @@ void show_preview_options_dialog(HWND owner) {
         g_options = nullptr;
         return;
     }
+
+    // Dark caption and rounded corners, plus the subtree walk that themes the
+    // STATIC labels and the shape radio buttons. The custom classes were
+    // registered by the main window's bootstrap (and every create() helper
+    // re-registers on demand), so no register_all() call is needed here.
+    ui::controls::apply_chrome(hwnd);
+    ui::theming::apply_subtree(hwnd);
 
     RECT window_rect{};
     GetWindowRect(hwnd, &window_rect);

@@ -4,7 +4,7 @@
     "$basetexture" "models/props/cs_office/computer"
     "$phong" "1"
     "$phongexponent" "25"
-    "$phongboost" "3.0"
+    "$phongboost" "6"
     "$phongfresnelranges" "[.25 .5 1]"
 
     // Specular tint applied on top of the fresnel term

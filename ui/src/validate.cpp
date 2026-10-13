@@ -6,11 +6,13 @@
 #include <cctype>
 #include <cstdint>
 #include <cmath>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace ui {
 namespace {
@@ -274,7 +276,7 @@ void check_texture(Collector& out, const vmt::Node& node, bool is_envmap,
     // produce duplicate lookups.
     normalized = lower_copy(normalized);
 
-    if (!options.resolve_texture) {
+    if (!options.resolve_texture && options.material_roots.empty()) {
         if (!skipped_reported) {
             skipped_reported = true;
             out.add(Severity::Info, "texture-check-skipped",
@@ -284,13 +286,38 @@ void check_texture(Collector& out, const vmt::Node& node, bool is_envmap,
         return;
     }
 
-    const TextureStatus status = options.resolve_texture(normalized);
+    TextureStatus status = TextureStatus::Unavailable;
+    if (options.resolve_texture) {
+        status = options.resolve_texture(normalized);
+    } else {
+        std::error_code ec;
+        const std::filesystem::path rel = "materials/" + normalized + ".vtf";
+        bool found = false;
+        for (const auto& root : options.material_roots) {
+            if (std::filesystem::is_regular_file(root / rel, ec)) {
+                found = true;
+                break;
+            }
+        }
+        status = found ? TextureStatus::Found : TextureStatus::Missing;
+    }
+
     if (status == TextureStatus::Missing) {
-        out.add(Severity::Error, "missing-texture",
-                "texture \"" + normalized +
-                    "\" was not found (materials/" + normalized +
-                    ".vtf is missing from the mounted search paths)",
-                node);
+        std::string suggestion;
+        if (options.suggest_texture) {
+            suggestion = options.suggest_texture(normalized);
+        } else if (!options.material_roots.empty()) {
+            suggestion = find_similar_texture_name(normalized, options.material_roots);
+        }
+
+        std::string message = "texture \"" + normalized +
+            "\" was not found (materials/" + normalized +
+            ".vtf is missing from the mounted search paths)";
+        if (!suggestion.empty()) {
+            message += "; did you mean \"" + suggestion + "\"?";
+        }
+
+        out.add(Severity::Error, "missing-texture", std::move(message), node);
     } else if (status == TextureStatus::Unavailable && !skipped_reported) {
         skipped_reported = true;
         out.add(Severity::Info, "texture-check-skipped",
@@ -398,6 +425,335 @@ std::vector<Finding> validate_text(const std::string& text, const ValidationOpti
         return {Finding{Severity::Error, "parse-error", error.message, error.line, error.column}};
     }
     return validate_document(parsed.value(), options);
+}
+
+// --- Typo detection & texture path resolution helpers ---
+
+namespace {
+
+std::string collapse_consecutive_repeats(std::string_view s) {
+    std::string res;
+    res.reserve(s.size());
+    for (char c : s) {
+        char lower = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (res.empty() || res.back() != lower) {
+            res.push_back(lower);
+        }
+    }
+    return res;
+}
+
+std::pair<std::string_view, std::string_view> split_trailing_digits(std::string_view s) {
+    std::size_t i = s.size();
+    while (i > 0 && std::isdigit(static_cast<unsigned char>(s[i - 1]))) {
+        --i;
+    }
+    return {s.substr(0, i), s.substr(i)};
+}
+
+int compute_similarity_score(std::string_view target, std::string_view candidate) {
+    if (target.empty() || candidate.empty()) {
+        return 1000;
+    }
+
+    // Exact match case-insensitively
+    if (target.size() == candidate.size()) {
+        bool eq = true;
+        for (std::size_t i = 0; i < target.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(target[i])) !=
+                std::tolower(static_cast<unsigned char>(candidate[i]))) {
+                eq = false;
+                break;
+            }
+        }
+        if (eq) {
+            return 0;
+        }
+    }
+
+    auto [target_base, target_digits] = split_trailing_digits(target);
+    auto [cand_base, cand_digits] = split_trailing_digits(candidate);
+
+    // If both have trailing digits and they differ (e.g. wall1 vs wall2):
+    // Different numbered textures in a series should not be treated as typos.
+    if (!target_digits.empty() && !cand_digits.empty() && target_digits != cand_digits) {
+        return 500;
+    }
+
+    const std::string target_collapsed = collapse_consecutive_repeats(target);
+    const std::string cand_collapsed = collapse_consecutive_repeats(candidate);
+    const std::size_t dist = texture_edit_distance(target, candidate);
+
+    // Single vs double letter difference (e.g. b_wallaper1 vs b_wallpaper1, wood_flor vs wood_floor)
+    if (target_collapsed == cand_collapsed) {
+        return 5 + static_cast<int>(dist);
+    }
+
+    if (dist == 1) {
+        return 15;
+    }
+
+    if (dist == 2 && std::min(target.size(), candidate.size()) >= 5) {
+        return 30;
+    }
+
+    if (dist == 3 && std::min(target.size(), candidate.size()) >= 10) {
+        return 50;
+    }
+
+    return 1000;
+}
+
+} // namespace
+
+std::size_t texture_edit_distance(std::string_view a, std::string_view b) {
+    const std::size_t m = a.size();
+    const std::size_t n = b.size();
+    if (m == 0) return n;
+    if (n == 0) return m;
+
+    if (m == n) {
+        bool equal = true;
+        for (std::size_t i = 0; i < m; ++i) {
+            if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                std::tolower(static_cast<unsigned char>(b[i]))) {
+                equal = false;
+                break;
+            }
+        }
+        if (equal) return 0;
+    }
+
+    std::vector<std::size_t> d((m + 1) * (n + 1), 0);
+    const auto at = [&d, n](std::size_t i, std::size_t j) -> std::size_t& {
+        return d[i * (n + 1) + j];
+    };
+
+    for (std::size_t i = 0; i <= m; ++i) at(i, 0) = i;
+    for (std::size_t j = 0; j <= n; ++j) at(0, j) = j;
+
+    for (std::size_t i = 1; i <= m; ++i) {
+        const char ca = static_cast<char>(std::tolower(static_cast<unsigned char>(a[i - 1])));
+        for (std::size_t j = 1; j <= n; ++j) {
+            const char cb = static_cast<char>(std::tolower(static_cast<unsigned char>(b[j - 1])));
+            const std::size_t cost = (ca == cb) ? 0 : 1;
+
+            std::size_t del = at(i - 1, j) + 1;
+            std::size_t ins = at(i, j - 1) + 1;
+            std::size_t sub = at(i - 1, j - 1) + cost;
+            std::size_t best = std::min({del, ins, sub});
+
+            if (i > 1 && j > 1) {
+                const char prev_ca = static_cast<char>(std::tolower(static_cast<unsigned char>(a[i - 2])));
+                const char prev_cb = static_cast<char>(std::tolower(static_cast<unsigned char>(b[j - 2])));
+                if (ca == prev_cb && prev_ca == cb) {
+                    best = std::min(best, at(i - 2, j - 2) + 1);
+                }
+            }
+            at(i, j) = best;
+        }
+    }
+    return at(m, n);
+}
+
+bool are_texture_names_similar(std::string_view a, std::string_view b) {
+    return compute_similarity_score(a, b) <= 60;
+}
+
+std::string find_similar_texture_name(
+    const std::string& normalized_name,
+    const std::vector<std::filesystem::path>& roots) {
+    if (normalized_name.empty() || roots.empty()) {
+        return {};
+    }
+
+    std::string clean = normalized_name;
+    for (char& c : clean) {
+        if (c == '\\') {
+            c = '/';
+        }
+    }
+
+    while (clean.rfind("materials/", 0) == 0 || clean.rfind("Materials/", 0) == 0) {
+        clean.erase(0, 10);
+    }
+    if (clean.size() >= 4) {
+        std::string tail = clean.substr(clean.size() - 4);
+        for (char& c : tail) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (tail == ".vtf") {
+            clean.erase(clean.size() - 4);
+        }
+    }
+    while (!clean.empty() && clean.front() == '/') clean.erase(clean.begin());
+    while (!clean.empty() && clean.back() == '/') clean.pop_back();
+
+    if (clean.empty()) {
+        return {};
+    }
+
+    std::size_t last_slash = clean.find_last_of('/');
+    std::string dir_part;
+    std::string stem_part;
+    if (last_slash != std::string::npos) {
+        dir_part = clean.substr(0, last_slash);
+        stem_part = clean.substr(last_slash + 1);
+    } else {
+        stem_part = clean;
+    }
+
+    int best_score = 1000;
+    std::size_t best_dist = 1000;
+    std::string best_suggested_name;
+
+    const auto check_dir_files = [&](const std::filesystem::path& dir_path, const std::string& prefix_for_suggestion) {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(dir_path, ec)) {
+            return;
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(dir_path, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file(ec)) continue;
+            std::string ext = entry.path().extension().string();
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (ext != ".vtf") continue;
+
+            std::string cand_stem = entry.path().stem().string();
+            int score = compute_similarity_score(stem_part, cand_stem);
+            if (score <= 60) {
+                std::size_t dist = texture_edit_distance(stem_part, cand_stem);
+                if (score < best_score || (score == best_score && dist < best_dist)) {
+                    best_score = score;
+                    best_dist = dist;
+                    best_suggested_name = prefix_for_suggestion.empty()
+                        ? cand_stem
+                        : (prefix_for_suggestion + "/" + cand_stem);
+                }
+            }
+        }
+    };
+
+    // 1. Search in the expected directory in each root
+    for (const auto& root : roots) {
+        std::error_code ec;
+        if (root.empty() || !std::filesystem::is_directory(root, ec)) continue;
+
+        if (!dir_part.empty()) {
+            check_dir_files(root / "materials" / dir_part, dir_part);
+            check_dir_files(root / dir_part, dir_part);
+        } else {
+            check_dir_files(root / "materials", "");
+            check_dir_files(root, "");
+        }
+    }
+
+    // 2. If no match found and dir_part is not empty, check if dir_part had a typo
+    if (best_score > 60 && !dir_part.empty()) {
+        std::filesystem::path dir_p(dir_part);
+        std::string target_folder = dir_p.filename().string();
+        std::filesystem::path parent_rel = dir_p.parent_path();
+
+        for (const auto& root : roots) {
+            std::error_code ec;
+            std::vector<std::filesystem::path> parent_candidates;
+            if (!parent_rel.empty()) {
+                parent_candidates.push_back(root / "materials" / parent_rel);
+                parent_candidates.push_back(root / parent_rel);
+            } else {
+                parent_candidates.push_back(root / "materials");
+                parent_candidates.push_back(root);
+            }
+
+            for (const auto& p_cand : parent_candidates) {
+                if (!std::filesystem::is_directory(p_cand, ec)) continue;
+                for (const auto& entry : std::filesystem::directory_iterator(p_cand, ec)) {
+                    if (ec) break;
+                    if (entry.is_directory(ec)) {
+                        std::string folder_name = entry.path().filename().string();
+                        if (are_texture_names_similar(target_folder, folder_name)) {
+                            std::string corrected_prefix = parent_rel.empty()
+                                ? folder_name
+                                : (parent_rel.generic_string() + "/" + folder_name);
+                            check_dir_files(entry.path(), corrected_prefix);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. If no match found and dir_part is empty, check immediate subfolders under materials
+    if (best_score > 60 && dir_part.empty()) {
+        for (const auto& root : roots) {
+            std::error_code ec;
+            std::filesystem::path mat_dir = root / "materials";
+            if (!std::filesystem::is_directory(mat_dir, ec)) {
+                mat_dir = root;
+            }
+            if (!std::filesystem::is_directory(mat_dir, ec)) continue;
+            for (const auto& sub : std::filesystem::directory_iterator(mat_dir, ec)) {
+                if (ec) break;
+                if (sub.is_directory(ec)) {
+                    check_dir_files(sub.path(), sub.path().filename().string());
+                }
+            }
+        }
+    }
+
+    if (best_score <= 60) {
+        for (char& c : best_suggested_name) {
+            if (c == '\\') c = '/';
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return best_suggested_name;
+    }
+
+    return {};
+}
+
+std::filesystem::path resolve_texture_file_gracefully(
+    const std::string& game_path,
+    const std::vector<std::filesystem::path>& roots) {
+    std::error_code ec;
+    if (game_path.empty() || roots.empty()) {
+        return {};
+    }
+
+    // 1. Check exact match first
+    const std::filesystem::path rel(game_path);
+    for (const auto& root : roots) {
+        if (root.empty()) continue;
+        const std::filesystem::path candidate = root / rel;
+        if (std::filesystem::is_regular_file(candidate, ec)) {
+            return candidate;
+        }
+        std::string s = game_path;
+        if (s.rfind("materials/", 0) == 0 || s.rfind("Materials/", 0) == 0) {
+            const std::filesystem::path candidate2 = root / s.substr(10);
+            if (std::filesystem::is_regular_file(candidate2, ec)) {
+                return candidate2;
+            }
+        }
+    }
+
+    // 2. Not found exactly. Search for similar texture on disk.
+    std::string suggested = find_similar_texture_name(game_path, roots);
+    if (!suggested.empty()) {
+        std::filesystem::path suggested_rel = "materials/" + suggested + ".vtf";
+        std::filesystem::path suggested_rel_no_mat = suggested + ".vtf";
+        for (const auto& root : roots) {
+            if (root.empty()) continue;
+            std::filesystem::path cand1 = root / suggested_rel;
+            if (std::filesystem::is_regular_file(cand1, ec)) {
+                return cand1;
+            }
+            std::filesystem::path cand2 = root / suggested_rel_no_mat;
+            if (std::filesystem::is_regular_file(cand2, ec)) {
+                return cand2;
+            }
+        }
+    }
+
+    return {};
 }
 
 } // namespace ui

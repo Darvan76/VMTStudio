@@ -1,16 +1,21 @@
 #include "material_browser_window.h"
 
 #include "app_hooks.h"
+#include "folder_picker.h"
 #include "ui/material_browser.h"
 
+#include <ui/theme_button.h>
+#include <ui/win32_controls.h>
+#include <ui/win32_theme.h>
+
 #include <commctrl.h>
-#include <shellapi.h>
-#include <shlobj.h>
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ui {
@@ -51,6 +56,10 @@ struct BrowserState {
     MaterialIndex index;
     std::vector<std::size_t> filtered;
     HBITMAP bitmap = nullptr;
+    // Logical (96 dpi) size of the box that frames the current thumbnail. Zero
+    // means "nothing selected yet" and layout_browser() uses a square default.
+    int thumb_box_w = 0;
+    int thumb_box_h = 0;
     int dpi = 96;
     bool scanning = false;
     std::wstring source_label;
@@ -103,6 +112,9 @@ void set_font(HWND hwnd) {
                  reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
 }
 
+// Declared here because show_thumbnail() and the WM_SIZE handler both need it.
+void layout_browser();
+
 void set_status(const std::wstring& text) {
     if (g_browser != nullptr && g_browser->status != nullptr) {
         SetWindowTextW(g_browser->status, text.c_str());
@@ -124,6 +136,51 @@ void clear_thumbnail() {
         DeleteObject(g_browser->bitmap);
         g_browser->bitmap = nullptr;
     }
+    g_browser->thumb_box_w = 0;
+    g_browser->thumb_box_h = 0;
+}
+
+// Logical box that frames a thumbnail of the given physical pixel size.
+//
+// SS_BITMAP|SS_CENTERIMAGE draws the bitmap unscaled and centred, so the box
+// only frames the texture exactly when it matches the bitmap's pixel size. Any
+// mismatch letterboxes (box too big) or crops (box too small), which is what
+// made previews float in the middle of an oversized box on high-DPI displays.
+//
+// The result is therefore the bitmap's own size converted to logical units and
+// capped at kThumbnailMaxEdge, so a texture is never upscaled. Extreme aspect
+// ratios are clamped so a strip texture cannot collapse to a hairline; the
+// texture itself is still drawn unscaled and simply letterboxed in that case.
+std::pair<int, int> thumbnail_box_for(int pixel_width, int pixel_height, int dpi) {
+    if (pixel_width <= 0 || pixel_height <= 0 || dpi <= 0) {
+        return { kThumbnailMaxEdge, kThumbnailMaxEdge };
+    }
+
+    int width = MulDiv(pixel_width, 96, dpi);
+    int height = MulDiv(pixel_height, 96, dpi);
+    width = std::max(1, width);
+    height = std::max(1, height);
+
+    const int longest = std::max(width, height);
+    if (longest > kThumbnailMaxEdge) {
+        const double scale = static_cast<double>(kThumbnailMaxEdge) / longest;
+        width = std::max(1, static_cast<int>(std::lround(width * scale)));
+        height = std::max(1, static_cast<int>(std::lround(height * scale)));
+    }
+
+    const int longer = std::max(width, height);
+    const int shorter = std::min(width, height);
+    if (shorter * kThumbnailMaxAspect < longer) {
+        const int clamped_shorter = std::max(1, longer / kThumbnailMaxAspect);
+        if (width >= height) {
+            width = longer;
+            height = clamped_shorter;
+        } else {
+            height = longer;
+            width = clamped_shorter;
+        }
+    }
+    return { width, height };
 }
 
 void show_thumbnail(const std::filesystem::path& bmp_path) {
@@ -136,9 +193,22 @@ void show_thumbnail(const std::filesystem::path& bmp_path) {
     if (bitmap == nullptr) {
         return;
     }
+
+    BITMAP info{};
+    if (GetObjectW(bitmap, sizeof(info), &info) != 0 && info.bmWidth > 0 && info.bmHeight > 0) {
+        const std::pair<int, int> box =
+            thumbnail_box_for(static_cast<int>(info.bmWidth), static_cast<int>(info.bmHeight),
+                              g_browser->dpi);
+        g_browser->thumb_box_w = box.first;
+        g_browser->thumb_box_h = box.second;
+    }
+
     g_browser->bitmap = bitmap;
     SendMessageW(g_browser->thumb, STM_SETIMAGE, IMAGE_BITMAP,
                  reinterpret_cast<LPARAM>(bitmap));
+
+    // The box may have changed shape or size, so the controls below it move.
+    layout_browser();
 }
 
 // Selected leaf entry; null for folder nodes or an empty selection.
@@ -299,17 +369,48 @@ void on_tree_selection() {
 
     std::filesystem::path bmp;
     std::wstring error;
+
+    // Primary path: decode the material's own texture with the in-process VTF
+    // reader. This does not need the game's material system, so it works for
+    // every game build and even with no game connected at all.
+    //
+    // Decode at display resolution so the box can match the bitmap exactly
+    // (see thumbnail_box_for) instead of letterboxing it.
+    set_status(L"decoding texture...");
+    UpdateWindow(g_browser->hwnd);
+
+    const bool decoded =
+        app::render_texture_thumbnail(entry->disk_path, name, dp(kThumbnailMaxEdge), bmp, error);
+
+    // The info panel is filled in whether or not the thumbnail worked: a
+    // material whose texture is missing is exactly the case where the user most
+    // needs to see what the material does contain.
+    std::string details;
+    std::wstring info_error;
+    if (app::material_info_text(entry->disk_path, name, details, info_error)) {
+        set_info(label + L"\n\n" + to_wide(details));
+    } else {
+        set_info(label + L"\n\n" + info_error);
+    }
+
+    if (decoded) {
+        show_thumbnail(bmp);
+        set_status(L"thumbnail: " + bmp.filename().wstring());
+        return;
+    }
+
+    // Fallback: ask the engine to render the material. Kept because it is the
+    // only option for HDR textures and shaders whose texture cannot be decoded.
+    const std::wstring decode_error = error;
     set_status(L"rendering thumbnail through the engine...");
     UpdateWindow(g_browser->hwnd);
 
     if (app::render_thumbnail(name, bmp, error)) {
         show_thumbnail(bmp);
-        set_info(label + L"\n\nDouble-click or press Open to edit this material.");
         set_status(L"thumbnail cached: " + bmp.filename().wstring());
     } else {
         clear_thumbnail();
-        set_info(label + L"\n\n(no engine thumbnail: " + error + L")");
-        set_status(error.empty() ? L"thumbnail unavailable" : error);
+        set_status(decode_error.empty() ? L"thumbnail unavailable" : decode_error);
     }
 }
 
@@ -393,19 +494,13 @@ void scan_folder_dialog() {
     if (g_browser == nullptr || g_browser->scanning) {
         return;
     }
-    BROWSEINFOW info{};
-    info.hwndOwner = g_browser->hwnd;
-    info.lpszTitle = L"Select a folder to scan for .vmt materials";
-    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    LPITEMIDLIST idl = SHBrowseForFolderW(&info);
-    if (idl == nullptr) {
-        return;
-    }
-    wchar_t buffer[4 * MAX_PATH] = {};
-    const bool got_path = SHGetPathFromIDListW(idl, buffer) != FALSE;
-    CoTaskMemFree(idl);
-    if (got_path) {
-        scan_folder(std::filesystem::path(buffer));
+    // Start from the folder the browser scanned last, so re-scanning is a
+    // one-click correction instead of a re-navigation from the drive root.
+    const std::filesystem::path current = std::filesystem::path(app::last_browser_root());
+    const std::filesystem::path chosen =
+        pick_folder(g_browser->hwnd, L"Select a folder to scan for .vmt materials", current);
+    if (!chosen.empty()) {
+        scan_folder(chosen);
     }
 }
 
@@ -437,12 +532,33 @@ void layout_browser() {
     const int tree_width = std::max(dp(160), (width - 3 * pad) * 3 / 5);
     const int right_x = pad + tree_width + pad;
     const int right_width = std::max(dp(120), width - right_x - pad);
-    const int thumb_size = dp(160);
+
+    // The thumbnail box carries the selected texture's own aspect ratio (see
+    // thumbnail_box_for). It is only ever shrunk to fit the pane, never
+    // stretched, so the texture keeps its shape in a narrow window too.
+    const int gap = dp(8);
+    int box_w = g_browser->thumb_box_w > 0 ? g_browser->thumb_box_w : kThumbnailMaxEdge;
+    int box_h = g_browser->thumb_box_h > 0 ? g_browser->thumb_box_h : kThumbnailMaxEdge;
+
+    // The info panel lists every texture a material references, so it needs real
+    // room and its own scrollbar; the thumbnail yields whatever is left.
+    const int info_min_h = dp(120);
+    const int max_box_h =
+        std::max(dp(48), content_height - info_min_h - button_h - 2 * gap);
+    if (box_w > right_width || box_h > max_box_h) {
+        const double scale =
+            std::min(static_cast<double>(right_width) / box_w,
+                     static_cast<double>(max_box_h) / box_h);
+        box_w = std::max(1, static_cast<int>(std::lround(box_w * scale)));
+        box_h = std::max(1, static_cast<int>(std::lround(box_h * scale)));
+    }
+
+    const int info_h = std::max(info_min_h, content_height - box_h - gap - button_h - gap);
 
     MoveWindow(g_browser->tree, pad, content_top, tree_width, content_height, TRUE);
-    MoveWindow(g_browser->thumb, right_x, content_top, thumb_size, thumb_size, TRUE);
-    MoveWindow(g_browser->info, right_x, content_top + thumb_size + dp(8), right_width,
-               std::max(dp(40), content_height - thumb_size - dp(8) - button_h - dp(8)), TRUE);
+    MoveWindow(g_browser->thumb, right_x, content_top, box_w, box_h, TRUE);
+    MoveWindow(g_browser->info, right_x, content_top + box_h + gap, right_width, info_h,
+               TRUE);
     MoveWindow(g_browser->open_button, right_x, content_top + content_height - button_h,
                right_width, button_h, TRUE);
     MoveWindow(g_browser->flip, pad, height - status_h - flip_h - dp(4), width - 2 * pad,
@@ -465,15 +581,12 @@ LRESULT CALLBACK BrowserProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         SendMessageW(state->search, EM_SETCUEBANNER, TRUE,
                      reinterpret_cast<LPARAM>(L"Search materials (name contains...)"));
 
-        state->scan_game = CreateWindowExW(
-            0, L"BUTTON", L"Scan game", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, 0,
-            0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SCAN_GAME)),
-            GetModuleHandleW(nullptr), nullptr);
-        state->scan_folder = CreateWindowExW(
-            0, L"BUTTON", L"Scan folder...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-            0, 0, 0, 0, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SCAN_FOLDER)),
-            GetModuleHandleW(nullptr), nullptr);
+        state->scan_game = ui::controls::ThemeButton::create(
+            hwnd, IDC_SCAN_GAME, L"Scan game", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+            ui::controls::ButtonStyle::Default);
+        state->scan_folder = ui::controls::ThemeButton::create(
+            hwnd, IDC_SCAN_FOLDER, L"Scan folder...", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+            ui::controls::ButtonStyle::Default);
         state->tree = CreateWindowExW(
             WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES |
@@ -485,19 +598,27 @@ LRESULT CALLBACK BrowserProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                                        0, 0, 0, hwnd,
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_THUMB)),
                                        GetModuleHandleW(nullptr), nullptr);
-        state->info = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 0,
-                                      0, 0, 0, hwnd,
-                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_INFO)),
-                                      GetModuleHandleW(nullptr), nullptr);
-        state->open_button = CreateWindowExW(
-            0, L"BUTTON", L"Open material", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_OPEN)),
+        // A read-only multiline EDIT rather than a STATIC: the info panel lists every
+        // texture a material references, which overflows the pane on
+        // multi-texture materials and needs to be selectable.
+        state->info = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
+                ES_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_INFO)),
             GetModuleHandleW(nullptr), nullptr);
-        state->flip = CreateWindowExW(
-            0, L"BUTTON", L"Flip thumbnails vertically (engine readback orientation)",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_FLIP)), GetModuleHandleW(nullptr),
-            nullptr);
+        SendMessageW(state->info, EM_SETSEL, 0, -1);
+        SendMessageW(state->info, EM_SETREADONLY, TRUE, 0);
+        // The one action that commits a selection, so it carries the accent weight.
+        state->open_button = ui::controls::ThemeButton::create(
+            hwnd, IDC_OPEN, L"Open material", 0, 0, 0, 0, ui::controls::ButtonKind::Push,
+            ui::controls::ButtonStyle::Accent);
+        // Same control family as the buttons above; BM_GETCHECK/BM_SETCHECK and
+        // BN_CLICKED below are unchanged because the themed checkbox implements
+        // the same message IDs.
+        state->flip = ui::controls::ThemeButton::create(
+            hwnd, IDC_FLIP, L"Flip thumbnails vertically (engine readback orientation)", 0, 0,
+            0, 0, ui::controls::ButtonKind::Checkbox, ui::controls::ButtonStyle::Subtle);
         SendMessageW(state->flip, BM_SETCHECK, app::thumbnail_flip() ? BST_CHECKED : BST_UNCHECKED,
                      0);
         state->status = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 0,
@@ -505,8 +626,9 @@ LRESULT CALLBACK BrowserProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)),
                                         GetModuleHandleW(nullptr), nullptr);
 
-        for (HWND control : { state->search, state->scan_game, state->scan_folder, state->tree,
-                              state->thumb, state->info, state->open_button, state->flip,
+        // The themed buttons are left out on purpose: they draw their labels through
+        // DirectWrite and ignore WM_SETFONT.
+        for (HWND control : { state->search, state->tree, state->thumb, state->info, state->flip,
                               state->status }) {
             set_font(control);
         }
@@ -518,6 +640,30 @@ LRESULT CALLBACK BrowserProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_SIZE:
         layout_browser();
         return 0;
+
+    // Per-monitor V2: take the suggested rect, refresh the dpi that dp() scales
+    // with (the thumbnail box maths converts back through it too), then lay the
+    // hardcoded rects out again.
+    case WM_DPICHANGED: {
+        const RECT* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested != nullptr) {
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if (g_browser != nullptr) {
+            g_browser->dpi = ui::theming::metrics_for(hwnd).dpi;
+        }
+        layout_browser();
+        ui::controls::handle_dpi_change(hwnd);
+        return 0;
+    }
+
+    case WM_SETTINGCHANGE:
+        if (ui::controls::handle_theme_change(hwnd, lparam)) {
+            return 0;
+        }
+        break;
 
     case WM_GETMINMAXINFO: {
         MINMAXINFO* info = reinterpret_cast<MINMAXINFO*>(lparam);
@@ -639,6 +785,14 @@ void show_material_browser(HWND owner) {
         g_browser = nullptr;
         return;
     }
+
+    // Dark caption and rounded corners, plus the subtree walk that themes the
+    // EDITs, the tree view, the thumbnail STATIC and the checkbox. The custom
+    // classes were registered by the main window's bootstrap (and
+    // ThemeButton::create() re-registers on demand), so no register_all() call
+    // is needed here.
+    ui::controls::apply_chrome(hwnd);
+    ui::theming::apply_subtree(hwnd);
 
     // The window now owns the state (deleted in WM_DESTROY).
     state.release();

@@ -32,6 +32,10 @@ enum class PreviewShape {
     Cube,
     Cylinder,
     Plane,
+    BrushWall,
+    BrushFloor,
+    BrushCube,
+    BrushDisplacement,
 };
 
 // Light rig and clear color for the preview. Directions point along the light's
@@ -107,6 +111,16 @@ public:
     // so materials that live inside VPKs can be opened for editing.
     virtual vmt::Result<std::string> read_text_file(const std::string& game_path) = 0;
 
+    // Reads an arbitrary file as raw bytes through the engine file system, so
+    // binary assets that live inside VPKs (textures above all) can be handed to
+    // the in-process VTF decoder. Needed because the viewer decodes textures
+    // itself: the engine's material system is not required to view them.
+    //
+    // Returns NotFound when the path does not resolve in the mounted search
+    // paths. Oversized files (> 256 MiB) are refused rather than buffered.
+    virtual vmt::Result<std::vector<unsigned char>> read_binary_file(
+        const std::string& game_path) = 0;
+
     // Selects the primitive used for the preview.
     virtual vmt::Result<void> set_preview_shape(PreviewShape shape) = 0;
 
@@ -123,6 +137,15 @@ public:
     virtual vmt::Result<Thumbnail> render_material_thumbnail(const std::string& material_name,
                                                              int size,
                                                              bool flip_vertical) = 0;
+
+    // Sets render debug mode ("shaded", "wireframe", "albedo", "normals").
+    virtual vmt::Result<void> set_render_mode(const std::string& mode) = 0;
+
+    // Controls animation playback ("play", "pause", "toggle").
+    virtual vmt::Result<void> set_animation(const std::string& state) = 0;
+
+    // Sets animation playback speed scale (e.g. 1.0f is normal speed).
+    virtual vmt::Result<void> set_speed(float speed) = 0;
 
     // Draws and presents one frame. Call from the host's message loop/timer.
     virtual vmt::Result<void> render() = 0;

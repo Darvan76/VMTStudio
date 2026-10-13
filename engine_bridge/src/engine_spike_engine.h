@@ -13,7 +13,7 @@ enum class MountMode {
     AddonsOnly, // mount exactly one directory from the addons wildcard (one AddSearchPath call)
     Single,     // mount exactly --path once (path ID "GAME")
     SingleDup,  // mount exactly --path twice (path IDs "GAME" then "MOD")
-    Probe,      // slot-24 signature probe: 2-arg call + verify the path was really added
+    Probe,      // layout probe: mount game_dir through the detected vtable slots, then verify FileExists + read + find
 };
 
 struct EngineOptions {
@@ -45,6 +45,7 @@ void install_diagnostics();
 // Sets the SteamAppId environment variable. Call before loading any game DLL.
 void apply_steam_appid(unsigned appid);
 
+StepResult init_filesystem_only(const EngineOptions& opts); // filesystem only (no D3D/matsys)
 StepResult init_engine(const EngineOptions& opts);   // steps 3-4: filesystem + material system + view
 StepResult render_frame(int frame);                  // step 5: draw sphere + present
 StepResult shutdown_engine();                        // step 6: ordered shutdown
@@ -124,6 +125,17 @@ struct TextFile {
     std::string text;
 };
 TextFile read_text_file(const std::string& game_path);
+
+// Reads any file as raw bytes through IFileSystem, so assets inside VPKs
+// (textures) reach the viewer's own VTF decoder without the engine's material
+// system having to be usable.
+struct BinaryFile {
+    bool ok = false;    // the file system answered
+    bool found = false; // the file exists
+    std::string message;
+    std::vector<unsigned char> bytes;
+};
+BinaryFile read_binary_file(const std::string& game_path);
 
 // Renders one material offscreen and reads the pixels back. BGRA, top-down
 // after the optional vertical flip. Never touches the on-screen preview

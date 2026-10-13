@@ -392,3 +392,100 @@ UT_TEST_CASE("fuzz: truncated and random input never crashes or hangs") {
         }
     }
 }
+
+UT_TEST_CASE("set_shader: replaces the name token and keeps the body byte-identical") {
+    const std::string src =
+        "VertexLitGeneric\r\n"
+        "{\r\n"
+        "\t\"$basetexture\" \"backrooms/structures/b_wallpaper1\"\r\n"
+        "\t\"$vertexcolor\" 1\r\n"
+        "}\r\n";
+    auto r = vmt::Document::parse(src);
+    UT_CHECK(r.ok());
+    if (!r.ok()) return;
+    vmt::Document& doc = r.value();
+
+    const std::string before = doc.serialize();
+    UT_CHECK(doc.set_shader("UnlitGeneric").ok());
+    UT_CHECK_EQ(std::string(doc.shader()), std::string("UnlitGeneric"));
+
+    // Only the header name changed: everything from the brace onwards is the
+    // same bytes, including CRLF line endings.
+    const std::string after = doc.serialize();
+    UT_CHECK(after != before);
+    UT_CHECK_EQ(after.substr(after.find('{')), before.substr(before.find('{')));
+    UT_CHECK(after.find("VertexLitGeneric") == std::string::npos);
+
+    // The body survived intact and is still addressable by name.
+    const vmt::Node* base = doc.find("$basetexture");
+    UT_CHECK(base != nullptr);
+    if (base != nullptr) {
+        UT_CHECK_EQ(std::string(base->value()), std::string("backrooms/structures/b_wallpaper1"));
+    }
+}
+
+UT_TEST_CASE("set_shader: preserves the quoting style of the original name") {
+    {
+        const std::string src = "\"VertexLitGeneric\"\n{\n\t\"$basetexture\" \"a/b\"\n}\n";
+        auto r = vmt::Document::parse(src);
+        UT_CHECK(r.ok());
+        if (!r.ok()) return;
+        vmt::Document& doc = r.value();
+        UT_CHECK(doc.set_shader("LightmappedGeneric").ok());
+        UT_CHECK_EQ(doc.serialize(),
+                    std::string("\"LightmappedGeneric\"\n{\n\t\"$basetexture\" \"a/b\"\n}\n"));
+    }
+    {
+        // Bare in, bare out.
+        const std::string src = "UnlitGeneric\n{\n}\n";
+        auto r = vmt::Document::parse(src);
+        UT_CHECK(r.ok());
+        if (!r.ok()) return;
+        vmt::Document& doc = r.value();
+        UT_CHECK(doc.set_shader("VertexColorMaterial").ok());
+        UT_CHECK_EQ(doc.serialize(), std::string("VertexColorMaterial\n{\n}\n"));
+    }
+}
+
+UT_TEST_CASE("set_shader: undoing restores the previous shader") {
+    const std::string src = "\"VertexLitGeneric\"\n{\n\t\"$basetexture\" \"a/b\"\n}\n";
+    auto r = vmt::Document::parse(src);
+    UT_CHECK(r.ok());
+    if (!r.ok()) return;
+    vmt::Document& doc = r.value();
+    UT_CHECK(doc.set_shader("UnlitGeneric").ok());
+    UT_CHECK(doc.revert_edits().ok());
+    UT_CHECK_EQ(doc.serialize(), src);
+}
+
+UT_TEST_CASE("set_shader: rejects names that are not a single token") {
+    auto r = vmt::Document::parse("VertexLitGeneric\n{\n}\n");
+    UT_CHECK(r.ok());
+    if (!r.ok()) return;
+    vmt::Document& doc = r.value();
+
+    for (const char* bad : {"", "Vertex Lit Generic", "VertexLit{", "VertexLit}",
+                            "Vertex\"Lit", "Vertex/Lit", "Vertex\tLit"}) {
+        const vmt::Result<void> result = doc.set_shader(bad);
+        UT_CHECK(!result.ok());
+        if (!result.ok()) {
+            UT_CHECK(result.error().code != vmt::ErrorCode::Ok);
+        }
+    }
+    // A rejected name must leave the document exactly as it was.
+    UT_CHECK_EQ(doc.serialize(), std::string("VertexLitGeneric\n{\n}\n"));
+    UT_CHECK_EQ(std::string(doc.shader()), std::string("VertexLitGeneric"));
+}
+
+UT_TEST_CASE("set_shader: refuses a document that has no shader name") {
+    auto r = vmt::Document::parse("{\n\t\"$basetexture\" \"a/b\"\n}\n");
+    UT_CHECK(r.ok());
+    if (!r.ok()) return;
+    vmt::Document& doc = r.value();
+    UT_CHECK(doc.shader().empty());
+    const vmt::Result<void> result = doc.set_shader("UnlitGeneric");
+    UT_CHECK(!result.ok());
+    if (!result.ok()) {
+        UT_CHECK(result.error().code == vmt::ErrorCode::ParseError);
+    }
+}

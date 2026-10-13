@@ -5,6 +5,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <iostream>
+#include <mutex>
 #include <string>
 
 namespace ui {
@@ -14,6 +16,9 @@ FILE* g_stream = nullptr;
 std::filesystem::path g_path;
 std::filesystem::path g_dir;
 HANDLE g_crash_handle = INVALID_HANDLE_VALUE;
+bool g_console_open = false;
+bool g_ansi_enabled = false;
+std::mutex g_app_log_mutex;
 
 std::string now_stamp() {
     SYSTEMTIME time{};
@@ -26,11 +31,15 @@ std::string now_stamp() {
 }
 
 void crash_write_raw(const std::string& line) {
-    if (g_crash_handle == INVALID_HANDLE_VALUE) {
-        return;
+    if (g_crash_handle != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(g_crash_handle, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
     }
-    DWORD written = 0;
-    WriteFile(g_crash_handle, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    HANDLE hStdErr = GetStdHandle(STD_ERROR_HANDLE);
+    if (hStdErr != INVALID_HANDLE_VALUE && hStdErr != nullptr) {
+        DWORD written = 0;
+        WriteFile(hStdErr, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    }
 }
 
 std::string module_of(const void* address, unsigned long long* out_offset) {
@@ -120,8 +129,7 @@ void log_open(const std::filesystem::path& dir) {
     std::filesystem::create_directories(dir, ec);
 
     g_path = dir / L"vmtviewer.log";
-    FILE* stream = nullptr;
-    _wfopen_s(&stream, g_path.c_str(), L"a");
+    FILE* stream = _wfsopen(g_path.c_str(), L"a", _SH_DENYNO);
     g_stream = stream;
     if (g_stream != nullptr) {
         log_write("APP ", "---- VMT Viewer log opened ----");
@@ -148,12 +156,129 @@ void log_close() {
     }
 }
 
-void log_write(const std::string& tag, const std::string& message) {
-    if (g_stream == nullptr) {
+void console_open() {
+    if (g_console_open) {
+        console_focus();
         return;
     }
-    std::fprintf(g_stream, "[%s] %s %s\r\n", now_stamp().c_str(), tag.c_str(), message.c_str());
-    std::fflush(g_stream); // crash-safe: never leave buffered lines behind
+
+    AllocConsole();
+
+    SetConsoleTitleW(L"VMT Viewer - Consola de Depuracion (Debug Console)");
+
+    FILE* fp_out = nullptr;
+    FILE* fp_err = nullptr;
+    FILE* fp_in = nullptr;
+    freopen_s(&fp_out, "CONOUT$", "w", stdout);
+    freopen_s(&fp_err, "CONOUT$", "w", stderr);
+    freopen_s(&fp_in, "CONIN$", "r", stdin);
+
+    if (stdout != nullptr) std::setvbuf(stdout, nullptr, _IONBF, 0);
+    if (stderr != nullptr) std::setvbuf(stderr, nullptr, _IONBF, 0);
+
+    std::ios::sync_with_stdio(true);
+    std::cout.clear();
+    std::cerr.clear();
+    std::cin.clear();
+
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE && hOut != nullptr) {
+        CONSOLE_SCREEN_BUFFER_INFO csbi{};
+        if (GetConsoleScreenBufferInfo(hOut, &csbi)) {
+            const SHORT winWidth = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+            const SHORT bufferWidth = csbi.dwSize.X > 120 ? csbi.dwSize.X : (winWidth > 120 ? winWidth : 120);
+            const COORD newBufferSize{ bufferWidth, 3000 };
+            SetConsoleScreenBufferSize(hOut, newBufferSize);
+        }
+        DWORD mode = 0;
+        if (GetConsoleMode(hOut, &mode)) {
+            if (SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+                g_ansi_enabled = true;
+            }
+        }
+    }
+
+    HWND hwndConsole = GetConsoleWindow();
+    if (hwndConsole != nullptr) {
+        HMENU hMenu = GetSystemMenu(hwndConsole, FALSE);
+        if (hMenu != nullptr) {
+            DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND);
+        }
+    }
+
+    g_console_open = true;
+
+    if (g_ansi_enabled) {
+        std::printf("\033[96m================================================================================\033[0m\n");
+        std::printf("\033[97;1m  VMT Viewer - Consola de Depuracion y Diagnostico\033[0m\n");
+        std::printf("\033[96m================================================================================\033[0m\n");
+        std::printf("\033[90m  Diagnostico en tiempo real activado. Todos los eventos se mostraran aqui.\033[0m\n");
+        std::printf("\033[90m  Para cerrar la consola, simplemente cierra la ventana principal de VMT Viewer.\033[0m\n");
+        std::printf("\033[96m--------------------------------------------------------------------------------\033[0m\n\n");
+    } else {
+        std::printf("================================================================================\n");
+        std::printf("  VMT Viewer - Consola de Depuracion y Diagnostico\n");
+        std::printf("================================================================================\n");
+        std::printf("  Diagnostico en tiempo real activado. Todos los eventos se mostraran aqui.\n");
+        std::printf("  Para cerrar la consola, simplemente cierra la ventana principal de VMT Viewer.\n");
+        std::printf("--------------------------------------------------------------------------------\n\n");
+    }
+    std::fflush(stdout);
+}
+
+void console_focus() {
+    HWND hwndConsole = GetConsoleWindow();
+    if (hwndConsole != nullptr) {
+        ShowWindow(hwndConsole, SW_SHOW);
+        SetForegroundWindow(hwndConsole);
+    }
+}
+
+bool is_console_open() {
+    return g_console_open && (GetConsoleWindow() != nullptr);
+}
+
+void console_close() {
+    if (g_console_open) {
+        FreeConsole();
+        g_console_open = false;
+    }
+}
+
+void log_write(const std::string& tag, const std::string& message) {
+    std::lock_guard<std::mutex> lock(g_app_log_mutex);
+    const std::string stamp = now_stamp();
+
+    if (g_stream != nullptr) {
+        std::fprintf(g_stream, "[%s] %s %s\r\n", stamp.c_str(), tag.c_str(), message.c_str());
+        std::fflush(g_stream); // crash-safe: never leave buffered lines behind
+    }
+
+    if (g_console_open || GetConsoleWindow() != nullptr) {
+        if (g_ansi_enabled) {
+            const char* color = "\033[37m";
+            if (tag == "ERR " || tag == "FAIL" || tag == "CRSH") color = "\033[91;1m";
+            else if (tag == "WARN") color = "\033[93;1m";
+            else if (tag == "OK  ") color = "\033[92;1m";
+            else if (tag == "APP ") color = "\033[96;1m";
+            else if (tag == "ENG ") color = "\033[95;1m";
+            else if (tag == "FILE") color = "\033[94;1m";
+            else if (tag == "EDIT") color = "\033[36;1m";
+            else if (tag == "VAL ") color = "\033[33;1m";
+            else if (tag == "BRWS") color = "\033[93m";
+            else if (tag == "TEX ") color = "\033[32m";
+            else if (tag == "SRC ") color = "\033[35m";
+
+            std::printf("\033[90m[%s]\033[0m %s[%s]\033[0m %s\n",
+                        stamp.c_str(), color, tag.c_str(), message.c_str());
+        } else {
+            std::printf("[%s] [%s] %s\n", stamp.c_str(), tag.c_str(), message.c_str());
+        }
+        std::fflush(stdout);
+    }
 }
 
 std::filesystem::path log_path() {

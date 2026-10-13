@@ -1,5 +1,8 @@
 {
   "textures": [
-    { "file": "brick05.vtf", "width": 512, "height": 512, "format": "DXT5", "frames": 1, "mips": 10, "alpha": true }
+    { "file": "brick05.vtf", "width": 512, "height": 512, "format": "DXT5", "frames": 1, "mips": 10, "alpha": true },
+    { "file": "dxt1.vtf", "width": 64, "height": 64, "format": "DXT1", "frames": 1, "mips": 7, "alpha": false },
+    { "file": "rgba8888.vtf", "width": 64, "height": 64, "format": "RGBA8888", "frames": 1, "mips": 7, "alpha": true },
+    { "file": "multiframe.vtf", "width": 32, "height": 32, "format": "DXT1", "frames": 4, "mips": 6, "alpha": false }
   ]
 }

@@ -523,6 +523,36 @@ Result<void> Document::remove_parameter(std::string_view name) {
     return Ok();
 }
 
+Result<void> Document::set_shader(std::string_view name) {
+    if (shader_span_.length == 0) {
+        return Err(make_error(ErrorCode::ParseError,
+            "cannot change the shader: the document has no shader name",
+            "Fix the syntax error first, then pick the shader again", name_));
+    }
+    if (name.empty()) {
+        return Err(make_error(ErrorCode::InvalidArgument, "the shader name cannot be empty",
+            "Choose a shader such as VertexLitGeneric"));
+    }
+    for (const char c : name) {
+        if (detail::is_hspace(c) || c == '\r' || c == '\n' || c == '{' || c == '}' ||
+            c == '"' || c == '/' || c == '\\') {
+            return Err(make_error(ErrorCode::InvalidArgument,
+                "'" + std::string(name) + "' is not a valid shader name",
+                "A shader name is a single word, e.g. VertexLitGeneric"));
+        }
+    }
+
+    // Keep the document's own spelling: a quoted name stays quoted, a bare one
+    // stays bare. format_value_token only quotes bare text that needs it, which
+    // a shader name validated above never does.
+    const bool quoted = shader_quoted_ ||
+                        (shader_span_.length >= 1 && buffer_[shader_span_.offset] == '"');
+    buffer_.replace(shader_span_.offset, shader_span_.length,
+                    format_value_token(name, quoted));
+    reparse();
+    return Ok();
+}
+
 Result<void> Document::revert_edits() {
     buffer_ = original_;
     reparse();

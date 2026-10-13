@@ -129,9 +129,17 @@ actionable message instead of a crash. The engine log with the crash dump is
 written to `%TEMP%\VMTViewer\engine.log`.
 
 Verified working with Half-Life 2 (current build) and Source SDK Base 2013
-Singleplayer. The current Garry's Mod binaries load but fault inside their own
-`filesystem_stdio.dll` while mounting search paths; the compatibility check
-detects this and declines the preview (the viewer stays usable).
+Singleplayer. Garry's Mod's file system is supported through a runtime vtable
+layout shim: its `VFileSystem022` inserts four methods before `AddSearchPath`
+(every later slot shifts by +4, so the stock SDK calls corrupted the stack
+there). The viewer detects the layout at startup and resolves the right slots,
+so material listing and reading files through the engine file system —
+including from VPKs — work on Garry's Mod. Its engine renderer, however, stays
+unavailable: the newer material-system branch requires engine-only interfaces
+(QueuedLoader, texture streaming, ...) during `IMaterialSystem::Connect` and
+terminates the process when they are missing. The compatibility check detects
+the branch and declines the engine preview with a clear message, so the viewer
+stays usable.
 
 ## Material browser (Phase 9)
 
@@ -153,7 +161,8 @@ a tree grouped by folder and a thumbnail pane.
   vertically" checkbox (persisted in the settings) corrects it.
 - **Double-click** (or Open) loads the material into the editor. Materials
   inside VPKs are read through the engine file system, so no extraction step
-  is needed; `Save` on such a material opens Save As.
+  is needed; `Save` on such a material opens Save As, while `Save to game
+  folder...` writes the loose override described below.
 
 Editing a game material live: the edited copy is written to the temporary
 preview root at the material's own relative path
@@ -161,6 +170,27 @@ preview root at the material's own relative path
 priority, so the engine resolves the material name to the edited copy while
 its textures still come from the game. The debounced update/edit loop from
 Phase 7 is unchanged.
+
+## Editing and saving (Phase 10)
+
+- **Undo / redo** (`Ctrl+Z` / `Ctrl+Y`) covers both the parameter panel and the
+  raw text editor. Consecutive typing coalesces into a single step; panel edits
+  are always their own step. The history is cleared when another material is
+  opened.
+- **Edit > Revert to saved/opened** restores the last saved revision (or the
+  material as it was opened, before the first save). The revert itself can be
+  undone.
+- **Unsaved changes are guarded**: opening another material (dialog, recent
+  list or browser) asks Save / Discard / Cancel, exactly like closing the app.
+  A cancelled Save As keeps the current material.
+- **Save / Save As write atomically**: the bytes go to a sibling `.tmp` file
+  which then replaces the target, so a crash or a full disk cannot truncate an
+  existing VMT.
+- **File > Save to game folder...** writes the edited material into the
+  connected game's own `materials/` folder as a loose override (loose files win
+  over VPK entries in the engine search order). This is the workflow for
+  materials opened from VPKs; the confirmation dialog shows the exact target
+  and warns before overwriting. `Save` on a VPK material still opens Save As.
 
 ## Preview options (Phase 9)
 
@@ -215,7 +245,13 @@ single unknown-shader warning and only generic checks run.
   Phase 9 keys and the atomic save), preview sync, preview options, the
   material index/search/thumbnail-cache helpers and one validation test per
   rule against `tests/data/validate_*.vmt` fixtures.
-- `vtf_tests` - metadata, decode, error handling and fuzz checks. If
-  `tests/data/vtf/expected.json` and the VTF files it references exist, the
-  fixture checks run automatically against them (schema documented at the top
-  of `tests/vtf_tests.cpp`); otherwise those checks report `PENDING`.
+- `vtf_tests` - metadata, decode, error handling and fuzz checks. The fixture
+  checks run against `tests/data/vtf/expected.json` and the VTF files it
+  references (schema documented at the top of `tests/vtf_tests.cpp`); the
+  committed set must cover DXT1, DXT5, RGBA8888, mipmaps, alpha and
+  multi-frame decoding. Regenerate it with the maintenance tool:
+
+  ```
+  cmake --build build --target make_vtf_fixtures --config Release
+  build\bin\Release\make_vtf_fixtures.exe tests\data\vtf
+  ```

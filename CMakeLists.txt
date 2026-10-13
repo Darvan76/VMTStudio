@@ -46,11 +46,16 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# Build-time location of the Source SDK 2013 public headers.
+set(SOURCE_SDK_PUBLIC "C:/Users/Dario/Documents/source-sdk-2013/source-sdk-2013/src/public"
+    CACHE PATH "Source SDK 2013 src/public directory")
+
 enable_testing()
 
 add_subdirectory(vmt_core)
 add_subdirectory(vtf_reader)
 add_subdirectory(renderer)
+add_subdirectory(hlmv_backend)
 add_subdirectory(engine_bridge)
 add_subdirectory(game_profiles)
 add_subdirectory(ui)

@@ -76,6 +76,16 @@ std::string material_name_from_disk_path(const std::filesystem::path& root,
 
 // --- thumbnail cache ---------------------------------------------------------
 
+// Longest edge, in logical (96 dpi) pixels, of the box that frames a
+// thumbnail. The box always follows the texture's own aspect ratio, so this
+// bounds how large the preview can get without ever distorting the texture.
+inline constexpr int kThumbnailMaxEdge = 256;
+
+// Aspect ratios beyond this are clamped for the box: a 1024x8 strip texture
+// would otherwise get a two-pixel-tall control. The texture itself is never
+// stretched, so such a texture is letterboxed inside the clamped box instead.
+inline constexpr int kThumbnailMaxAspect = 4;
+
 // Stable cache file name for a material: FNV-1a of the lowercased name plus
 // ".bmp" (no user-controlled characters survive into the file name).
 std::string thumbnail_file_name(std::string_view material_name);
