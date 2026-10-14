@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(VMTViewer
-    VERSION 0.1.0
-    DESCRIPTION "Native Windows viewer/editor for Source Engine VMT/VTF"
+project(VMTStudio
+    VERSION 0.2.0
+    DESCRIPTION "Native Windows material studio for Source Engine VMT/VTF"
     LANGUAGES CXX
 )
 
@@ -16,7 +16,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # --- Toolchain guards ---------------------------------------------------------
 if(NOT MSVC)
     message(FATAL_ERROR
-        "VMTViewer currently targets MSVC only. Configure with a Visual Studio generator.")
+        "VMT-Studio currently targets MSVC only. Configure with a Visual Studio generator.")
 endif()
 
 # --- Runtime library ----------------------------------------------------------
@@ -29,10 +29,11 @@ endif()
 
 # --- Warnings -----------------------------------------------------------------
 # Applied to our own targets only, never to third-party or (later) Valve SDK headers.
-add_library(vmtviewer_warnings INTERFACE)
-target_compile_options(vmtviewer_warnings INTERFACE
+add_library(vmtstudio_warnings INTERFACE)
+target_compile_options(vmtstudio_warnings INTERFACE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX /permissive- /Zc:__cplusplus /utf-8>
 )
+add_library(vmtviewer_warnings ALIAS vmtstudio_warnings)
 
 # --- Output layout ------------------------------------------------------------
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

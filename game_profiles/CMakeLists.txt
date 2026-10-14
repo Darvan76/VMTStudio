@@ -1,5 +1,6 @@
 add_library(game_profiles STATIC
     src/game_profiles.cpp
+    src/game_manager.cpp
 )
 
 target_include_directories(game_profiles PUBLIC

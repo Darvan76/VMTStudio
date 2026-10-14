@@ -1786,6 +1786,67 @@ UT_TEST_CASE("ui preview options: ids and settings round-trip") {
     UT_CHECK(!ui::parse_shape("dodecahedron", shape));
 }
 
+UT_TEST_CASE("ui preview options: is_brush_shape and is_model_shape") {
+    UT_CHECK(ui::is_brush_shape(ui::PreviewShape::BrushWall));
+    UT_CHECK(ui::is_brush_shape(ui::PreviewShape::BrushFloor));
+    UT_CHECK(ui::is_brush_shape(ui::PreviewShape::BrushCube));
+    UT_CHECK(ui::is_brush_shape(ui::PreviewShape::BrushDisplacement));
+    UT_CHECK(!ui::is_brush_shape(ui::PreviewShape::Sphere));
+    UT_CHECK(!ui::is_brush_shape(ui::PreviewShape::Cube));
+    UT_CHECK(!ui::is_brush_shape(ui::PreviewShape::Cylinder));
+    UT_CHECK(!ui::is_brush_shape(ui::PreviewShape::Plane));
+
+    UT_CHECK(!ui::is_model_shape(ui::PreviewShape::BrushWall));
+    UT_CHECK(!ui::is_model_shape(ui::PreviewShape::BrushFloor));
+    UT_CHECK(!ui::is_model_shape(ui::PreviewShape::BrushCube));
+    UT_CHECK(!ui::is_model_shape(ui::PreviewShape::BrushDisplacement));
+    UT_CHECK(ui::is_model_shape(ui::PreviewShape::Sphere));
+    UT_CHECK(ui::is_model_shape(ui::PreviewShape::Cube));
+    UT_CHECK(ui::is_model_shape(ui::PreviewShape::Cylinder));
+    UT_CHECK(ui::is_model_shape(ui::PreviewShape::Plane));
+}
+
+UT_TEST_CASE("ui shader catalog: is_brush_only_shader") {
+    // Lightmapped shaders
+    UT_CHECK(ui::is_brush_only_shader("LightmappedGeneric"));
+    UT_CHECK(ui::is_brush_only_shader("lightmappedgeneric"));
+    UT_CHECK(ui::is_brush_only_shader("LIGHTMAPPEDGENERIC"));
+    UT_CHECK(ui::is_brush_only_shader("Lightmapped_4WayBlend"));
+    UT_CHECK(ui::is_brush_only_shader("LightmappedReflective"));
+
+    // World surface shaders
+    UT_CHECK(ui::is_brush_only_shader("WorldVertexTransition"));
+    UT_CHECK(ui::is_brush_only_shader("worldvertextransition"));
+    UT_CHECK(ui::is_brush_only_shader("WorldTwoTextureBlend"));
+    UT_CHECK(ui::is_brush_only_shader("WorldVertexLightmap"));
+
+    // Other brush / Hammer exclusive shaders
+    UT_CHECK(ui::is_brush_only_shader("Lightmap"));
+    UT_CHECK(ui::is_brush_only_shader("lightmap"));
+    UT_CHECK(ui::is_brush_only_shader("UnlitGenericLightmap"));
+    UT_CHECK(ui::is_brush_only_shader("Multiblend"));
+    UT_CHECK(ui::is_brush_only_shader("Water"));
+    UT_CHECK(ui::is_brush_only_shader("water"));
+    UT_CHECK(ui::is_brush_only_shader("WaterRefract"));
+    UT_CHECK(ui::is_brush_only_shader("WaterReflect"));
+    UT_CHECK(ui::is_brush_only_shader("ShatteredGlass"));
+    UT_CHECK(ui::is_brush_only_shader("VolumeFog"));
+    UT_CHECK(ui::is_brush_only_shader("Lava"));
+    UT_CHECK(ui::is_brush_only_shader("Slime"));
+
+    // Model and non-brush shaders must return false
+    UT_CHECK(!ui::is_brush_only_shader("VertexLitGeneric"));
+    UT_CHECK(!ui::is_brush_only_shader("vertexlitgeneric"));
+    UT_CHECK(!ui::is_brush_only_shader("UnlitGeneric"));
+    UT_CHECK(!ui::is_brush_only_shader("unlitgeneric"));
+    UT_CHECK(!ui::is_brush_only_shader("UnlitTwoTexture"));
+    UT_CHECK(!ui::is_brush_only_shader("Refract"));
+    UT_CHECK(!ui::is_brush_only_shader("Sprite"));
+    UT_CHECK(!ui::is_brush_only_shader("PbrModel"));
+    UT_CHECK(!ui::is_brush_only_shader("PostProcess"));
+    UT_CHECK(!ui::is_brush_only_shader(""));
+}
+
 // --- Phase 9: settings persistence ---------------------------------------------
 
 UT_TEST_CASE("ui settings: extended keys round-trip and save is atomic") {

@@ -170,4 +170,28 @@ int find_shader_picker_index(const std::vector<std::string>& names, std::string_
     return -1;
 }
 
+bool is_brush_only_shader(std::string_view name) noexcept {
+    if (name.empty()) {
+        return false;
+    }
+    std::string lower;
+    lower.reserve(name.size());
+    for (char c : name) {
+        lower.push_back(ascii_lower(c));
+    }
+
+    // World / Hammer brush shaders
+    if (lower.rfind("lightmapped", 0) == 0) return true;
+    if (lower.rfind("world", 0) == 0) return true;
+    if (lower.rfind("water", 0) == 0) return true;
+    if (lower == "lightmap") return true;
+    if (lower == "unlitgenericlightmap") return true;
+    if (lower == "multiblend") return true;
+    if (lower == "shatteredglass") return true;
+    if (lower == "volumefog") return true;
+    if (lower == "lava" || lower == "slime") return true;
+
+    return false;
+}
+
 } // namespace ui

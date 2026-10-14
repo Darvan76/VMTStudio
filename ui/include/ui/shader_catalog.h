@@ -36,4 +36,8 @@ std::vector<std::string> shader_picker_names(const vmt::SchemaLibrary* schemas);
 // Index of `name` inside `names`, compared case-insensitively; -1 when absent.
 int find_shader_picker_index(const std::vector<std::string>& names, std::string_view name);
 
+// Returns true if the shader name is exclusive to Hammer / world brushes
+// (e.g. LightmappedGeneric, WorldVertexTransition, WorldTwoTextureBlend, Lightmap, etc.).
+bool is_brush_only_shader(std::string_view name) noexcept;
+
 } // namespace ui

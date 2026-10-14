@@ -1,257 +1,264 @@
-# VMTViewer
+# VMT-Studio
 
-Native Windows (x86) viewer/editor for Source Engine VMT materials and VTF
-textures. Built with C++17, CMake and Visual Studio 2022 (`-A Win32`, static
-CRT `/MT`). Engine previews are rendered by the game's own `/bin` DLLs; the
-application itself only reads files and metadata.
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://microsoft.com/windows)
+[![C++17](https://img.shields.io/badge/Language-C%2B%2B17-00599C.svg)](https://isocpp.org/)
+[![UI: Qt 6](https://img.shields.io/badge/UI-Qt%206-41CD52.svg)](https://www.qt.io/)
+[![Engine: Source Engine](https://img.shields.io/badge/Renderer-Source%20Engine%20(Native%20HLMV)-F37021.svg)](https://developer.valvesoftware.com/wiki/Half-Life_Model_Viewer)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Modules:
+*Read this in other languages: [Español](README.es.md)*
 
-- `vmt_core` - lossless VMT parser/document model/serializer (no engine, UI or
-  Windows dependencies).
-- `vtf_reader` - VTF metadata reading and RGBA8 preview decoding (wraps
-  VTFLib++).
-- `renderer`, `engine_bridge`, `game_profiles`, `ui` - engine preview wiring,
-  game install/profile handling, VMT validation and the application shell.
-- `tests` - `vmt_tests` (vmt_core) and `vtf_tests` (vtf_reader, fixtures and
-  fuzz checks).
+**VMT-Studio** is a high-performance, modern material studio, parameter inspector, and real-time 3D previewer for Valve's Source Engine materials (`.vmt`) and textures (`.vtf`).
 
-No Valve files are redistributed with this application. It contains no game
-content: engine binaries, materials, models and textures are read from a game
-installation on this machine, selected by the user in `Game > Connection`
-(the About dialog states this as well).
+Unlike generic material viewers that attempt to approximate Source shaders through custom OpenGL or Vulkan reimplementations, **VMT-Studio uses Valve's Source Engine renderer natively via an embedded Half-Life Model Viewer (HLMV) architecture**. This guarantees 100% authentic, 1:1 in-game visual fidelity for all complex Source shaders (including Phong, Bumpmaps, Envmap cubemaps, Lightwarps, Detail textures, and Brush geometry).
 
-## Third-party: VTFLib++ (LGPL-2.1)
+---
 
-`vtf_reader` wraps [VTFLib++](https://github.com/ficool2/VTFLib), pinned as a
-git submodule at `thirdparty/vtflib` (master commit `b27ecd3`, which includes
-the BC4/BC5/BC6H_UNSIGNED image format id corrections). VTFLib++ is licensed
-under the **GNU Lesser General Public License v2.1**; the license text is at
-`thirdparty/vtflib/LGPL.txt`.
+## Table of Contents
 
-Linking mode: **DLL**. The viewer links VTFLib++'s import library and ships
-the runtime DLL next to its executables.
+- [Key Features](#key-features)
+- [Architecture](#architecture)
+  - [Dual-Process Architecture (x64 UI + Win32 HLMV)](#dual-process-architecture-x64-ui--win32-hlmv)
+  - [Native Brush & Studio Model Rendering](#native-brush--studio-model-rendering)
+  - [Modules Overview](#modules-overview)
+- [Supported Games & Engines](#supported-games--engines)
+- [Build Requirements](#build-requirements)
+- [Building the Project](#building-the-project)
+  - [Step 1: Clone and Initialize Submodules](#step-1-clone-and-initialize-submodules)
+  - [Step 2: Build VTFLib++ (32-bit and 64-bit)](#step-2-build-vtflib-32-bit-and-64-bit)
+  - [Step 3: Build the 32-bit HLMV Backend](#step-3-build-the-32-bit-hlmv-backend)
+  - [Step 4: Build the 64-bit Qt 6 Frontend](#step-4-build-the-64-bit-qt-6-frontend)
+- [Running and Configuring](#running-and-configuring)
+- [Testing](#testing)
+- [Licenses and Legal Notices](#licenses-and-legal-notices)
+- [AI Disclosure](#ai-disclosure)
 
-Build the DLL from the submodule (32-bit, no Qt: VTFCmd and VTFEdit are not
-used):
+---
 
-```
-cmake -B thirdparty/vtflib/build_vtflib -A Win32 -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
-cmake --build thirdparty/vtflib/build_vtflib --config Release
-cmake --build thirdparty/vtflib/build_vtflib --config Debug
-```
+## Key Features
 
-Runtime locations:
+- **100% Native Source Engine Rendering**:
+  - Leverages Valve's actual Direct3D 9 `materialsystem.dll`, `tier0.dll`, and `vstdlib.dll` from your local game installation.
+  - Zero approximation: exact specular highlights, fresnel curves, half-lambert shading, lightwarps, blend modes, and cubemap reflections.
+- **Dual-Surface Preview: Models & Brushes**:
+  - **Studio Models**: Sphere, Cube, Cylinder, Plane, or custom `.mdl` models with full animation playback and speed control.
+  - **Native Brush Geometry**: Real world geometry (`brush_wall`, `brush_floor`, `brush_cube`, and `brush_displacement`) built using Source engine mesh builders (`CMeshBuilder`) with authentic normals, lightmap UVs, and vertex colors for world shaders (`LightmappedGeneric`, `WorldVertexTransition`).
+- **Two-Way Live Editing & Synchronization**:
+  - **Visual Parameter Inspector**: Dynamic, schema-driven property editor with interactive sliders, checkboxes, color pickers, and texture selectors.
+  - **Code Editor**: Clean syntax-highlighted VMT text editor.
+  - **Instant Debounced Sync**: Changes in the inspector or text editor update the running 3D engine in real time (250 ms debounce).
+  - **Full Undo / Redo**: Unified undo/redo stack across both the inspector and text editor (`Ctrl+Z` / `Ctrl+Y`).
+- **Material Browser (`F3`)**:
+  - Deep-scans loose game folders and mounted `.vpk` archives directly without unpacking.
+  - Real-time thumbnail generation using the native engine with automatic disk caching (`%LOCALAPPDATA%\VMTStudio\thumbnails\`).
+- **Schema Validation & Diagnostics (`F7`)**:
+  - Linting against official Source shader schemas (`data/schema`).
+  - Flags unknown shaders, deprecated or unsupported parameters, type mismatches, and missing dependencies (e.g., `$phongboost` defined without `$phong`).
+  - **Live VFS Texture Check**: Queries the connected game's virtual filesystem (`IFileSystem`) to verify whether referenced VTF textures exist on disk or inside mounted VPKs.
+- **Lighting and Scene Studio**:
+  - Comprehensive lighting control: ambient light, key light (direction, azimuth, elevation, color), fill light, and background clear color.
+  - Environment presets: *Studio Dark*, *Studio Light*, *Outdoor*, and *Flat*.
+- **Shading & Debug Modes**:
+  - Textured / Shaded, Flatshaded, Wireframe, and Normal map / Bumpmap preview.
+- **Safe, Non-Destructive Workflow**:
+  - Atomic file writes (`.tmp` swap) to prevent corrupted materials on crashes or disk errors.
+  - Loose override workflow: `File > Save to game folder...` writes edited materials directly into the game's `materials/` folder to override VPK contents seamlessly.
 
-- `thirdparty/vtflib/build_vtflib/bin/VTFLib++.dll` (Release)
-- `thirdparty/vtflib/build_vtflib/bin/VTFLib++_d.dll` (Debug)
+---
 
-The viewer's build copies the matching DLL next to every executable that links
-`vtf_reader` (for example `build/bin/Release/VTFLib++.dll`) through
-`vtf_deploy_vtflib_runtime()` in `vtf_reader/CMakeLists.txt`. Replacing that
-DLL replaces the VTFLib++ runtime used by the viewer, as the LGPL allows.
+## Architecture
 
-### Patch to VTFLib++ (source offer)
+### Dual-Process Architecture (x64 UI + Win32 HLMV)
 
-VTFLib++'s `VTFLib/Resource.rc` includes `afxres.h`, a header that only ships
-with the optional MFC component of the Visual Studio build tools. The resource
-script contains no MFC resources, so VMTViewer carries exactly one build-only
-patch:
+Valve's Source Engine 2013 and retail games (Half-Life 2, Counter-Strike: Source, Team Fortress 2, Garry's Mod) are legacy 32-bit (`x86`) binaries. Modern UI frameworks like **Qt 6** are built and optimized for 64-bit (`x64`) toolchains. Loading 32-bit engine DLLs directly into a 64-bit process is impossible on Windows.
 
-- `thirdparty/patches/vtflib-resource-winres.patch` - replaces the
-  `afxres.h` include with `winres.h` (Windows SDK).
-
-It changes only how the resource compiler parses the DLL version resource;
-library behavior is unchanged. The patch is applied automatically and
-idempotently:
-
-- when the viewer is configured with CMake, and
-- by the `vtflib_apply_patch` build target:
-  `cmake --build build --target vtflib_apply_patch`.
-
-Equivalently: `cmake -P thirdparty/patches/apply_vtflib_patches.cmake`.
-
-The modified library source is offered in full: the pinned submodule plus this
-patch reproduces the exact VTFLib++ sources used by VMTViewer, satisfying the
-LGPL-2.1 source-availability requirement for the modified library.
-
-## Build
+To solve this, **VMT-Studio** employs an out-of-process client-server architecture:
 
 ```
+┌─────────────────────────────────────────────────────────────┐
+│                    vmtstudio.exe (x64)                      │
+│                  Frontend UI (Qt 6 MSVC)                    │
+│                                                             │
+│  ┌───────────────────────┐       ┌───────────────────────┐  │
+│  │   Visual Inspector    │       │   Syntax Code Editor  │  │
+│  └───────────┬───────────┘       └───────────┬───────────┘  │
+│              │                               │              │
+│              └───────────────┬───────────────┘              │
+│                              ▼                              │
+│                    ┌──────────────────┐                     │
+│                    │ Viewport Widget  │ ◄─── (Embeds HWND)  │
+│                    └─────────┬────────┘                     │
+└──────────────────────────────┼──────────────────────────────┘
+                               │ Win32 IPC (WM_COPYDATA)
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   hlmv_backend.exe (x86)                    │
+│              Rendering Backend (Win32 / C++17)              │
+│                                                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │   HLMV Core + MX Toolkit + Native Direct3D 9 View     │  │
+│  └───────────────────────────┬───────────────────────────┘  │
+│                              ▼                              │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │       Native Game Engine DLLs (materialsystem.dll,    │  │
+│  │          tier0.dll, vstdlib.dll, filesystem)          │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+1. **`vmtstudio` (Qt 6 x64)**: Runs the modern user interface, handles file I/O, parses schemas, provides syntax highlighting, and hosts a native Win32 child container (`ViewportWidget`).
+2. **`hlmv_backend` (Win32 x86)**: Launched as a child process with `-embed <HWND> -game <dir> -bin <dir>`. It loads the game's native Source Engine binaries, initializes Direct3D 9, and reparents its rendering viewport directly into the Qt UI widget.
+3. **High-Speed Win32 IPC**: The frontend dispatches commands (`SET_MATERIAL`, `RELOAD_MATERIAL`, `SET_SHAPE`, `SET_LIGHTING`, `CAPTURE_THUMBNAIL`, etc.) via `WM_COPYDATA` messages with zero perceptible latency.
+
+### Native Brush & Studio Model Rendering
+
+Most material viewers can only display textures on a model sphere. However, Source Engine materials fall into two distinct rendering categories:
+- **Studio Models (`VertexLitGeneric`)**: Requires vertex bone weighting, ambient cube calculations, and studio lighting pipelines.
+- **World Brushes (`LightmappedGeneric`, `WorldVertexTransition`)**: Requires surface lightmaps, flat brush planes, or displacement meshes.
+
+`hlmv_backend` includes a custom `brush_render` module that interfaces directly with Valve's `IMesh` and `CMeshBuilder`. It procedurally constructs authentic brush surfaces (Wall, Floor, Cube, Displacements) with accurate normals, lightmap coordinates, and vertex colors, allowing brush shaders to render faithfully without graphical anomalies.
+
+### Modules Overview
+
+- **`vmt_core`**: Standalone, lossless KeyValues parser, AST document model, and serializer. Preserves comments, exact whitespace formatting, casing, and quoted/unquoted parameters. Has zero dependencies on Windows or Qt.
+- **`vtf_reader`**: Fast VTF image decoder and header parser wrapping `VTFLib++`. Decodes DXT1, DXT5, RGBA8888, BC4/BC5, and cubemap/volume mipmaps into RGBA8 buffers.
+- **`hlmv_backend`**: 32-bit out-of-process engine runner incorporating Valve's Half-Life Model Viewer, MX Toolkit (`mxtk`), IPC listener, and brush mesh builder.
+- **`engine_bridge`**: IPC communication bridge, subprocess lifecycle management, and filesystem compatibility shims (such as runtime vtable fixups for Garry's Mod `VFileSystem022`).
+- **`game_profiles`**: Auto-detection logic for installed Source games, parsing `gameinfo.txt` and locating `/bin` folders.
+- **`ui`**: The Qt 6 GUI application (`vmtstudio`), docks, property inspectors, syntax highlighter, and dialogs.
+- **`data/schema`**: JSON schema definitions for Source shaders (`VertexLitGeneric`, `LightmappedGeneric`, `UnlitGeneric`, `WorldVertexTransition`, `Water`, `Refract`, `Sprite`).
+
+---
+
+## Supported Games & Engines
+
+The engine bridge supports automatic connection to any Source Engine branch based on the Source SDK 2013 / Alien Swarm branch, including:
+- **Half-Life 2** (and Episodes 1 & 2)
+- **Portal**
+- **Counter-Strike: Source**
+- **Team Fortress 2**
+- **Source SDK Base 2013 Singleplayer / Multiplayer**
+- **Garry's Mod** (VPK and filesystem browsing via runtime vtable shim)
+- **Custom Source Engine Mods** containing a valid `gameinfo.txt` and `/bin` folder.
+
+---
+
+## Build Requirements
+
+- **Operating System**: Windows 10 or Windows 11 (64-bit).
+- **Compiler**: Visual Studio 2022 (MSVC v143 toolset) with the **Desktop development with C++** workload.
+- **Build System**: CMake 3.21 or later.
+- **Qt Framework**: Qt 6.8+ (MSVC 2022 64-bit).
+- **Source SDK 2013**: Public headers and import libraries (`SOURCE_SDK_PUBLIC` points to `src/public`).
+- **Git**: Configured with submodule support.
+
+---
+
+## Building the Project
+
+Because the rendering backend must be compiled for **Win32 (32-bit)** to load Valve's 32-bit DLLs, while the frontend GUI is compiled for **x64 (64-bit)** with Qt 6, the build involves a two-phase compilation:
+
+### Step 1: Clone and Initialize Submodules
+
+```powershell
+git clone --recursive https://github.com/your-username/VMT-Studio.git
+cd VMT-Studio
+```
+
+If already cloned:
+```powershell
 git submodule update --init --recursive
+```
 
-# 1. Apply the VTFLib++ patch (step 3 does this automatically as well)
-cmake -P thirdparty/patches/apply_vtflib_patches.cmake
+### Step 2: Build VTFLib++ (32-bit and 64-bit)
 
-# 2. Build VTFLib++ (see the commands above)
+1. Apply the build patch to VTFLib++ (replaces `afxres.h` with `winres.h` so MFC is not required):
+   ```powershell
+   cmake -P thirdparty/patches/apply_vtflib_patches.cmake
+   ```
 
-# 3. Configure, build and test the viewer
-cmake -S . -B build -A Win32
-cmake --build build --config Release
+2. Build 32-bit VTFLib++ (for `hlmv_backend` and 32-bit tests):
+   ```powershell
+   cmake -B thirdparty/vtflib/build_vtflib -A Win32 -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
+   cmake --build thirdparty/vtflib/build_vtflib --config Release
+   ```
+
+3. Build 64-bit VTFLib++ (for 64-bit `vmtstudio`):
+   ```powershell
+   cmake -B thirdparty/vtflib/build_vtflib64 -A x64 -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
+   cmake --build thirdparty/vtflib/build_vtflib64 --config Release
+   ```
+
+### Step 3: Build the 32-bit HLMV Backend
+
+Configure and build the 32-bit target to generate `hlmv_backend.exe`:
+
+```powershell
+cmake -S . -B build -A Win32 -DSOURCE_SDK_PUBLIC="<path-to-source-sdk-2013>/src/public"
+cmake --build build --config Release --target hlmv_backend
+```
+
+### Step 4: Build the 64-bit Qt 6 Frontend
+
+Configure and build the 64-bit frontend. CMake will automatically copy `build/bin/Release/hlmv_backend.exe` next to `vmtstudio.exe` and invoke `windeployqt`:
+
+```powershell
+cmake -S . -B build64 -A x64 -DCMAKE_PREFIX_PATH="C:/Qt/6.8.2/msvc2022_64"
+cmake --build build64 --config Release --target vmtstudio
+```
+
+The resulting standalone executable with all required runtimes will be located at:
+```
+build64/bin/Release/vmtstudio.exe
+```
+
+---
+
+## Running and Configuring
+
+1. Launch `build64/bin/Release/vmtstudio.exe`.
+2. Open **Game > Connection Settings...**:
+   - Set the **Game Directory** (the directory containing `gameinfo.txt`, e.g., `C:/Program Files (x86)/Steam/steamapps/common/Half-Life 2/hl2`).
+   - Set the **Bin Directory** (e.g., `C:/Program Files (x86)/Steam/steamapps/common/Half-Life 2/bin`).
+3. Open any `.vmt` file via **File > Open**, or browse the game files directly with the **Material Browser (`F3`)**.
+4. The 3D viewport will automatically spawn the embedded HLMV backend and render the material with full Source Engine fidelity.
+
+---
+
+## Testing
+
+Run the test suite using CTest:
+
+```powershell
+# Run 64-bit core, parser, and VTF decoding tests
+ctest --test-dir build64 -C Release --output-on-failure
+
+# Run 32-bit engine bridge and UI tests
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-## Engine preview
+---
 
-`Game > Connection...` picks the game's `bin` folder and the game folder that
-contains `gameinfo.txt` (auto-detected from `/bin` when possible). The user
-chooses their own installed game; no game or path is hardcoded.
-Opening a material then loads the engine automatically and renders it in the
-center viewport; `Preview material` forces a manual start/refresh (useful
-before the connection is configured). The edited VMT is written to a temporary
-search path (mounted with the `GAME` path id) and reloaded into the running
-engine after a 250 ms debounce, so the sphere follows edits from the parameter
-panel or the text editor without restarting; saving forces an immediate
-refresh. While the text has syntax errors the last good render stays on screen
-and the error is shown in the status bar.
+## Licenses and Legal Notices
 
-The engine device is created once, at preview start, with a backbuffer of the
-viewport size (minimum 1280x720, capped to the desktop size). Resizing the
-window does **not** reset the device: the 2013 game binaries fault inside
-`shaderapidx9.dll` when `SetMode` resets a device after shaders were used
-(`stdshader` restore reads an unbound vertex shader). The host size only
-re-aims the projection aspect and D3D presents the fixed backbuffer scaled to
-the window, so circles stay round, the preview never crashes on resize, and
-large windows still get a sharp image from the oversized backbuffer.
+### Valve Corporation Disclaimer
+- **VMT-Studio does NOT distribute any proprietary Valve binaries, textures, models, or copyrighted game assets.**
+- Engine DLLs, materials, sounds, and models are loaded dynamically at runtime from a user-supplied, legally acquired local Source Engine game installation.
+- *Valve*, the *Valve logo*, *Half-Life*, the *Half-Life logo*, *Source*, the *Source logo*, *Counter-Strike*, and *Team Fortress* are trademarks and/or registered trademarks of **Valve Corporation**.
 
-The engine is embedded with the tool sequence the engine's own launcher uses:
-filesystem init from `gameinfo.txt`, `ICvar::Connect` (initializes vstdlib's
-internal cvar query), a composite factory for `IMaterialSystem::Connect`
-(shader hardware config + cvar interfaces; engine-only interfaces stay null),
-then `IMaterialSystem::Init` and `SetMode` on the viewport child window. Game
-DLLs are loaded with `LOAD_WITH_ALTERED_SEARCH_PATH` so bin-local dependencies
-(steam_api.dll and friends) resolve.
+### Third-Party Licenses
+- **VTFLib++**: Licensed under the **GNU Lesser General Public License v2.1 (LGPL-2.1)**. The license text is available at `thirdparty/vtflib/LGPL.txt`. VTFLib++ is linked as a dynamic library (DLL). Source code and compilation patches are provided in full within `thirdparty/`. (Shut out to @ficool2, for this lib and all his contributions to the Source Engine community)
+- **Qt 6**: Licensed under **LGPLv3** / Commercial. Copyright (C) The Qt Company Ltd.
+- **Source SDK 2013**: Used under the Valve Source SDK License.
 
-Before initializing the engine in-process, the viewer runs a one-shot
-compatibility check in a disposable child process (`vmtviewer --engine-probe`).
-A faulty game install then cannot take the viewer down: the user gets an
-actionable message instead of a crash. The engine log with the crash dump is
-written to `%TEMP%\VMTViewer\engine.log`.
+### VMT-Studio License
+This project is open-source software licensed under the **MIT License**. See [LICENSE](LICENSE) for details.
 
-Verified working with Half-Life 2 (current build) and Source SDK Base 2013
-Singleplayer. Garry's Mod's file system is supported through a runtime vtable
-layout shim: its `VFileSystem022` inserts four methods before `AddSearchPath`
-(every later slot shifts by +4, so the stock SDK calls corrupted the stack
-there). The viewer detects the layout at startup and resolves the right slots,
-so material listing and reading files through the engine file system —
-including from VPKs — work on Garry's Mod. Its engine renderer, however, stays
-unavailable: the newer material-system branch requires engine-only interfaces
-(QueuedLoader, texture streaming, ...) during `IMaterialSystem::Connect` and
-terminates the process when they are missing. The compatibility check detects
-the branch and declines the engine preview with a clear message, so the viewer
-stays usable.
+---
 
-## Material browser (Phase 9)
+## AI Disclosure
 
-`View > Material browser` (or `F3`) opens a modeless window with a search box,
-a tree grouped by folder and a thumbnail pane.
+Parts of this project were designed, written, refactored, and documented with the assistance of Artificial Intelligence (AI).
 
-- **Scan game** enumerates every `.vmt` in the connected game's mounted file
-  system, including VPKs, through the same engine interface the preview uses.
-- **Scan folder...** walks a directory on disk for `.vmt` files; this works
-  without a game connection. The last scanned folder is restored on the next
-  start.
-- **Thumbnails** are rendered by the engine (the material on a lit sphere) and
-  cached as 24-bit BMP files under
-  `%LOCALAPPDATA%\VMTViewer\thumbnails\<hash>.bmp`; selecting a cached
-  material again re-renders it, and browsing without an engine falls back to
-  the disk cache. A thumbnail renders into the device backbuffer and is read
-  back before it is presented, so the visible preview is not disturbed. If a
-  game's binary returns the pixels upside down, the "Flip thumbnails
-  vertically" checkbox (persisted in the settings) corrects it.
-- **Double-click** (or Open) loads the material into the editor. Materials
-  inside VPKs are read through the engine file system, so no extraction step
-  is needed; `Save` on such a material opens Save As, while `Save to game
-  folder...` writes the loose override described below.
+If you have an issue with AI-assisted software development: **we genuinely do not care about your opinion**. The tool works, it renders Source engine materials natively with 100% fidelity, solves real problems, and is free and open-source. Use it or don't.
 
-Editing a game material live: the edited copy is written to the temporary
-preview root at the material's own relative path
-(`materials/<name>.vmt`), and that root is mounted with the highest search
-priority, so the engine resolves the material name to the edited copy while
-its textures still come from the game. The debounced update/edit loop from
-Phase 7 is unchanged.
-
-## Editing and saving (Phase 10)
-
-- **Undo / redo** (`Ctrl+Z` / `Ctrl+Y`) covers both the parameter panel and the
-  raw text editor. Consecutive typing coalesces into a single step; panel edits
-  are always their own step. The history is cleared when another material is
-  opened.
-- **Edit > Revert to saved/opened** restores the last saved revision (or the
-  material as it was opened, before the first save). The revert itself can be
-  undone.
-- **Unsaved changes are guarded**: opening another material (dialog, recent
-  list or browser) asks Save / Discard / Cancel, exactly like closing the app.
-  A cancelled Save As keeps the current material.
-- **Save / Save As write atomically**: the bytes go to a sibling `.tmp` file
-  which then replaces the target, so a crash or a full disk cannot truncate an
-  existing VMT.
-- **File > Save to game folder...** writes the edited material into the
-  connected game's own `materials/` folder as a loose override (loose files win
-  over VPK entries in the engine search order). This is the workflow for
-  materials opened from VPKs; the confirmation dialog shows the exact target
-  and warns before overwriting. `Save` on a VPK material still opens Save As.
-
-## Preview options (Phase 9)
-
-`Preview > Preview options...` controls the preview scene:
-
-- **Shape**: sphere, cube, cylinder, plane (also as radio items directly in the
-  Preview menu). Flat shapes render double-sided.
-- **Environment**: Studio dark, Studio light, Outdoor and Flat presets; moving
-  any slider switches to a custom rig.
-- **Light rig**: ambient level, key light azimuth/elevation/intensity and the
-  background level. Changes apply to the running engine immediately.
-- **Load model (.mdl)...** is present and wired to the engine call, but the
-  model path itself is pending the StudioRender headers for this engine; the
-  viewer reports that cleanly instead of failing.
-
-## Settings and logging (Phase 9)
-
-- All options above, the browser source and the game connection are persisted
-  in `%APPDATA%\VMTViewer\settings.ini`. Saves are atomic (write to `.tmp`
-  then replace), so a crash mid-save cannot corrupt the settings.
-- The viewer log is `%LOCALAPPDATA%\VMTViewer\vmtviewer.log`: append-only,
-  flushed per line, with a `session.lock` marker that distinguishes a clean
-  exit from a crash and a vectored exception handler that writes `CRASH`
-  records (module + offset + stack). The engine log stays at
-  `%TEMP%\VMTViewer\engine.log`.
-- `Help > About` states the no-Valve-files position and the VTFLib++ (LGPL-2.1)
-  attribution.
-
-## Validation
-
-`Tools > Validate` (or `F7`, or the `Validate` button) checks the open material
-and opens a results window; double-clicking a finding moves the caret to its
-line. Severities: **error** (recovered parse diagnostics, missing textures),
-**warning** (unknown shader, unknown parameter, type/range mismatch, missing
-dependency parameter such as `$phongboost` without `$phong`, backslashes,
-`.vtf` extension, duplicate parameter) and **info** (uppercase path style,
-checks that could not run).
-
-Texture existence is resolved through the engine file system of the connected
-game - `IFileSystem::FileExists`, which walks every mounted search path
-including VPKs - so the check only runs once a preview engine is initialized;
-otherwise validation reports that texture checks were skipped. `_rt_*` render
-targets and `$envmap`'s `env_cubemap` are exempt. Rules that need schema
-knowledge (parameter names, types, ranges, dependencies) use the same
-`data/schema` files as the parameter panel; shaders without a schema get a
-single unknown-shader warning and only generic checks run.
-
-## Tests
-
-- `vmt_tests` - vmt_core parser/editor suites.
-- `ui_tests` - session/editing core, panel model, settings (including the
-  Phase 9 keys and the atomic save), preview sync, preview options, the
-  material index/search/thumbnail-cache helpers and one validation test per
-  rule against `tests/data/validate_*.vmt` fixtures.
-- `vtf_tests` - metadata, decode, error handling and fuzz checks. The fixture
-  checks run against `tests/data/vtf/expected.json` and the VTF files it
-  references (schema documented at the top of `tests/vtf_tests.cpp`); the
-  committed set must cover DXT1, DXT5, RGBA8888, mipmaps, alpha and
-  multi-frame decoding. Regenerate it with the maintenance tool:
-
-  ```
-  cmake --build build --target make_vtf_fixtures --config Release
-  build\bin\Release\make_vtf_fixtures.exe tests\data\vtf
-  ```

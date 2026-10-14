@@ -22,6 +22,7 @@ namespace qt {
 class ViewportWidget;
 class InspectorWidget;
 class VmtHighlighter;
+class NotificationPopup;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -36,6 +37,9 @@ public:
 protected:
     void closeEvent(QCloseEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void moveEvent(QMoveEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private slots:
     // File menu
@@ -90,6 +94,8 @@ private:
 
     void loadSettings();
     void saveSettings();
+    void restoreLayout();
+    void saveLayoutState();
     void updateRecentFilesMenu();
     void addRecentFile(const QString& path);
 
@@ -100,6 +106,11 @@ private:
     bool ensureEngine(QString& error);
     void syncPreview();
     void refreshMaterialRoots();
+
+    bool isCurrentMaterialBrushOnly() const;
+    QString getCurrentShaderName() const;
+    QString getMaterialDisplayName() const;
+    void checkBrushMaterial(bool forcePopup);
 
     // Core Domain Objects
     ui::EditorSession m_session;
@@ -117,6 +128,10 @@ private:
     bool m_animPlaying = true;
     bool m_showAdvanced = false;
 
+    // Brush shader tracking
+    std::string m_lastShader;
+    bool m_wasBrushMaterial = false;
+
     // UI Widgets
     InspectorWidget* m_inspector = nullptr;
     ViewportWidget* m_viewport = nullptr;
@@ -124,6 +139,7 @@ private:
     VmtHighlighter* m_highlighter = nullptr;
     QDockWidget* m_validationDock = nullptr;
     QTableWidget* m_validationTable = nullptr;
+    NotificationPopup* m_notificationPopup = nullptr;
 
     QComboBox* m_shapeCombo = nullptr;
     QComboBox* m_renderModeCombo = nullptr;

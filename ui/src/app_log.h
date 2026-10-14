@@ -6,17 +6,17 @@
 // mode, and a vectored exception handler writes a CRASH record through a raw
 // Win32 handle that is never buffered. A session marker distinguishes a clean
 // exit from a crash/termination, and the next start reports an unclean
-// previous session. The log lives in %LOCALAPPDATA%\VMTViewer (the engine
-// log stays in %TEMP%\VMTViewer\engine.log).
+// previous session. The log lives in %LOCALAPPDATA%\VMTStudio (the engine
+// log stays in %TEMP%\VMTStudio\engine.log).
 //
-// Internal to the Win32 shell: not part of the public, testable ui headers.
+// Internal to the shell: not part of the public, testable ui headers.
 
 #include <filesystem>
 #include <string>
 
 namespace ui {
 
-// Creates `dir` and opens <dir>/vmtviewer.log (append). Safe to call again.
+// Creates `dir` and opens <dir>/vmtstudio.log (append). Safe to call again.
 void log_open(const std::filesystem::path& dir);
 void log_close();
 void log_write(const std::string& tag, const std::string& message);

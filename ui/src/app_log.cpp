@@ -128,11 +128,11 @@ void log_open(const std::filesystem::path& dir) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
 
-    g_path = dir / L"vmtviewer.log";
+    g_path = dir / L"vmtstudio.log";
     FILE* stream = _wfsopen(g_path.c_str(), L"a", _SH_DENYNO);
     g_stream = stream;
     if (g_stream != nullptr) {
-        log_write("APP ", "---- VMT Viewer log opened ----");
+        log_write("APP ", "---- VMT-Studio log opened ----");
     }
 
     // Raw, unbuffered handle for the crash handler.
@@ -164,7 +164,7 @@ void console_open() {
 
     AllocConsole();
 
-    SetConsoleTitleW(L"VMT Viewer - Consola de Depuracion (Debug Console)");
+    SetConsoleTitleW(L"VMT-Studio - Consola de Depuracion (Debug Console)");
 
     FILE* fp_out = nullptr;
     FILE* fp_err = nullptr;
@@ -213,17 +213,17 @@ void console_open() {
 
     if (g_ansi_enabled) {
         std::printf("\033[96m================================================================================\033[0m\n");
-        std::printf("\033[97;1m  VMT Viewer - Consola de Depuracion y Diagnostico\033[0m\n");
+        std::printf("\033[97;1m  VMT-Studio - Consola de Depuracion y Diagnostico\033[0m\n");
         std::printf("\033[96m================================================================================\033[0m\n");
         std::printf("\033[90m  Diagnostico en tiempo real activado. Todos los eventos se mostraran aqui.\033[0m\n");
-        std::printf("\033[90m  Para cerrar la consola, simplemente cierra la ventana principal de VMT Viewer.\033[0m\n");
+        std::printf("\033[90m  Para cerrar la consola, simplemente cierra la ventana principal de VMT-Studio.\033[0m\n");
         std::printf("\033[96m--------------------------------------------------------------------------------\033[0m\n\n");
     } else {
         std::printf("================================================================================\n");
-        std::printf("  VMT Viewer - Consola de Depuracion y Diagnostico\n");
+        std::printf("  VMT-Studio - Consola de Depuracion y Diagnostico\n");
         std::printf("================================================================================\n");
         std::printf("  Diagnostico en tiempo real activado. Todos los eventos se mostraran aqui.\n");
-        std::printf("  Para cerrar la consola, simplemente cierra la ventana principal de VMT Viewer.\n");
+        std::printf("  Para cerrar la consola, simplemente cierra la ventana principal de VMT-Studio.\n");
         std::printf("--------------------------------------------------------------------------------\n\n");
     }
     std::fflush(stdout);

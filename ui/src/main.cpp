@@ -19,16 +19,16 @@ int main(int argc, char* argv[]) {
     
     wchar_t localApp[MAX_PATH] = {};
     if (GetEnvironmentVariableW(L"LOCALAPPDATA", localApp, MAX_PATH) > 0) {
-        ui::log_open(std::filesystem::path(localApp) / L"VMTViewer");
+        ui::log_open(std::filesystem::path(localApp) / L"VMTStudio");
     } else {
-        ui::log_open(std::filesystem::temp_directory_path() / L"VMTViewer");
+        ui::log_open(std::filesystem::temp_directory_path() / L"VMTStudio");
     }
     ui::log_session_begin();
 
     QApplication app(argc, argv);
-    app.setApplicationName("VMTViewer");
+    app.setApplicationName("VMT-Studio");
     app.setApplicationVersion("0.2.0");
-    app.setOrganizationName("VMTViewer");
+    app.setOrganizationName("VMT-Studio");
 
     ui::qt::apply_dark_theme(app);
 

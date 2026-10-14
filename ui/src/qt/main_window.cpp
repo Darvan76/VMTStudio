@@ -6,6 +6,7 @@
 #include "material_browser_dialog.h"
 #include "connection_dialog.h"
 #include "about_dialog.h"
+#include "notification_popup.h"
 #include "app_log.h"
 #include "ui/shader_catalog.h"
 #include "vmt/document.h"
@@ -67,25 +68,25 @@ std::filesystem::path temp_preview_dir() {
     wchar_t buffer[MAX_PATH] = {};
     const DWORD length = GetTempPathW(MAX_PATH, buffer);
     if (length == 0 || length >= MAX_PATH) {
-        return std::filesystem::temp_directory_path() / "VMTViewer" / "preview";
+        return std::filesystem::temp_directory_path() / "VMTStudio" / "preview";
     }
-    return std::filesystem::path(buffer) / L"VMTViewer" / L"preview";
+    return std::filesystem::path(buffer) / L"VMTStudio" / L"preview";
 }
 
 std::filesystem::path app_data_dir() {
     wchar_t buffer[MAX_PATH] = {};
     const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH);
     if (length == 0 || length >= MAX_PATH) {
-        return std::filesystem::temp_directory_path() / "VMTViewer";
+        return std::filesystem::temp_directory_path() / "VMTStudio";
     }
-    return std::filesystem::path(buffer) / L"VMTViewer";
+    return std::filesystem::path(buffer) / L"VMTStudio";
 }
 
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
-    setWindowTitle(tr("VMT Viewer"));
+    setWindowTitle(tr("VMT-Studio"));
     resize(1360, 820);
 
     m_previewRoot = temp_preview_dir();
@@ -111,10 +112,13 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_previewSyncTimer, &QTimer::timeout, this, &MainWindow::onPreviewSyncTimeout);
 
     setupUi();
+    m_notificationPopup = new NotificationPopup(this);
     setupMenus();
     setupToolBar();
     setupStatusBar();
     setupDock();
+
+    restoreLayout();
 
     // Default template document
     onNewFile();
@@ -186,6 +190,40 @@ void MainWindow::setupUi() {
     // Connect code editor signals
     connect(m_codeEditor, &QPlainTextEdit::textChanged,
             this, &MainWindow::onCodeEditorTextChanged);
+
+    // Make validation findings actionable: double click jumps to the source line.
+    connect(m_validationTable, &QTableWidget::cellDoubleClicked,
+            this, [this](int row, int /*column*/) {
+        if (row < 0 || row >= m_validationTable->rowCount()) {
+            return;
+        }
+        auto* locationItem = m_validationTable->item(row, 3);
+        if (!locationItem) {
+            return;
+        }
+        const QString text = locationItem->text();
+        int line = 0;
+        for (const QChar& ch : text) {
+            if (ch.isDigit()) {
+                line = line * 10 + ch.digitValue();
+            } else if (line > 0) {
+                break;
+            }
+        }
+        if (line <= 0) {
+            return;
+        }
+
+        QTextCursor cursor = m_codeEditor->textCursor();
+        cursor.movePosition(QTextCursor::Start);
+        for (int i = 1; i < line; ++i) {
+            if (!cursor.movePosition(QTextCursor::Down)) {
+                break;
+            }
+        }
+        m_codeEditor->setTextCursor(cursor);
+        m_codeEditor->setFocus();
+    });
 }
 
 void MainWindow::setupMenus() {
@@ -262,7 +300,7 @@ void MainWindow::setupMenus() {
 
     // --- Help Menu ---
     auto* helpMenu = menuBar()->addMenu(tr("&Help"));
-    helpMenu->addAction(tr("&About VMT Viewer..."), QKeySequence(Qt::Key_F1), this, &MainWindow::onOpenAbout);
+    helpMenu->addAction(tr("&About VMT-Studio..."), QKeySequence(Qt::Key_F1), this, &MainWindow::onOpenAbout);
 }
 
 void MainWindow::setupToolBar() {
@@ -332,11 +370,66 @@ void MainWindow::setupDock() {
 void MainWindow::loadSettings() {
     m_settings = ui::UISettings::load(m_settingsPath);
     m_previewOptions = ui::options_from_settings(m_settings);
+    m_showAdvanced = m_settings.show_advanced;
 }
 
 void MainWindow::saveSettings() {
+    m_settings.show_advanced = m_showAdvanced;
+    saveLayoutState();
     ui::options_to_settings(m_previewOptions, m_settings);
     (void)m_settings.save(m_settingsPath);
+}
+
+void MainWindow::restoreLayout() {
+    if (m_settings.window_width > 0 && m_settings.window_height > 0) {
+        resize(m_settings.window_width, m_settings.window_height);
+    }
+
+    if (auto* splitter = qobject_cast<QSplitter*>(centralWidget())) {
+        if (!m_settings.splitter_sizes.empty()) {
+            std::vector<int> sizes;
+            std::string token;
+            for (char ch : m_settings.splitter_sizes) {
+                if (ch == ',') {
+                    try { sizes.push_back(std::stoi(token)); } catch (...) { }
+                    token.clear();
+                } else {
+                    token += ch;
+                }
+            }
+            if (!token.empty()) {
+                try { sizes.push_back(std::stoi(token)); } catch (...) { }
+            }
+            if (sizes.size() == static_cast<std::size_t>(splitter->count())) {
+                splitter->setSizes(QList<int>(sizes.begin(), sizes.end()));
+            }
+        }
+    }
+
+    if (m_validationDock) {
+        m_validationDock->setVisible(m_settings.validation_dock_visible);
+    }
+}
+
+void MainWindow::saveLayoutState() {
+    m_settings.window_width = width();
+    m_settings.window_height = height();
+
+    if (auto* splitter = qobject_cast<QSplitter*>(centralWidget())) {
+        std::string joined;
+        const QList<int> sizes = splitter->sizes();
+        for (int i = 0; i < sizes.size(); ++i) {
+            if (i != 0) {
+                joined += ",";
+            }
+            joined += std::to_string(sizes[i]);
+        }
+        m_settings.splitter_sizes = joined;
+    }
+
+    if (m_validationDock) {
+        m_settings.validation_dock_visible = m_validationDock->isVisible();
+    }
 }
 
 void MainWindow::updateRecentFilesMenu() {
@@ -365,7 +458,7 @@ void MainWindow::addRecentFile(const QString& path) {
 }
 
 void MainWindow::updateTitle() {
-    QString title = tr("VMT Viewer");
+    QString title = tr("VMT-Studio");
     if (!m_session.path().empty()) {
         title = QString::fromStdWString(m_session.path().filename().wstring()) + " - " + title;
     } else {
@@ -457,6 +550,75 @@ void MainWindow::refreshMaterialRoots() {
     }
 }
 
+bool MainWindow::isCurrentMaterialBrushOnly() const {
+    if (!m_session.document()) {
+        return false;
+    }
+    return ui::is_brush_only_shader(m_session.document()->shader());
+}
+
+QString MainWindow::getCurrentShaderName() const {
+    if (!m_session.document()) {
+        return QStringLiteral("LightmappedGeneric");
+    }
+    return QString::fromUtf8(m_session.document()->shader().data(),
+                             static_cast<int>(m_session.document()->shader().size()));
+}
+
+QString MainWindow::getMaterialDisplayName() const {
+    if (!m_session.path().empty()) {
+        return QString::fromStdWString(m_session.path().stem().wstring());
+    }
+    if (!m_session.display_name().empty()) {
+        std::filesystem::path p(m_session.display_name());
+        return QString::fromStdWString(p.stem().wstring());
+    }
+    return QStringLiteral("untitled");
+}
+
+void MainWindow::checkBrushMaterial(bool forcePopup) {
+    if (!m_session.document()) {
+        m_wasBrushMaterial = false;
+        m_lastShader.clear();
+        return;
+    }
+
+    std::string currentShader = std::string(m_session.document()->shader());
+    bool isBrush = ui::is_brush_only_shader(currentShader);
+
+    if (isBrush) {
+        bool shouldNotify = forcePopup || !m_wasBrushMaterial || !ui::shader_name_equal(currentShader, m_lastShader);
+
+        // Auto-change viewport shape to BrushWall if not already a brush shape or freshly loaded
+        if (!ui::is_brush_shape(m_previewOptions.shape) || shouldNotify) {
+            m_previewOptions.shape = ui::PreviewShape::BrushWall;
+            if (m_shapeCombo) {
+                m_shapeCombo->blockSignals(true);
+                m_shapeCombo->setCurrentIndex(static_cast<int>(ui::PreviewShape::BrushWall));
+                m_shapeCombo->blockSignals(false);
+            }
+            if (m_engine && m_engine->initialized()) {
+                (void)m_engine->set_preview_shape(to_bridge_shape(ui::PreviewShape::BrushWall));
+            }
+        }
+
+        if (shouldNotify) {
+            QString matName = getMaterialDisplayName();
+            QString shaderName = getCurrentShaderName();
+            if (m_notificationPopup) {
+                m_notificationPopup->showMessage(
+                    tr("%1 material contains %2 (Brush Material), the viewport changed the shape")
+                        .arg(matName, shaderName),
+                    NotificationSeverity::Info, 6000);
+                m_notificationPopup->reposition(m_viewport);
+            }
+        }
+    }
+
+    m_wasBrushMaterial = isBrush;
+    m_lastShader = currentShader;
+}
+
 void MainWindow::syncPreview() {
     m_previewSyncTimer->start();
 }
@@ -523,6 +685,7 @@ void MainWindow::onNewFile() {
 
     updateTitle();
     updateStatus();
+    checkBrushMaterial(true);
     syncPreview();
 }
 
@@ -546,6 +709,7 @@ bool MainWindow::openFile(const QString& filePath) {
 
     updateTitle();
     updateStatus();
+    checkBrushMaterial(true);
     syncPreview();
     return true;
 }
@@ -579,6 +743,7 @@ bool MainWindow::openGameMaterial(const QString& materialName) {
 
     updateTitle();
     updateStatus();
+    checkBrushMaterial(true);
     syncPreview();
     return true;
 }
@@ -662,6 +827,7 @@ void MainWindow::onRevertFile() {
         m_suppressSync = false;
         updateTitle();
         updateStatus();
+        checkBrushMaterial(false);
         syncPreview();
     }
 }
@@ -681,6 +847,7 @@ void MainWindow::onUndo() {
         m_suppressSync = false;
         updateTitle();
         updateStatus();
+        checkBrushMaterial(false);
         syncPreview();
     }
 }
@@ -693,6 +860,7 @@ void MainWindow::onRedo() {
         m_suppressSync = false;
         updateTitle();
         updateStatus();
+        checkBrushMaterial(false);
         syncPreview();
     }
 }
@@ -710,7 +878,33 @@ void MainWindow::onResetLayout() {
 }
 
 void MainWindow::onShapeSelected(int index) {
-    m_previewOptions.shape = static_cast<ui::PreviewShape>(index);
+    ui::PreviewShape newShape = static_cast<ui::PreviewShape>(index);
+    if (isCurrentMaterialBrushOnly() && !ui::is_brush_shape(newShape)) {
+        if (m_shapeCombo && m_shapeCombo->currentIndex() != static_cast<int>(m_previewOptions.shape)) {
+            m_shapeCombo->blockSignals(true);
+            m_shapeCombo->setCurrentIndex(static_cast<int>(m_previewOptions.shape));
+            m_shapeCombo->blockSignals(false);
+        }
+
+        QString mat = getMaterialDisplayName();
+        QString shader = getCurrentShaderName();
+
+        if (m_notificationPopup) {
+            m_notificationPopup->showMessage(
+                tr("Cannot change shape: %1 material contains %2 (Brush Material). Viewport must remain a brush shape.")
+                    .arg(mat, shader),
+                NotificationSeverity::Warning, 5000);
+            m_notificationPopup->reposition(m_viewport);
+        }
+
+        QMessageBox::warning(this, tr("Cannot Change Shape"),
+            tr("Cannot change to model shape: '%1' material contains '%2' (Brush Material).\n\n"
+               "World brush shaders are exclusive to Hammer / world geometry and cannot be previewed on 3D models.")
+            .arg(mat, shader));
+        return;
+    }
+
+    m_previewOptions.shape = newShape;
     if (m_shapeCombo && m_shapeCombo->currentIndex() != index) {
         m_shapeCombo->blockSignals(true);
         m_shapeCombo->setCurrentIndex(index);
@@ -750,9 +944,14 @@ void MainWindow::onSetAnimationSpeed(float speed) {
 }
 
 void MainWindow::onOpenPreviewOptions() {
-    PreviewOptionsDialog dlg(m_previewOptions, this);
+    PreviewOptionsDialog dlg(m_previewOptions, isCurrentMaterialBrushOnly(), this);
     connect(&dlg, &PreviewOptionsDialog::optionsChanged, this, [this](const ui::PreviewOptions& opts) {
         m_previewOptions = opts;
+        if (m_shapeCombo) {
+            m_shapeCombo->blockSignals(true);
+            m_shapeCombo->setCurrentIndex(static_cast<int>(m_previewOptions.shape));
+            m_shapeCombo->blockSignals(false);
+        }
         if (m_engine && m_engine->initialized()) {
             (void)m_engine->set_preview_shape(to_bridge_shape(m_previewOptions.shape));
             (void)m_engine->set_lighting(to_bridge_lighting(m_previewOptions.lighting));
@@ -761,11 +960,35 @@ void MainWindow::onOpenPreviewOptions() {
     connect(&dlg, &PreviewOptionsDialog::loadModelRequested, this, &MainWindow::onLoadModel);
     if (dlg.exec() == QDialog::Accepted) {
         m_previewOptions = dlg.options();
+        if (m_shapeCombo) {
+            m_shapeCombo->blockSignals(true);
+            m_shapeCombo->setCurrentIndex(static_cast<int>(m_previewOptions.shape));
+            m_shapeCombo->blockSignals(false);
+        }
         saveSettings();
     }
 }
 
 void MainWindow::onLoadModel() {
+    if (isCurrentMaterialBrushOnly()) {
+        QString mat = getMaterialDisplayName();
+        QString shader = getCurrentShaderName();
+
+        if (m_notificationPopup) {
+            m_notificationPopup->showMessage(
+                tr("Cannot load model: %1 material contains %2 (Brush Material).")
+                    .arg(mat, shader),
+                NotificationSeverity::Warning, 5000);
+            m_notificationPopup->reposition(m_viewport);
+        }
+
+        QMessageBox::warning(this, tr("Cannot Load Model"),
+            tr("Cannot preview custom model: '%1' material contains '%2' (Brush Material).\n\n"
+               "World brush shaders cannot be applied to 3D models.")
+            .arg(mat, shader));
+        return;
+    }
+
     QString file = QFileDialog::getOpenFileName(
         this, tr("Select Source Engine Model (.mdl)"),
         QString(), tr("Source Models (*.mdl);;All Files (*.*)"));
@@ -880,6 +1103,7 @@ void MainWindow::onCodeEditorTextChanged() {
 
     updateTitle();
     updateStatus();
+    checkBrushMaterial(false);
     syncPreview();
 }
 
@@ -888,8 +1112,13 @@ void MainWindow::onInspectorParameterChanged(const QString& name, const QString&
 
     (void)m_session.set_parameter(name.toStdString(), value.toStdString());
 
+    const int savedPosition = m_codeEditor->textCursor().position();
+
     m_suppressSync = true;
     m_codeEditor->setPlainText(QString::fromStdString(m_session.text()));
+    QTextCursor restored = m_codeEditor->textCursor();
+    restored.setPosition(std::min(savedPosition, static_cast<int>(m_codeEditor->toPlainText().size())));
+    m_codeEditor->setTextCursor(restored);
     m_suppressSync = false;
 
     updateTitle();
@@ -902,13 +1131,19 @@ void MainWindow::onInspectorShaderChanged(const QString& newShader) {
 
     (void)m_session.set_shader(newShader.toStdString());
 
+    const int savedPosition = m_codeEditor->textCursor().position();
+
     m_suppressSync = true;
     m_codeEditor->setPlainText(QString::fromStdString(m_session.text()));
     m_inspector->updateFromDocument(m_session.document(), m_schemas, m_showAdvanced);
+    QTextCursor restored = m_codeEditor->textCursor();
+    restored.setPosition(std::min(savedPosition, static_cast<int>(m_codeEditor->toPlainText().size())));
+    m_codeEditor->setTextCursor(restored);
     m_suppressSync = false;
 
     updateTitle();
     updateStatus();
+    checkBrushMaterial(false);
     syncPreview();
 }
 
@@ -949,6 +1184,9 @@ void MainWindow::onMaterialDropped(const QString& filePath) {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (maybeSave()) {
+        if (m_notificationPopup) {
+            m_notificationPopup->close();
+        }
         event->accept();
     } else {
         event->ignore();
@@ -961,7 +1199,33 @@ void MainWindow::showEvent(QShowEvent* event) {
         if (m_engine && m_engine->initialized()) {
             (void)m_engine->resize(0, 0);
         }
+        checkBrushMaterial(true);
     });
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event) {
+    QMainWindow::resizeEvent(event);
+    if (m_notificationPopup && m_notificationPopup->isVisible()) {
+        m_notificationPopup->reposition(m_viewport);
+    }
+}
+
+void MainWindow::moveEvent(QMoveEvent* event) {
+    QMainWindow::moveEvent(event);
+    if (m_notificationPopup && m_notificationPopup->isVisible()) {
+        m_notificationPopup->reposition(m_viewport);
+    }
+}
+
+void MainWindow::changeEvent(QEvent* event) {
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange) {
+        if (isMinimized()) {
+            if (m_notificationPopup) {
+                m_notificationPopup->hide();
+            }
+        }
+    }
 }
 
 } // namespace qt

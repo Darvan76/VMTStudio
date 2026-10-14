@@ -16,7 +16,7 @@ class PreviewOptionsDialog : public QDialog {
     Q_OBJECT
 
 public:
-    explicit PreviewOptionsDialog(const ui::PreviewOptions& currentOptions, QWidget* parent = nullptr);
+    explicit PreviewOptionsDialog(const ui::PreviewOptions& currentOptions, bool isBrushMaterial = false, QWidget* parent = nullptr);
     ~PreviewOptionsDialog() override = default;
 
     ui::PreviewOptions options() const { return m_options; }
@@ -36,6 +36,7 @@ private:
 
     ui::PreviewOptions m_options;
     bool m_updating = false;
+    bool m_isBrushMaterial = false;
 
     QComboBox* m_envCombo = nullptr;
     QComboBox* m_shapeCombo = nullptr;

@@ -43,7 +43,7 @@ target_link_libraries(ui
 
 if(Qt6_FOUND)
 # The Qt 6 application executable
-add_executable(vmtviewer WIN32
+add_executable(vmtstudio WIN32
     src/main.cpp
     src/qt/main_window.h
     src/qt/main_window.cpp
@@ -61,60 +61,67 @@ add_executable(vmtviewer WIN32
     src/qt/connection_dialog.cpp
     src/qt/about_dialog.h
     src/qt/about_dialog.cpp
+    src/qt/notification_popup.h
+    src/qt/notification_popup.cpp
     src/qt/theme.h
     src/qt/theme.cpp
 )
 
-target_include_directories(vmtviewer PRIVATE
+target_include_directories(vmtstudio PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
-target_compile_definitions(vmtviewer PRIVATE
+target_compile_definitions(vmtstudio PRIVATE
     VMT_SCHEMA_DIR="${CMAKE_SOURCE_DIR}/data/schema"
 )
 
 # Manifest configuration
-set(VMTVIEWER_MANIFEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/win32/app.manifest")
+set(VMTSTUDIO_MANIFEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/win32/app.manifest")
+set(VMTVIEWER_MANIFEST_PATH "${VMTSTUDIO_MANIFEST_PATH}")
 configure_file(win32/app.rc.in "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc" @ONLY)
-target_sources(vmtviewer PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc")
+target_sources(vmtstudio PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc")
 
-set_target_properties(vmtviewer PROPERTIES
+set_target_properties(vmtstudio PROPERTIES
+    OUTPUT_NAME "vmtstudio"
     VS_GLOBAL_GenerateManifest OFF
     VS_GLOBAL_EnableDpiAwareness OFF
 )
-target_link_options(vmtviewer PRIVATE "/MANIFEST:NO")
+target_link_options(vmtstudio PRIVATE "/MANIFEST:NO")
 
-target_link_libraries(vmtviewer PRIVATE
+target_link_libraries(vmtstudio PRIVATE
     ui
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
-    vmtviewer_warnings
+    vmtstudio_warnings
     user32
     shell32
 )
 
 # Deploy VTFLib runtime DLL
-vtf_deploy_vtflib_runtime(vmtviewer)
+vtf_deploy_vtflib_runtime(vmtstudio)
 
-# Copy hlmv_backend.exe beside vmtviewer if available from 32-bit build
-add_custom_command(TARGET vmtviewer POST_BUILD
+# Copy hlmv_backend.exe beside vmtstudio if available from 32-bit build
+add_custom_command(TARGET vmtstudio POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_SOURCE_DIR}/build/bin/Release/hlmv_backend.exe"
-            "$<TARGET_FILE_DIR:vmtviewer>"
-    COMMENT "Copying 32-bit hlmv_backend.exe next to vmtviewer"
+            "$<TARGET_FILE_DIR:vmtstudio>"
+    COMMENT "Copying 32-bit hlmv_backend.exe next to vmtstudio"
     VERBATIM
 )
 
 # Deploy Qt runtime using windeployqt
 find_program(WINDEPLOYQT_EXE NAMES windeployqt HINTS "C:/Qt/6.8.2/msvc2022_64/bin")
 if(WINDEPLOYQT_EXE)
-    add_custom_command(TARGET vmtviewer POST_BUILD
-        COMMAND "${WINDEPLOYQT_EXE}" --release --no-translations "$<TARGET_FILE:vmtviewer>"
-        COMMENT "Deploying Qt runtime libraries for vmtviewer"
+    add_custom_command(TARGET vmtstudio POST_BUILD
+        COMMAND "${WINDEPLOYQT_EXE}" --release --no-translations "$<TARGET_FILE:vmtstudio>"
+        COMMENT "Deploying Qt runtime libraries for vmtstudio"
         VERBATIM
     )
 endif()
+
+# Backward-compatibility target so 'cmake --build . --target vmtviewer' still works
+add_custom_target(vmtviewer DEPENDS vmtstudio)
 endif() # Qt6_FOUND
 

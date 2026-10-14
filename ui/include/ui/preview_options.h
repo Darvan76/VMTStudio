@@ -25,6 +25,17 @@ enum class PreviewShape {
     BrushDisplacement,
 };
 
+inline bool is_brush_shape(PreviewShape shape) noexcept {
+    return shape == PreviewShape::BrushWall ||
+           shape == PreviewShape::BrushFloor ||
+           shape == PreviewShape::BrushCube ||
+           shape == PreviewShape::BrushDisplacement;
+}
+
+inline bool is_model_shape(PreviewShape shape) noexcept {
+    return !is_brush_shape(shape);
+}
+
 // "Environment" is a small set of one-click lighting setups, not a skybox:
 // StudioDark is the neutral default, Outdoor mimics sunlight, Flat removes
 // directional light so texture colors can be read without shading.

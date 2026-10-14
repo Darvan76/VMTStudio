@@ -47,6 +47,14 @@ UISettings UISettings::load(const std::filesystem::path& file) {
             settings.browser_scan_game = value == "1" || value == "true";
         } else if (key == "thumbnail_flip") {
             settings.thumbnail_flip = value == "1" || value == "true";
+        } else if (key == "window_width") {
+            try { settings.window_width = std::stoi(value); } catch (...) { }
+        } else if (key == "window_height") {
+            try { settings.window_height = std::stoi(value); } catch (...) { }
+        } else if (key == "splitter_sizes") {
+            settings.splitter_sizes = value;
+        } else if (key == "validation_dock_visible") {
+            settings.validation_dock_visible = value == "1" || value == "true";
         } else if (key == "recent") {
             if (!value.empty() && settings.recent_files.size() < kMaxRecentFiles) {
                 settings.recent_files.push_back(value);
@@ -79,6 +87,10 @@ bool UISettings::save(const std::filesystem::path& file) const {
         stream << "browser_root=" << browser_root << "\n";
         stream << "browser_scan_game=" << (browser_scan_game ? 1 : 0) << "\n";
         stream << "thumbnail_flip=" << (thumbnail_flip ? 1 : 0) << "\n";
+        stream << "window_width=" << window_width << "\n";
+        stream << "window_height=" << window_height << "\n";
+        stream << "splitter_sizes=" << splitter_sizes << "\n";
+        stream << "validation_dock_visible=" << (validation_dock_visible ? 1 : 0) << "\n";
         for (const std::string& recent : recent_files) {
             stream << "recent=" << recent << "\n";
         }

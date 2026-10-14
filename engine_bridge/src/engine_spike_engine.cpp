@@ -51,7 +51,7 @@ FILE* engine_log_file() {
         wchar_t temp[MAX_PATH] = {};
         const DWORD n = GetTempPathW(MAX_PATH, temp);
         if (n == 0 || n >= MAX_PATH) return nullptr;
-        const std::filesystem::path dir = std::filesystem::path(temp) / L"VMTViewer";
+        const std::filesystem::path dir = std::filesystem::path(temp) / L"VMTStudio";
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
         const std::filesystem::path path = dir / L"engine.log";
@@ -959,7 +959,7 @@ StepResult create_window() {
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         return fail("RegisterClassExW failed: " + win32_error(GetLastError()));
     }
-    g.hwnd = CreateWindowExW(0, wc.lpszClassName, L"VMT Viewer - Engine Spike", WS_OVERLAPPEDWINDOW,
+    g.hwnd = CreateWindowExW(0, wc.lpszClassName, L"VMT-Studio - Engine Spike", WS_OVERLAPPEDWINDOW,
                              CW_USEDEFAULT, CW_USEDEFAULT, g.width, g.height,
                              nullptr, nullptr, wc.hInstance, nullptr);
     if (!g.hwnd) return fail("CreateWindowExW failed: " + win32_error(GetLastError()));

@@ -42,6 +42,12 @@ struct UISettings {
     bool browser_scan_game = false;   // last scan source: true = game file system
     bool thumbnail_flip = true;       // engine readback rows are bottom-up
 
+    // Window / layout persistence.
+    int window_width = 0;
+    int window_height = 0;
+    std::string splitter_sizes;        // comma-separated splitter pane sizes
+    bool validation_dock_visible = false;
+
     // Missing or unreadable files yield defaults; a malformed line is ignored.
     static UISettings load(const std::filesystem::path& file);
 

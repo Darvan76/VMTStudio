@@ -10,14 +10,14 @@ namespace qt {
 
 AboutDialog::AboutDialog(QWidget* parent)
     : QDialog(parent) {
-    setWindowTitle(tr("About VMT Viewer"));
+    setWindowTitle(tr("About VMT-Studio"));
     setFixedSize(420, 310);
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(20, 20, 20, 20);
     layout->setSpacing(12);
 
-    auto* titleLabel = new QLabel(tr("<h2>VMT Viewer</h2>"), this);
+    auto* titleLabel = new QLabel(tr("<h2>VMT-Studio</h2>"), this);
     titleLabel->setAlignment(Qt::AlignCenter);
     titleLabel->setStyleSheet("color: #e08214;"); // Source orange
     layout->addWidget(titleLabel);
@@ -27,7 +27,7 @@ AboutDialog::AboutDialog(QWidget* parent)
     layout->addWidget(versionLabel);
 
     auto* descLabel = new QLabel(
-        tr("<p>Modern material editor, parameter inspector and real-time 3D previewer "
+        tr("<p>Modern material studio, parameter inspector and real-time 3D previewer "
            "for Valve's Source Engine materials (.vmt / .vtf).</p>"
            "<p><b>Architecture:</b><br>"
            "• Frontend: 64-bit Qt 6 MSVC<br>"

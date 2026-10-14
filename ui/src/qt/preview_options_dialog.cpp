@@ -5,12 +5,13 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QDialogButtonBox>
+#include <QMessageBox>
 
 namespace ui {
 namespace qt {
 
-PreviewOptionsDialog::PreviewOptionsDialog(const ui::PreviewOptions& currentOptions, QWidget* parent)
-    : QDialog(parent), m_options(currentOptions) {
+PreviewOptionsDialog::PreviewOptionsDialog(const ui::PreviewOptions& currentOptions, bool isBrushMaterial, QWidget* parent)
+    : QDialog(parent), m_options(currentOptions), m_isBrushMaterial(isBrushMaterial) {
     setWindowTitle(tr("Preview Options"));
     setMinimumWidth(380);
 
@@ -42,6 +43,17 @@ PreviewOptionsDialog::PreviewOptionsDialog(const ui::PreviewOptions& currentOpti
 
     m_loadModelBtn = new QPushButton(tr("Load Custom Model (.mdl)..."), geomGroup);
     geomLayout->addRow(m_loadModelBtn);
+
+    if (m_isBrushMaterial) {
+        for (int i = 0; i < m_shapeCombo->count(); ++i) {
+            auto shape = static_cast<ui::PreviewShape>(m_shapeCombo->itemData(i).toInt());
+            if (!ui::is_brush_shape(shape)) {
+                m_shapeCombo->setItemData(i, 0, Qt::UserRole - 1);
+            }
+        }
+        m_loadModelBtn->setEnabled(false);
+        m_loadModelBtn->setToolTip(tr("Custom models cannot be loaded for world brush materials."));
+    }
 
     mainLayout->addWidget(geomGroup);
 
@@ -160,7 +172,14 @@ void PreviewOptionsDialog::onEnvironmentChanged(int index) {
 
 void PreviewOptionsDialog::onShapeChanged(int index) {
     if (m_updating) return;
-    m_options.shape = static_cast<ui::PreviewShape>(m_shapeCombo->itemData(index).toInt());
+    auto targetShape = static_cast<ui::PreviewShape>(m_shapeCombo->itemData(index).toInt());
+    if (m_isBrushMaterial && !ui::is_brush_shape(targetShape)) {
+        QMessageBox::warning(this, tr("Cannot Change Shape"),
+            tr("World brush materials cannot be previewed on model shapes."));
+        syncUiFromOptions();
+        return;
+    }
+    m_options.shape = targetShape;
     emit optionsChanged(m_options);
 }
 

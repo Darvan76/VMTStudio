@@ -1,4 +1,4 @@
-# HLMV Backend for VMT-Previewer
+# HLMV Backend for VMT-Studio
 add_executable(hlmv_backend WIN32
     # HLMV Core
     src/attachments_window.cpp

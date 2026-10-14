@@ -48,7 +48,7 @@ void BackendIPC_Init(HWND hWndMain)
         if (g_hHostWnd && IsWindow(g_hHostWnd))
         {
             g_bEmbedded = true;
-            SetWindowTextA(hWndMain, "VMTViewer_HLMV_Backend_Canvas");
+            SetWindowTextA(hWndMain, "VMTStudio_HLMV_Backend_Canvas");
             SetParent(hWndMain, g_hHostWnd);
             SetMenu(hWndMain, NULL);
 
