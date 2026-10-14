@@ -1,12 +1,127 @@
-# Build output
+# ==============================================================================
+# VMT-Studio / VMT-Previewer .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Carpetas y artefactos de compilación (CMake / MSVC / Ninja)
+# ------------------------------------------------------------------------------
 build/
-build64/
+build*/
+out/
+bin/
+lib/
+x64/
+x86/
+ARM/
+ARM64/
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+
+# Archivos generados por CMake (en caso de compilación in-source o configs locales)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+CMakeUserPresets.json
+
+# ------------------------------------------------------------------------------
+# Binarios y artefactos de compilación C / C++ / MSVC
+# ------------------------------------------------------------------------------
+*.obj
+*.o
+*.pdb
+*.idb
+*.ilk
+*.exp
+*.pch
+*.ipdb
+*.iobj
+*.res
+*.exe
+*.dll
+
+# Librerías estáticas/dinámicas (ignorar generadas, pero preservar las del SDK en hlmv_backend)
+*.lib
+!hlmv_backend/lib/*.lib
+
+# Manifiestos de compilación (preservar el manifiesto fuente de la aplicación)
+*.manifest
+!ui/win32/app.manifest
+
+# ------------------------------------------------------------------------------
+# Archivos intermedios generados por Qt (MOC, UIC, RCC, qmake)
+# ------------------------------------------------------------------------------
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+*.qmlc
+*.jsc
+.qmake.stash
+.qmake.cache
 aqtinstall.log
 
-# Stray compiler artifacts
-*.obj
+# ------------------------------------------------------------------------------
+# IDEs y Editores de código
+# ------------------------------------------------------------------------------
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosv
+*.sln.docstates
+*.aps
+*.VC.db
+*.VC.opendb
+ipch/
 
-# Local tool state
+# Visual Studio Code
+.vscode/
+
+# JetBrains / CLion
+.idea/
+cmake-build-*/
+*.iml
+
+# Archivos de respaldo y swap de editores (Vim, Emacs, etc.)
+*.swp
+*.swo
+*~
+*.bak
+
+# ------------------------------------------------------------------------------
+# Herramientas locales, logs, volcados y temporales
+# ------------------------------------------------------------------------------
 .omo/
-hlmv_debug.log
+*.log
+*.tmp
+*.temp
+*.dmp
+*.mdmp
+crashpad/
+
+# Volcados de texturas / capturas temporales de pruebas de HLMV
 *.tga
+
+# ------------------------------------------------------------------------------
+# Archivos del sistema operativo
+# ------------------------------------------------------------------------------
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+.directory
