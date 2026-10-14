@@ -428,19 +428,27 @@ void heap_check(const std::string& where) {
 // ---------------------------------------------------------------------------
 // IFileSystem primary-vtable layout compatibility
 // ---------------------------------------------------------------------------
-// Garry's Mod's filesystem_stdio (VFileSystem022) inserts four extra virtual
-// methods before IsSteam, so every IFileSystem method shifts by +4 slots
-// relative to the Source SDK 2013 layout (AddSearchPath 7 -> 11,
-// RemoveAllSearchPaths 9 -> 13, FindFirst..FindClose 27..30 -> 31..34).
+//
+// Engine branches insert extra virtual methods into IFileSystem, shifting every
+// method relative to the Source SDK 2013 layout (delta 0):
+//
+//   delta 3  Portal 2 / Black Mesa (VFileSystem017): AddSearchPath 7 -> 10,
+//            RemoveAllSearchPaths 9 -> 12, FindFirst..FindClose 27..30 -> 30..33
+//   delta 4  Garry's Mod (VFileSystem022) inserts four extra virtual methods
+//            before IsSteam: AddSearchPath 7 -> 11, RemoveAllSearchPaths 9 -> 13,
+//            FindFirst..FindClose 27..30 -> 31..34
+//
 // Calling the wrong slot corrupts the stack because the real function pops a
 // different number of argument bytes. Every engine call that is affected goes
 // through the shims below; the layout delta is detected at runtime
-// (detect_fs_layout). FileExists/Open/Read/Close/Size live in the separate
-// IBaseFileSystem secondary vtable (this+4), which is unchanged in GMod, so
+// (detect_fs_layout, candidate table in kFsLayoutCandidates).
+// FileExists/Open/Read/Close/Size live in the separate IBaseFileSystem
+// secondary vtable (this+4), which is unchanged across these branches, so
 // those keep using the normal compiled calls.
 struct FsLayout {
-    int delta = 0;      // 0 = SDK 2013, 4 = Garry's Mod VFileSystem022
+    int delta = 0;          // 0 = SDK 2013, 3 = Portal 2 / Black Mesa, 4 = GMod
     std::string name;
+    bool validate = false;  // exercise the Find* shims before mounting anything
 };
 FsLayout g_fs_layout;
 
@@ -472,26 +480,217 @@ long long call_3arg_thunk(void* fn, const char* path, const char* path_id, int a
     return drift;
 }
 
-void fs_remove_all_search_paths() {
-    typedef void(__fastcall * Fn)(void* self, void* edx);
-    reinterpret_cast<Fn>(fs_primary_slot(9))(g.fs, nullptr);
+// --- guarded engine calls ----------------------------------------------------
+// A detected layout that does not really fit the running engine turns every
+// shim into a call to an unrelated method. Such a call either pops the wrong
+// number of argument bytes (stack corruption) or faults inside the callee.
+// The guarded thunks below contain both failure modes: the ESP drift is
+// measured and undone (same technique as call_3arg_thunk) and faults are
+// caught with SEH, so a wrong layout degrades into a latched, reportable
+// failure (fs_shim_note_failure) instead of a crash. The result of the most
+// recent guarded call is kept in g_last_guarded.
+struct GuardedCall {
+    long long drift = 0;      // ESP delta across the call; 0 = arity matched
+    unsigned long fault = 0;  // SEH exception code; 0 = none
+    bool ok() const { return drift == 0 && fault == 0; }
+};
+GuardedCall g_last_guarded;
+
+// Latched shim failure: the first guarded engine call that observed ESP drift,
+// a fault, or an implausible result. Steps turn this into a clean fail() that
+// names the attempted layout so the UI can report it.
+bool g_fs_shim_failed = false;
+std::string g_fs_shim_why;
+
+void fs_shim_note_failure(const char* what, int sdk_slot, long long drift, unsigned long fault,
+                          const char* extra = nullptr) {
+    std::string detail = std::string(what) + " (sdk slot " + std::to_string(sdk_slot) +
+                         " -> vtable[" + std::to_string(sdk_slot + g_fs_layout.delta) + "])";
+    if (drift != 0) detail += "  ESP drift " + std::to_string(drift) + " bytes";
+    if (fault != 0) detail += "  exception 0x" + hex64(fault);
+    if (extra != nullptr && *extra != '\0') detail += std::string("  ") + extra;
+    log_line("FAIL", "IFileSystem shim mismatch for layout '" + g_fs_layout.name + "': " + detail);
+    if (!g_fs_shim_failed) {
+        g_fs_shim_failed = true;
+        g_fs_shim_why = detail;
+    }
+}
+
+unsigned long guarded_except_filter(unsigned long code) {
+    g_last_guarded.fault = code;
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+// The drift measurement uses inline asm, which cannot share a function with
+// __try, so every asm thunk is invoked through a small SEH wrapper.
+
+static void guarded_thunk_0arg(void* fn) {
+    static unsigned long esp_before = 0;
+    static unsigned long esp_after = 0;
+    typedef void(__fastcall* Fn)(void* self, void* edx);
+    Fn call = reinterpret_cast<Fn>(fn);
+    __asm { mov esp_before, esp }
+    call(g.fs, nullptr);
+    __asm { mov esp_after, esp }
+    g_last_guarded.drift = (long long)esp_after - (long long)esp_before;
+    if (g_last_guarded.drift != 0) __asm { mov esp, esp_before }
+}
+
+static void guarded_call_0arg(void* fn) {
+    g_last_guarded = GuardedCall{};
+    __try {
+        guarded_thunk_0arg(fn);
+    } __except (guarded_except_filter(GetExceptionCode())) {
+        // Unwinding restored the frame; g_last_guarded.fault says what happened.
+    }
+}
+
+static const char* guarded_thunk_1arg_retstr(void* fn, void* a1) {
+    static unsigned long esp_before = 0;
+    static unsigned long esp_after = 0;
+    typedef const char*(__fastcall* Fn)(void* self, void* edx, void* a1);
+    Fn call = reinterpret_cast<Fn>(fn);
+    __asm { mov esp_before, esp }
+    const char* ret = call(g.fs, nullptr, a1);
+    __asm { mov esp_after, esp }
+    g_last_guarded.drift = (long long)esp_after - (long long)esp_before;
+    if (g_last_guarded.drift != 0) __asm { mov esp, esp_before }
+    return ret;
+}
+
+static const char* guarded_call_1arg_retstr(void* fn, void* a1) {
+    g_last_guarded = GuardedCall{};
+    const char* ret = nullptr;
+    __try {
+        ret = guarded_thunk_1arg_retstr(fn, a1);
+    } __except (guarded_except_filter(GetExceptionCode())) {
+    }
+    return ret;
+}
+
+static bool guarded_thunk_1arg_retbool(void* fn, void* a1) {
+    static unsigned long esp_before = 0;
+    static unsigned long esp_after = 0;
+    typedef bool(__fastcall* Fn)(void* self, void* edx, void* a1);
+    Fn call = reinterpret_cast<Fn>(fn);
+    __asm { mov esp_before, esp }
+    const bool ret = call(g.fs, nullptr, a1) != false;
+    __asm { mov esp_after, esp }
+    g_last_guarded.drift = (long long)esp_after - (long long)esp_before;
+    if (g_last_guarded.drift != 0) __asm { mov esp, esp_before }
+    return ret;
+}
+
+static bool guarded_call_1arg_retbool(void* fn, void* a1) {
+    g_last_guarded = GuardedCall{};
+    bool ret = false;
+    __try {
+        ret = guarded_thunk_1arg_retbool(fn, a1);
+    } __except (guarded_except_filter(GetExceptionCode())) {
+    }
+    return ret;
+}
+
+static void guarded_thunk_1arg(void* fn, void* a1) {
+    static unsigned long esp_before = 0;
+    static unsigned long esp_after = 0;
+    typedef void(__fastcall* Fn)(void* self, void* edx, void* a1);
+    Fn call = reinterpret_cast<Fn>(fn);
+    __asm { mov esp_before, esp }
+    call(g.fs, nullptr, a1);
+    __asm { mov esp_after, esp }
+    g_last_guarded.drift = (long long)esp_after - (long long)esp_before;
+    if (g_last_guarded.drift != 0) __asm { mov esp, esp_before }
+}
+
+static void guarded_call_1arg(void* fn, void* a1) {
+    g_last_guarded = GuardedCall{};
+    __try {
+        guarded_thunk_1arg(fn, a1);
+    } __except (guarded_except_filter(GetExceptionCode())) {
+    }
+}
+
+static const char* guarded_thunk_2arg_retstr(void* fn, const char* a1, FileFindHandle_t* a2) {
+    static unsigned long esp_before = 0;
+    static unsigned long esp_after = 0;
+    typedef const char*(__fastcall* Fn)(void* self, void* edx, const char* a1, FileFindHandle_t* a2);
+    Fn call = reinterpret_cast<Fn>(fn);
+    __asm { mov esp_before, esp }
+    const char* ret = call(g.fs, nullptr, a1, a2);
+    __asm { mov esp_after, esp }
+    g_last_guarded.drift = (long long)esp_after - (long long)esp_before;
+    if (g_last_guarded.drift != 0) __asm { mov esp, esp_before }
+    return ret;
+}
+
+static const char* guarded_call_2arg_retstr(void* fn, const char* a1, FileFindHandle_t* a2) {
+    g_last_guarded = GuardedCall{};
+    const char* ret = nullptr;
+    __try {
+        ret = guarded_thunk_2arg_retstr(fn, a1, a2);
+    } __except (guarded_except_filter(GetExceptionCode())) {
+    }
+    return ret;
+}
+
+// Copies a find-result string defensively: with a wrong-slot Find* the returned
+// pointer can point anywhere, and reading it must not crash the host. Returns
+// false when the bytes are not readable as a string.
+static bool guarded_read_cstr(const char* p, char* buf, size_t buf_size) {
+    if (p == nullptr || buf == nullptr || buf_size == 0) return false;
+    g_last_guarded = GuardedCall{};
+    __try {
+        size_t n = 0;
+        while (n + 1 < buf_size && p[n] != '\0') ++n;
+        std::memcpy(buf, p, n);
+        buf[n] = '\0';
+    } __except (guarded_except_filter(GetExceptionCode())) {
+        return false;
+    }
+    return true;
+}
+
+bool fs_remove_all_search_paths() {
+    guarded_call_0arg(fs_primary_slot(9));
+    if (!g_last_guarded.ok()) {
+        fs_shim_note_failure("RemoveAllSearchPaths", 9, g_last_guarded.drift, g_last_guarded.fault);
+        return false;
+    }
+    return true;
 }
 
 const char* fs_find_first(const char* wildcard, FileFindHandle_t* handle) {
-    typedef const char*(__fastcall * Fn)(void* self, void* edx, const char* pWildCard, FileFindHandle_t* pHandle);
-    return reinterpret_cast<Fn>(fs_primary_slot(27))(g.fs, nullptr, wildcard, handle);
+    const char* entry = guarded_call_2arg_retstr(fs_primary_slot(27), wildcard, handle);
+    if (!g_last_guarded.ok()) {
+        fs_shim_note_failure("FindFirst", 27, g_last_guarded.drift, g_last_guarded.fault);
+        return nullptr;
+    }
+    return entry;
 }
 const char* fs_find_next(FileFindHandle_t handle) {
-    typedef const char*(__fastcall * Fn)(void* self, void* edx, FileFindHandle_t h);
-    return reinterpret_cast<Fn>(fs_primary_slot(28))(g.fs, nullptr, handle);
+    const char* entry = guarded_call_1arg_retstr(fs_primary_slot(28),
+                                                 reinterpret_cast<void*>(handle));
+    if (!g_last_guarded.ok()) {
+        fs_shim_note_failure("FindNext", 28, g_last_guarded.drift, g_last_guarded.fault);
+        return nullptr;
+    }
+    return entry;
 }
 bool fs_find_is_directory(FileFindHandle_t handle) {
-    typedef bool(__fastcall * Fn)(void* self, void* edx, FileFindHandle_t h);
-    return reinterpret_cast<Fn>(fs_primary_slot(29))(g.fs, nullptr, handle);
+    const bool dir = guarded_call_1arg_retbool(fs_primary_slot(29),
+                                               reinterpret_cast<void*>(handle));
+    if (!g_last_guarded.ok()) {
+        fs_shim_note_failure("FindIsDirectory", 29, g_last_guarded.drift, g_last_guarded.fault);
+        return false;
+    }
+    return dir;
 }
 void fs_find_close(FileFindHandle_t handle) {
-    typedef void(__fastcall * Fn)(void* self, void* edx, FileFindHandle_t h);
-    reinterpret_cast<Fn>(fs_primary_slot(30))(g.fs, nullptr, handle);
+    guarded_call_1arg(fs_primary_slot(30), reinterpret_cast<void*>(handle));
+    if (!g_last_guarded.ok()) {
+        fs_shim_note_failure("FindClose", 30, g_last_guarded.drift, g_last_guarded.fault);
+    }
 }
 
 bool call_add_search_path(const std::string& path_id, const std::string& full_path, const char* origin,
@@ -754,26 +953,33 @@ std::string mount_mode_name(MountMode m) {
     return "?";
 }
 
-// Identifies the runtime IFileSystem vtable layout by probing AddSearchPath
-// candidates with a 3-argument __thiscall and verifying that the call really
-// added the path (FileExists with the probe path ID). Slot 7 is AddSearchPath
-// in the SDK 2013 layout; Garry's Mod shifts it to slot 11. The probe leaves
-// the filesystem clean: the caller removes all search paths afterwards.
+// Detectable IFileSystem primary-vtable layouts, tried in order. AddSearchPath
+// is probed as a 3-argument __thiscall and confirmed with FileExists, so a
+// candidate that does not match the running engine is skipped without side
+// effects (the stack is restored whenever the arity check fails). Supporting a
+// new engine is a one-line addition here.
+struct FsLayoutCandidate {
+    int delta;        // shim offset: engine slot = SDK slot + delta
+    int slot;         // AddSearchPath slot in the engine's primary vtable
+    const char* name; // label for logs; reported to the UI when a layout fails
+    bool validate;    // exercise the Find* shims (validate_find_shims) before mounting
+};
+const FsLayoutCandidate kFsLayoutCandidates[] = {
+    { 0,  7, "SDK 2013 / VFileSystem0xx (AddSearchPath = slot 7)", false },
+    { 3, 10, "Portal 2 / Black Mesa VFileSystem017 (AddSearchPath = slot 10)", true },
+    { 4, 11, "Garry's Mod VFileSystem022 (AddSearchPath = slot 11)", false },
+};
+
+// Identifies the runtime IFileSystem vtable layout by probing each entry of
+// kFsLayoutCandidates: the candidate's AddSearchPath slot is called as a
+// 3-argument __thiscall and the call is confirmed with FileExists (the probe
+// path ID makes the added path visible). The probe leaves the probe path
+// mounted; the caller cleans up with RemoveAllSearchPaths afterwards.
 StepResult detect_fs_layout(const EngineOptions& opts) {
     const std::string probe_path = strip_trailing_slash(fix_slashes(opts.game_dir));
     const char* probe_id = "FS_LAYOUT_PROBE";
 
-    struct Candidate {
-        int delta;
-        int slot;
-        const char* name;
-    };
-    const Candidate candidates[] = {
-        { 0, 7,  "SDK 2013 / VFileSystem0xx (AddSearchPath = slot 7)" },
-        { 4, 11, "Garry's Mod VFileSystem022 (AddSearchPath = slot 11)" },
-    };
-
-    for (const Candidate& candidate : candidates) {
+    for (const FsLayoutCandidate& candidate : kFsLayoutCandidates) {
         void* fn = fs_primary_vtable()[candidate.slot];
         unsigned long long rva = 0;
         const std::string mod = module_of(fn, &rva); // sequence explicitly: rva is an out-param
@@ -792,11 +998,59 @@ StepResult detect_fs_layout(const EngineOptions& opts) {
         }
         g_fs_layout.delta = candidate.delta;
         g_fs_layout.name = candidate.name;
+        g_fs_layout.validate = candidate.validate;
         log_line("OK  ", std::string("IFileSystem layout detected: ") + candidate.name);
         return ok(std::string("layout detected: ") + candidate.name);
     }
-    return fail("could not detect the IFileSystem vtable layout "
-                "(neither SDK slot 7 nor GMod slot 11 is a working AddSearchPath)");
+    std::string tried;
+    for (const FsLayoutCandidate& candidate : kFsLayoutCandidates) {
+        if (!tried.empty()) tried += ", ";
+        tried += "slot " + std::to_string(candidate.slot) + " (delta +" +
+                 std::to_string(candidate.delta) + ")";
+    }
+    return fail("could not detect the IFileSystem vtable layout (tried: " + tried + ")");
+}
+
+// Layouts flagged in kFsLayoutCandidates must prove every shim before anything
+// is mounted. Runs while the detection probe path is still mounted, so the
+// Find* walk has real files to visit; a wrong slot is contained by the guarded
+// shims (ESP drift / SEH / unreadable result) and surfaces here as a clean
+// fail(). The RemoveAllSearchPaths slot (sdk 9) is checked by the caller's
+// cleanup call right after this step.
+StepResult validate_find_shims() {
+    const std::string attempted = "attempted layout '" + g_fs_layout.name + "' (delta +" +
+                                  std::to_string(g_fs_layout.delta) + ")";
+    size_t entries = 0;
+    char name[260];
+
+    FileFindHandle_t handle = FILESYSTEM_INVALID_FIND_HANDLE;
+    const char* entry = fs_find_first("*.txt", &handle);
+    for (int guard = 0; entry != nullptr && guard < 1000; ++guard) {
+        if (!guarded_read_cstr(entry, name, sizeof(name))) {
+            fs_shim_note_failure("FindFirst result string", 27, 0, 0,
+                                 "returned pointer is not readable as a string");
+            break;
+        }
+        ++entries;
+        (void)fs_find_is_directory(handle);
+        entry = fs_find_next(handle);
+    }
+    if (handle != FILESYSTEM_INVALID_FIND_HANDLE) {
+        fs_find_close(handle);
+    }
+
+    if (g_fs_shim_failed) {
+        return fail(attempted + " rejected: the Find* shims do not fit this engine (" +
+                    g_fs_shim_why + "); aborting cleanly before mounting");
+    }
+    if (entries == 0) {
+        log_line("WARN", "Find* shims exercised without matching a single root .txt entry "
+                         "(the probe path with gameinfo.txt is still mounted)");
+    } else {
+        log_line("OK  ", "Find* shims validated (matched " + std::to_string(entries) +
+                              " root .txt entries through sdk slots 27..30)");
+    }
+    return ok("Find* shims validated for " + attempted);
 }
 
 // Mount-mode probe: confirms the detected layout end-to-end by mounting the
@@ -830,6 +1084,10 @@ StepResult probe_fs_layout(const EngineOptions& opts) {
     log_line("PROBE", "list_materials: " + std::to_string(materials.names.size()) +
                           " .vmt file(s) (bounded scan through the Find shims)");
 
+    if (g_fs_shim_failed) {
+        return fail("probe: the Find* shims do not fit the attempted layout '" +
+                    g_fs_layout.name + "' (" + g_fs_shim_why + ")");
+    }
     if (!game_exists) {
         return fail("probe: FileExists did not see gameinfo.txt after mounting the game folder");
     }
@@ -973,6 +1231,8 @@ StepResult create_window() {
 // Steps 3-4: filesystem + material system + view
 // ---------------------------------------------------------------------------
 StepResult init_filesystem(const EngineOptions& opts) {
+    g_fs_shim_failed = false;
+    g_fs_shim_why.clear();
     g.tier0 = load_dll(opts.bin_dir, "tier0.dll");
     g.vstdlib = load_dll(opts.bin_dir, "vstdlib.dll");
     g.fs_mod = load_dll(opts.bin_dir, "filesystem_stdio.dll");
@@ -1046,7 +1306,20 @@ StepResult init_filesystem(const EngineOptions& opts) {
     if (!layout.ok) return layout;
     log_fs_layout();
 
-    fs_remove_all_search_paths();
+    // Layouts flagged in kFsLayoutCandidates must prove the Find* shims before
+    // anything mounts (the detection probe path is still mounted here). A
+    // mismatch becomes a clean, reported failure instead of a crash deeper in
+    // the mount or scan paths.
+    if (g_fs_layout.validate) {
+        StepResult shims = validate_find_shims();
+        if (!shims.ok) return shims;
+    }
+
+    if (!fs_remove_all_search_paths()) {
+        return fail("attempted layout '" + g_fs_layout.name + "' (delta +" +
+                    std::to_string(g_fs_layout.delta) + ") rejected: " + g_fs_shim_why +
+                    "; aborting cleanly before mounting");
+    }
     return mount_search_paths(opts);
 }
 
@@ -1092,15 +1365,17 @@ void patch_vtf_version_check(HMODULE mats_mod) {
 }
 
 StepResult init_material_system(const EngineOptions& opts) {
-    // Garry's Mod's newer engine branch ships a material system whose Connect()
-    // hard-requires engine-only interfaces (QueuedLoader, texture streaming,
-    // ...; verified: it exits the process through tier0 Error -> TerminateProcess)
-    // and whose vtable layout drifted from SDK 2013. A tool process cannot
-    // provide those interfaces, so engine-rendered preview is unavailable
-    // there. Fail cleanly before loading anything: the file system side
-    // (material listing and reading files from VPKs) is fully supported.
+    // Newer engine branches (Garry's Mod, Portal 2 / Black Mesa - i.e. every
+    // layout with a non-zero vtable delta) ship a material system whose
+    // Connect() hard-requires engine-only interfaces (QueuedLoader, texture
+    // streaming, ...; verified on GMod: it exits the process through tier0
+    // Error -> TerminateProcess) and whose vtable layout drifted from SDK 2013.
+    // A tool process cannot provide those interfaces, so engine-rendered
+    // preview is unavailable there. Fail cleanly before loading anything: the
+    // file system side (material listing and reading files from VPKs) is fully
+    // supported.
     if (g_fs_layout.delta != 0) {
-        return fail("this game's engine branch (Garry's Mod) requires engine-only "
+        return fail("this game's engine branch (" + g_fs_layout.name + ") requires engine-only "
                     "interfaces to initialize its material system, so the engine "
                     "renderer is unavailable for this install; the file system "
                     "itself works (material lists and VPK reads are supported)");
@@ -1863,7 +2138,7 @@ std::string material_name_from_path(std::string path) {
 
 MaterialList list_materials() {
     MaterialList result;
-    if (!g.fs) {
+    if (!g.fs || g_fs_shim_failed) {
         return result;
     }
     result.ok = true;
@@ -1928,6 +2203,13 @@ MaterialList list_materials() {
     }
 
     result.names.assign(found.begin(), found.end());
+    if (g_fs_shim_failed) {
+        // A Find shim mismatched mid-scan (wrong layout slot): report the scan
+        // itself as failed instead of returning a silently truncated list.
+        result.ok = false;
+        result.names.clear();
+        return result;
+    }
     if (result.names.size() > kMax) {
         result.names.resize(kMax);
         result.truncated = true;
