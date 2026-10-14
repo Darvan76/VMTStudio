@@ -4,6 +4,8 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QDialogButtonBox>
+#include <QIcon>
+#include <QPixmap>
 
 namespace ui {
 namespace qt {
@@ -11,11 +13,20 @@ namespace qt {
 AboutDialog::AboutDialog(QWidget* parent)
     : QDialog(parent) {
     setWindowTitle(tr("About VMT-Studio"));
-    setFixedSize(420, 310);
+    setWindowIcon(QIcon(":/icons/app.png"));
+    setFixedSize(440, 390);
 
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(20, 20, 20, 20);
-    layout->setSpacing(12);
+    layout->setContentsMargins(24, 20, 24, 20);
+    layout->setSpacing(10);
+
+    auto* logoLabel = new QLabel(this);
+    QPixmap logoPixmap(":/icons/app.png");
+    if (!logoPixmap.isNull()) {
+        logoLabel->setPixmap(logoPixmap.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        logoLabel->setAlignment(Qt::AlignCenter);
+        layout->addWidget(logoLabel);
+    }
 
     auto* titleLabel = new QLabel(tr("<h2>VMT-Studio</h2>"), this);
     titleLabel->setAlignment(Qt::AlignCenter);

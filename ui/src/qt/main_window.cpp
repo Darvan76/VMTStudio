@@ -23,6 +23,7 @@
 #include <QHeaderView>
 #include <QFontDatabase>
 #include <QApplication>
+#include <QIcon>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -87,6 +88,7 @@ std::filesystem::path app_data_dir() {
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
     setWindowTitle(tr("VMT-Studio"));
+    setWindowIcon(QIcon(":/icons/app.png"));
     resize(1360, 820);
 
     m_previewRoot = temp_preview_dir();

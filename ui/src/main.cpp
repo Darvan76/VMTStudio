@@ -4,6 +4,7 @@
 
 #include <QApplication>
 #include <QFileInfo>
+#include <QIcon>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -29,6 +30,7 @@ int main(int argc, char* argv[]) {
     app.setApplicationName("VMT-Studio");
     app.setApplicationVersion("0.2.0");
     app.setOrganizationName("VMT-Studio");
+    app.setWindowIcon(QIcon(":/icons/app.png"));
 
     ui::qt::apply_dark_theme(app);
 

@@ -65,6 +65,7 @@ add_executable(vmtstudio WIN32
     src/qt/notification_popup.cpp
     src/qt/theme.h
     src/qt/theme.cpp
+    resources/vmtstudio.qrc
 )
 
 target_include_directories(vmtstudio PRIVATE
@@ -76,9 +77,10 @@ target_compile_definitions(vmtstudio PRIVATE
     VMT_SCHEMA_DIR="${CMAKE_SOURCE_DIR}/data/schema"
 )
 
-# Manifest configuration
+# Manifest and icon configuration
 set(VMTSTUDIO_MANIFEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/win32/app.manifest")
 set(VMTVIEWER_MANIFEST_PATH "${VMTSTUDIO_MANIFEST_PATH}")
+set(VMTSTUDIO_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/win32/app.ico")
 configure_file(win32/app.rc.in "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc" @ONLY)
 target_sources(vmtstudio PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc")
 

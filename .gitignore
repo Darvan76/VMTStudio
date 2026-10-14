@@ -42,6 +42,7 @@ CMakeUserPresets.json
 *.ipdb
 *.iobj
 *.res
+RCa*
 *.exe
 *.dll
 

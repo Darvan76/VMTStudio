@@ -6,10 +6,13 @@
 // manifest the common controls render in the classic pre-Vista style and
 // Windows bitmap-scales the whole window on HiDPI monitors.
 //
-// The manifest path is baked in by CMake (configure_file, @ONLY) as an
-// absolute path so the resource compiler never depends on its working
+// The manifest and icon paths are baked in by CMake (configure_file, @ONLY) as
+// absolute paths so the resource compiler never depends on its working
 // directory and no /D define has to survive the trip to rc.exe.
 
 #include <windows.h>
+
+#define IDI_APP_ICON 101
+IDI_APP_ICON ICON "@VMTSTUDIO_ICON_PATH@"
 
 1 RT_MANIFEST "@VMTVIEWER_MANIFEST_PATH@"
