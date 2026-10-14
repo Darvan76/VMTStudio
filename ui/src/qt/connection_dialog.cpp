@@ -108,10 +108,22 @@ void ConnectionDialog::onBrowseBin() {
 
 void ConnectionDialog::onBrowseGame() {
     QString dir = QFileDialog::getExistingDirectory(
-        this, tr("Select Game Mod Folder (Containing gameinfo.txt)"),
+        this, tr("Select Game Folder (Root or Mod Folder)"),
         m_gameEdit->text().isEmpty() ? QString() : m_gameEdit->text());
     if (!dir.isEmpty()) {
         m_gameEdit->setText(dir);
+
+        // Crowbar-style convenience: after choosing a game root, try to locate
+        // its /bin folder and the gameinfo.txt folder automatically.
+        std::filesystem::path selected(dir.toStdWString());
+        std::filesystem::path bin = ui::detect_bin_dir(selected);
+        if (!bin.empty()) {
+            m_binEdit->setText(QString::fromStdWString(bin.wstring()));
+        }
+        std::filesystem::path game = ui::detect_game_dir(bin.empty() ? selected : bin);
+        if (!game.empty()) {
+            m_gameEdit->setText(QString::fromStdWString(game.wstring()));
+        }
     }
 }
 

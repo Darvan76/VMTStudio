@@ -146,4 +146,68 @@ std::filesystem::path detect_game_dir(const std::filesystem::path& bin_dir) {
     return candidates.empty() ? std::filesystem::path() : candidates.front();
 }
 
+namespace {
+// Checks whether a directory looks like a Source Engine /bin folder.
+bool looks_like_bin_dir(const std::filesystem::path& path) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path / "tier0.dll", ec) &&
+           std::filesystem::is_regular_file(path / "vstdlib.dll", ec);
+}
+} // namespace
+
+std::filesystem::path detect_bin_dir(const std::filesystem::path& selected) {
+    if (selected.empty()) {
+        return {};
+    }
+    std::error_code ec;
+
+    // Direct /bin folder.
+    if (looks_like_bin_dir(selected)) {
+        return selected;
+    }
+
+    // A Source module folder (contains gameinfo.txt): its bin is either inside
+    // the module or lives in the enclosing game root.
+    if (std::filesystem::is_regular_file(selected / "gameinfo.txt", ec)) {
+        if (looks_like_bin_dir(selected / "bin")) {
+            return selected / "bin";
+        }
+        const std::filesystem::path parent_bin = selected.parent_path() / "bin";
+        if (looks_like_bin_dir(parent_bin)) {
+            return parent_bin;
+        }
+    }
+
+    // A game root / SDK root carrying /bin as a direct child.
+    if (looks_like_bin_dir(selected / "bin")) {
+        return selected / "bin";
+    }
+
+    // Look at immediate children, so the user can pick a Steam library root or
+    // an SDK folder and still end up with the right bin.
+    if (std::filesystem::is_directory(selected, ec)) {
+        std::vector<std::filesystem::path> matches;
+        std::filesystem::directory_iterator iterator(selected, ec);
+        if (!ec) {
+            for (const auto& entry : iterator) {
+                std::error_code entry_ec;
+                if (!entry.is_directory(entry_ec)) {
+                    continue;
+                }
+                if (looks_like_bin_dir(entry.path())) {
+                    matches.push_back(entry.path());
+                } else if (looks_like_bin_dir(entry.path() / "bin")) {
+                    matches.push_back(entry.path() / "bin");
+                }
+            }
+        }
+        std::sort(matches.begin(), matches.end());
+        if (!matches.empty()) {
+            return matches.front();
+        }
+    }
+
+    return {};
+}
+
 } // namespace ui

@@ -32,4 +32,11 @@ ConnectionCheck test_connection(const std::filesystem::path& bin_dir);
 // subdirectory (sorted) that contains one. Empty path when nothing is found.
 std::filesystem::path detect_game_dir(const std::filesystem::path& bin_dir);
 
+// Best-effort Source /bin folder detection from a game root or mod folder: a
+// directory that directly contains tier0.dll is returned as-is, otherwise the
+// function looks for a "bin" child (or the "bin" folder beside a gameinfo.txt
+// file). Also scans the immediate children of the selected folder. Empty path
+// when nothing looks like a Source /bin folder.
+std::filesystem::path detect_bin_dir(const std::filesystem::path& selected);
+
 } // namespace ui
