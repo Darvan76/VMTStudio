@@ -49,11 +49,32 @@ public:
     void set_last_used(std::string_view id) noexcept { last_used_ = std::string(id); }
     const std::string& last_used() const noexcept { return last_used_; }
 
+    // --- filesystem detection helpers (single source of truth; the UI layer
+    // delegates to these so Crowbar-style detection behaves identically in the
+    // catalogue scan and the connection dialog) ---
+
+    // True when `path` directly contains both tier0.dll and vstdlib.dll, the
+    // minimal marker set of a Source Engine /bin folder.
+    static bool looks_like_bin_dir(const std::filesystem::path& path) noexcept;
+
+    // Best-effort Source /bin folder detection: a directory that directly
+    // contains tier0.dll + vstdlib.dll is returned as-is, a Source module
+    // folder (gameinfo.txt) resolves to its own "bin" or the "bin" beside it,
+    // and a game root / SDK root / Steam library resolves through its "bin"
+    // child or its immediate children (sorted, first match). Empty path when
+    // nothing looks like a Source /bin folder.
+    static std::filesystem::path detect_bin_dir(const std::filesystem::path& selected);
+
+    // Best-effort game folder detection from a /bin folder: the parent
+    // directory when it directly contains gameinfo.txt, otherwise the first
+    // immediate subdirectory (sorted) that contains one. Empty path when
+    // nothing is found.
+    static std::filesystem::path detect_game_dir(const std::filesystem::path& bin_dir);
+
 private:
     std::vector<GameProfile> profiles_;
     std::string last_used_;
 
-    static std::filesystem::path detect_bin_dir(const std::filesystem::path& game_root) noexcept;
     static std::string read_game_name(const std::filesystem::path& gameinfo_path) noexcept;
     static std::string detect_engine_branch(const std::filesystem::path& game_root,
                                             const std::filesystem::path& bin_dir) noexcept;

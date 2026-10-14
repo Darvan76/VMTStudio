@@ -604,6 +604,54 @@ UT_TEST_CASE("ui connection: detect_game_dir finds the folder with gameinfo.txt"
     UT_CHECK(ui::detect_game_dir(fs::path()).empty());
 }
 
+UT_TEST_CASE("ui connection: detect_bin_dir resolves mods, game roots and libraries") {
+    const fs::path dir = fresh_temp_dir();
+    std::error_code ec;
+
+    auto make_bin = [&](const fs::path& path) {
+        fs::create_directories(path, ec);
+        std::ofstream(path / "tier0.dll") << "x";
+        std::ofstream(path / "vstdlib.dll") << "x";
+    };
+
+    // A mod folder with gameinfo.txt resolves to its own /bin.
+    const fs::path mod = dir / "mod";
+    make_bin(mod / "bin");
+    {
+        std::ofstream out(mod / "gameinfo.txt");
+        out << "// gameinfo";
+    }
+    UT_CHECK_EQ(ui::detect_bin_dir(mod), mod / "bin");
+
+    // A Source module without a local /bin falls back to the enclosing game
+    // root (Source SDK layout).
+    const fs::path root = dir / "sdk";
+    fs::create_directories(root / "hl2", ec);
+    {
+        std::ofstream out(root / "hl2" / "gameinfo.txt");
+        out << "// gameinfo";
+    }
+    make_bin(root / "bin");
+    UT_CHECK_EQ(ui::detect_bin_dir(root / "hl2"), root / "bin");
+
+    // A Steam library root is resolved through its immediate children.
+    const fs::path library = dir / "library";
+    make_bin(library / "gmod" / "bin");
+    UT_CHECK_EQ(ui::detect_bin_dir(library), library / "gmod" / "bin");
+
+    // tier0.dll alone is not enough: a real /bin also needs vstdlib.dll.
+    const fs::path incomplete = dir / "incomplete";
+    fs::create_directories(incomplete / "bin", ec);
+    {
+        std::ofstream out(incomplete / "bin" / "tier0.dll");
+        out << "x";
+    }
+    UT_CHECK(ui::detect_bin_dir(incomplete).empty());
+
+    // Empty input.
+    UT_CHECK(ui::detect_bin_dir(fs::path()).empty());
+}
+
 // --- Phase 7: debounced engine-preview sync ---------------------------------
 
 UT_TEST_CASE("ui preview: rapid edits coalesce into one write and reload") {

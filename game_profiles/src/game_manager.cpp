@@ -11,12 +11,12 @@ namespace profiles {
 
 namespace {
 
-bool is_regular_file(const std::filesystem::path& path) noexcept {
+bool regular_file_exists(const std::filesystem::path& path) noexcept {
     std::error_code ec;
     return std::filesystem::is_regular_file(path, ec) && !ec;
 }
 
-bool is_directory(const std::filesystem::path& path) noexcept {
+bool directory_exists(const std::filesystem::path& path) noexcept {
     std::error_code ec;
     return std::filesystem::is_directory(path, ec) && !ec;
 }
@@ -30,17 +30,96 @@ std::string lowercase(std::string value) {
 
 } // namespace
 
+bool GameManager::looks_like_bin_dir(const std::filesystem::path& path) noexcept {
+    return regular_file_exists(path / "tier0.dll") &&
+           regular_file_exists(path / "vstdlib.dll");
+}
+
 std::filesystem::path GameManager::detect_bin_dir(
-    const std::filesystem::path& game_root) noexcept {
-    const std::filesystem::path inside = game_root / "bin";
-    if (is_regular_file(inside / "tier0.dll")) {
-        return inside;
+    const std::filesystem::path& selected) {
+    if (selected.empty()) {
+        return {};
     }
-    const std::filesystem::path parent_bin = game_root.parent_path() / "bin";
-    if (is_regular_file(parent_bin / "tier0.dll")) {
-        return parent_bin;
+    std::error_code ec;
+
+    // Direct /bin folder.
+    if (looks_like_bin_dir(selected)) {
+        return selected;
     }
+
+    // A Source module folder (contains gameinfo.txt): its bin is either inside
+    // the module or lives in the enclosing game root.
+    if (regular_file_exists(selected / "gameinfo.txt")) {
+        if (looks_like_bin_dir(selected / "bin")) {
+            return selected / "bin";
+        }
+        const std::filesystem::path parent_bin = selected.parent_path() / "bin";
+        if (looks_like_bin_dir(parent_bin)) {
+            return parent_bin;
+        }
+    }
+
+    // A game root / SDK root carrying /bin as a direct child.
+    if (looks_like_bin_dir(selected / "bin")) {
+        return selected / "bin";
+    }
+
+    // Look at immediate children, so the user can pick a Steam library root or
+    // an SDK folder and still end up with the right bin.
+    if (directory_exists(selected)) {
+        std::vector<std::filesystem::path> matches;
+        std::filesystem::directory_iterator iterator(selected, ec);
+        if (!ec) {
+            for (const std::filesystem::directory_entry& entry : iterator) {
+                std::error_code entry_ec;
+                if (!entry.is_directory(entry_ec)) {
+                    continue;
+                }
+                if (looks_like_bin_dir(entry.path())) {
+                    matches.push_back(entry.path());
+                } else if (looks_like_bin_dir(entry.path() / "bin")) {
+                    matches.push_back(entry.path() / "bin");
+                }
+            }
+        }
+        std::sort(matches.begin(), matches.end());
+        if (!matches.empty()) {
+            return matches.front();
+        }
+    }
+
     return {};
+}
+
+std::filesystem::path GameManager::detect_game_dir(
+    const std::filesystem::path& bin_dir) {
+    if (bin_dir.empty()) {
+        return {};
+    }
+    std::error_code ec;
+    const std::filesystem::path root = bin_dir.parent_path();
+    if (root.empty() || !std::filesystem::is_directory(root, ec)) {
+        return {};
+    }
+
+    if (std::filesystem::is_regular_file(root / "gameinfo.txt", ec)) {
+        return root;
+    }
+
+    std::vector<std::filesystem::path> candidates;
+    std::filesystem::directory_iterator iterator(root, ec);
+    if (ec) {
+        return {};
+    }
+    for (const std::filesystem::directory_entry& entry : iterator) {
+        std::error_code entry_ec;
+        if (entry.is_directory(entry_ec) &&
+            std::filesystem::is_regular_file(entry.path() / "gameinfo.txt", entry_ec)) {
+            candidates.push_back(entry.path());
+        }
+    }
+    std::sort(candidates.begin(), candidates.end());
+    return candidates.empty() ? std::filesystem::path() : candidates.front();
 }
 
 std::string GameManager::read_game_name(
@@ -85,7 +164,7 @@ std::string GameManager::detect_engine_branch(
         }
     }
 
-    if (!bin_dir.empty() && is_regular_file(bin_dir / "tier0.dll")) {
+    if (!bin_dir.empty() && regular_file_exists(bin_dir / "tier0.dll")) {
         return "source_2013";
     }
     return "unknown";
@@ -132,11 +211,11 @@ void GameManager::scan(const std::filesystem::path& root, int depth) {
         return;
     }
     std::error_code ec;
-    if (!is_directory(root)) {
+    if (!directory_exists(root)) {
         return;
     }
 
-    if (is_regular_file(root / "gameinfo.txt")) {
+    if (regular_file_exists(root / "gameinfo.txt")) {
         bool duplicate = false;
         for (const GameProfile& existing : profiles_) {
             if (existing.game_dir == root) {

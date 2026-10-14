@@ -2,10 +2,9 @@
 
 #include "bridge/dll_loader.h"
 #include "bridge/pe.h"
+#include "profiles/game_manager.h"
 
-#include <algorithm>
 #include <string>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -63,7 +62,12 @@ ConnectionCheck test_connection(const std::filesystem::path& bin_dir) {
             const bool export_ok = (!required.need_create_interface || report.create_interface) &&
                                    (!required.need_command_line ||
                                     report.command_line || report.command_line_tier0);
-            const bool ok = report.loaded && export_ok;
+            // In the 64-bit UI process, x86 DLLs cannot be loaded, so treat a
+            // present x86 PE as a successful header-level check and defer real
+            // export validation to the 32-bit hlmv_backend.
+            const bool ok = (sizeof(void*) == 8 && report.present &&
+                             report.arch == bridge::PeArch::X86) ||
+                            (report.loaded && export_ok);
             if (ok) {
                 ++ok_count;
             }
@@ -117,97 +121,13 @@ ConnectionCheck test_connection(const std::filesystem::path& bin_dir) {
 }
 
 std::filesystem::path detect_game_dir(const std::filesystem::path& bin_dir) {
-    if (bin_dir.empty()) {
-        return {};
-    }
-    std::error_code ec;
-    const std::filesystem::path root = bin_dir.parent_path();
-    if (root.empty() || !std::filesystem::is_directory(root, ec)) {
-        return {};
-    }
-
-    if (std::filesystem::is_regular_file(root / "gameinfo.txt", ec)) {
-        return root;
-    }
-
-    std::vector<std::filesystem::path> candidates;
-    std::filesystem::directory_iterator iterator(root, ec);
-    if (ec) {
-        return {};
-    }
-    for (const std::filesystem::directory_entry& entry : iterator) {
-        std::error_code entry_ec;
-        if (entry.is_directory(entry_ec) &&
-            std::filesystem::is_regular_file(entry.path() / "gameinfo.txt", entry_ec)) {
-            candidates.push_back(entry.path());
-        }
-    }
-    std::sort(candidates.begin(), candidates.end());
-    return candidates.empty() ? std::filesystem::path() : candidates.front();
+    // Detection lives in game_profiles so the catalogue scan and this dialog
+    // path stay in sync.
+    return profiles::GameManager::detect_game_dir(bin_dir);
 }
-
-namespace {
-// Checks whether a directory looks like a Source Engine /bin folder.
-bool looks_like_bin_dir(const std::filesystem::path& path) {
-    std::error_code ec;
-    return std::filesystem::is_regular_file(path / "tier0.dll", ec) &&
-           std::filesystem::is_regular_file(path / "vstdlib.dll", ec);
-}
-} // namespace
 
 std::filesystem::path detect_bin_dir(const std::filesystem::path& selected) {
-    if (selected.empty()) {
-        return {};
-    }
-    std::error_code ec;
-
-    // Direct /bin folder.
-    if (looks_like_bin_dir(selected)) {
-        return selected;
-    }
-
-    // A Source module folder (contains gameinfo.txt): its bin is either inside
-    // the module or lives in the enclosing game root.
-    if (std::filesystem::is_regular_file(selected / "gameinfo.txt", ec)) {
-        if (looks_like_bin_dir(selected / "bin")) {
-            return selected / "bin";
-        }
-        const std::filesystem::path parent_bin = selected.parent_path() / "bin";
-        if (looks_like_bin_dir(parent_bin)) {
-            return parent_bin;
-        }
-    }
-
-    // A game root / SDK root carrying /bin as a direct child.
-    if (looks_like_bin_dir(selected / "bin")) {
-        return selected / "bin";
-    }
-
-    // Look at immediate children, so the user can pick a Steam library root or
-    // an SDK folder and still end up with the right bin.
-    if (std::filesystem::is_directory(selected, ec)) {
-        std::vector<std::filesystem::path> matches;
-        std::filesystem::directory_iterator iterator(selected, ec);
-        if (!ec) {
-            for (const auto& entry : iterator) {
-                std::error_code entry_ec;
-                if (!entry.is_directory(entry_ec)) {
-                    continue;
-                }
-                if (looks_like_bin_dir(entry.path())) {
-                    matches.push_back(entry.path());
-                } else if (looks_like_bin_dir(entry.path() / "bin")) {
-                    matches.push_back(entry.path() / "bin");
-                }
-            }
-        }
-        std::sort(matches.begin(), matches.end());
-        if (!matches.empty()) {
-            return matches.front();
-        }
-    }
-
-    return {};
+    return profiles::GameManager::detect_bin_dir(selected);
 }
 
 } // namespace ui

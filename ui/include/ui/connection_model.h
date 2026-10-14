@@ -6,8 +6,9 @@
 // The loader loads the game DLLs into this process (they stay loaded); the
 // model never throws and always reports per-DLL status.
 //
-// Game name detection from gameinfo.txt is pending: game_profiles has no
-// public API yet (Phase 4 deliverable).
+// Game /bin detection is owned by game_profiles: `ui::detect_bin_dir` and
+// `ui::detect_game_dir` are thin wrappers around the static helpers on
+// `profiles::GameManager` so the UI and the catalogue share one implementation.
 
 #include <filesystem>
 #include <string>
@@ -33,10 +34,11 @@ ConnectionCheck test_connection(const std::filesystem::path& bin_dir);
 std::filesystem::path detect_game_dir(const std::filesystem::path& bin_dir);
 
 // Best-effort Source /bin folder detection from a game root or mod folder: a
-// directory that directly contains tier0.dll is returned as-is, otherwise the
-// function looks for a "bin" child (or the "bin" folder beside a gameinfo.txt
-// file). Also scans the immediate children of the selected folder. Empty path
-// when nothing looks like a Source /bin folder.
+// directory that directly contains tier0.dll + vstdlib.dll is returned as-is,
+// otherwise the function looks for a "bin" child (or the "bin" folder beside a
+// gameinfo.txt file). Also scans the immediate children of the selected folder
+// (Steam library / SDK roots). Empty path when nothing looks like a Source
+// /bin folder. Delegates to profiles::GameManager::detect_bin_dir.
 std::filesystem::path detect_bin_dir(const std::filesystem::path& selected);
 
 } // namespace ui
