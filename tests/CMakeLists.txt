@@ -73,3 +73,23 @@ target_link_libraries(ui_tests PRIVATE
 vtf_deploy_vtflib_runtime(ui_tests)
 
 add_test(NAME ui_tests COMMAND ui_tests)
+
+# --- steam detection tests ----------------------------------------------------
+
+add_executable(steam_detection_tests
+    test_main.cpp
+    steam_detection_tests.cpp
+)
+
+target_include_directories(steam_detection_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/framework"
+)
+
+target_link_libraries(steam_detection_tests PRIVATE
+    game_profiles
+    vmtviewer_warnings
+)
+
+vtf_deploy_vtflib_runtime(steam_detection_tests)
+
+add_test(NAME steam_detection_tests COMMAND steam_detection_tests)
