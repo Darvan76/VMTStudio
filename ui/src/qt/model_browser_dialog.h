@@ -22,9 +22,10 @@ public:
     ~ModelBrowserDialog() override = default;
 
 signals:
-    // `gameRelative` always addresses the model through the engine
-    // ("models/props_c17/oildrum001.mdl"); `diskPath` is filled for loose files.
-    void modelSelected(const QString& gameRelative, bool loose, const QString& diskPath);
+    // `gameRelative` addresses the model through the engine file system
+    // ("models/props_c17/oildrum001.mdl"); the main window resolves the disk
+    // path when it needs one.
+    void modelSelected(const QString& gameRelative, bool loose);
 
 private:
     bridge::EngineView* m_engine = nullptr;

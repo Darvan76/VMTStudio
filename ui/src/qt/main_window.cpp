@@ -552,6 +552,11 @@ bool MainWindow::ensureEngine(QString& error) {
     std::filesystem::create_directories(m_previewRoot / "materials", ec);
     (void)m_engine->mount_directory(m_previewRoot, true);
 
+    // Mount current material root so the engine can resolve textures (.vtf)
+    if (!m_session.material_root().empty()) {
+        (void)m_engine->mount_directory(m_session.material_root(), true);
+    }
+
     // Apply lighting and shapes
     (void)m_engine->set_preview_shape(to_bridge_shape(m_previewOptions.shape));
     (void)m_engine->set_lighting(to_bridge_lighting(m_previewOptions.lighting));
@@ -587,10 +592,11 @@ void MainWindow::ensureEngineAsync() {
 
     auto alive = m_alive;
     std::filesystem::path previewRoot = m_previewRoot;
+    std::filesystem::path materialRoot = m_session.material_root();
     ui::PreviewOptions previewOptions = m_previewOptions;
     std::string renderMode = m_currentRenderMode;
 
-    std::thread([this, config, alive, previewRoot, previewOptions, renderMode]() {
+    std::thread([this, config, alive, previewRoot, materialRoot, previewOptions, renderMode]() {
         auto createRes = bridge::EngineView::create();
         if (!createRes) {
             std::string errMsg = createRes.error().message;
@@ -621,6 +627,11 @@ void MainWindow::ensureEngineAsync() {
         std::filesystem::create_directories(previewRoot / "materials", ec);
         (void)engine->mount_directory(previewRoot, true);
 
+        // Mount material root if available
+        if (!materialRoot.empty()) {
+            (void)engine->mount_directory(materialRoot, true);
+        }
+
         auto rawEngine = engine.release();
         QMetaObject::invokeMethod(qApp, [this, alive, rawEngine, previewOptions, renderMode]() {
             if (!*alive) {
@@ -631,8 +642,13 @@ void MainWindow::ensureEngineAsync() {
             m_engine.reset(rawEngine);
             m_engineConnecting = false;
 
+            if (!m_session.material_root().empty()) {
+                (void)m_engine->mount_directory(m_session.material_root(), true);
+            }
+            checkBrushMaterial(false);
+
             // Apply lighting and shapes
-            (void)m_engine->set_preview_shape(to_bridge_shape(previewOptions.shape));
+            (void)m_engine->set_preview_shape(to_bridge_shape(m_previewOptions.shape));
             (void)m_engine->set_lighting(to_bridge_lighting(previewOptions.lighting));
             (void)m_engine->set_render_mode(renderMode);
 
@@ -742,19 +758,32 @@ void MainWindow::onPreviewSyncTimeout() {
 
     std::string materialName = "vmtviewer_preview";
     if (!m_session.path().empty()) {
-        materialName = m_session.path().stem().string();
+        materialName = ui::vtf_texture_path(m_session.path());
+        if (materialName.empty()) {
+            materialName = m_session.path().stem().string();
+        }
     }
 
-    // Write preview file to mounted preview root
-    std::filesystem::path outDir = m_previewRoot / "materials";
+    // Write preview file to mounted preview root preserving directory hierarchy
+    std::filesystem::path outFile = m_previewRoot / "materials" / (materialName + ".vmt");
     std::error_code ec;
-    std::filesystem::create_directories(outDir, ec);
+    std::filesystem::create_directories(outFile.parent_path(), ec);
 
-    std::filesystem::path outFile = outDir / (materialName + ".vmt");
     std::ofstream stream(outFile, std::ios::binary);
     if (stream) {
         stream << m_session.text();
         stream.close();
+    }
+
+    // If there is an adjacent loose .vtf in the source directory (i.e. not in a materials/ structure),
+    // copy it into the preview materials directory so the engine can resolve $basetexture
+    if (!m_session.path().empty()) {
+        std::filesystem::path srcDir = m_session.path().parent_path();
+        std::filesystem::path srcVtf = srcDir / (m_session.path().stem().string() + ".vtf");
+        if (std::filesystem::is_regular_file(srcVtf, ec)) {
+            std::filesystem::path destVtf = outFile.parent_path() / (m_session.path().stem().string() + ".vtf");
+            std::filesystem::copy_file(srcVtf, destVtf, std::filesystem::copy_options::overwrite_existing, ec);
+        }
     }
 
     (void)m_engine->set_material(materialName);
@@ -812,6 +841,13 @@ bool MainWindow::openFile(const QString& filePath) {
 
     addRecentFile(filePath);
     refreshMaterialRoots();
+
+    if (m_engine && m_engine->initialized()) {
+        const auto& matRoot = m_session.material_root();
+        if (!matRoot.empty()) {
+            (void)m_engine->mount_directory(matRoot, true);
+        }
+    }
 
     m_suppressSync = true;
     m_codeEditor->setPlainText(QString::fromStdString(m_session.text()));

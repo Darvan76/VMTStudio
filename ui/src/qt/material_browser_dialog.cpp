@@ -36,6 +36,17 @@ public:
                     return vmt::Ok(std::move(bytes));
                 }
             }
+            if (game_path.rfind("materials/", 0) == 0) {
+                auto candidate2 = root / std::filesystem::path(game_path.substr(10));
+                if (std::filesystem::is_regular_file(candidate2, ec)) {
+                    std::ifstream stream(candidate2, std::ios::binary);
+                    if (stream) {
+                        std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(stream)),
+                                                         std::istreambuf_iterator<char>());
+                        return vmt::Ok(std::move(bytes));
+                    }
+                }
+            }
         }
         if (m_engine && m_engine->initialized()) {
             return m_engine->read_binary_file(game_path);
