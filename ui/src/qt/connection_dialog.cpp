@@ -1,5 +1,7 @@
 #include "connection_dialog.h"
 
+#include "profiles/steam_library.h"
+
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
@@ -113,6 +115,18 @@ ConnectionDialog::ConnectionDialog(ui::UISettings& settings, QWidget* parent)
         m_gameManager.discover(root, 6);
         populateGameCombo();
         onTestConnection();
+    } else {
+        // First run without a remembered /bin folder: auto-discover Source
+        // games across every Steam library (Crowbar-style) so the combo
+        // starts populated. SteamDetector::discover_all already merges the
+        // per-library scans (GameManager::discover clears its catalogue on
+        // each call) and de-duplicates the union.
+        try {
+            m_gameManager.profiles() = profiles::SteamDetector::discover_all(6);
+        } catch (...) {
+            // Discovery must never crash the dialog; an empty list is fine.
+        }
+        populateGameCombo();
     }
 }
 
@@ -164,6 +178,15 @@ void ConnectionDialog::onDiscoverGames() {
     }
 
     m_gameManager.discover(std::filesystem::path(root.toStdWString()), 6);
+    if (m_gameManager.profiles().empty()) {
+        // The chosen root held no Source games; fall back to the Steam
+        // libraries before showing "(no games discovered)".
+        try {
+            m_gameManager.profiles() = profiles::SteamDetector::discover_all(6);
+        } catch (...) {
+            // Discovery must never crash the dialog; an empty list is fine.
+        }
+    }
     populateGameCombo();
 }
 
