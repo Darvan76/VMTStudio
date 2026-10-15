@@ -8,6 +8,9 @@
 #include <QTimer>
 #include <QDockWidget>
 
+#include <atomic>
+#include <memory>
+
 #include "ui/session.h"
 #include "ui/settings.h"
 #include "ui/preview_options.h"
@@ -104,6 +107,7 @@ private:
     bool maybeSave();
 
     bool ensureEngine(QString& error);
+    void ensureEngineAsync();
     void syncPreview();
     void refreshMaterialRoots();
 
@@ -119,6 +123,8 @@ private:
     std::filesystem::path m_settingsPath;
 
     std::unique_ptr<bridge::EngineView> m_engine;
+    bool m_engineConnecting = false;
+    std::shared_ptr<std::atomic<bool>> m_alive = std::make_shared<std::atomic<bool>>(true);
     ui::PreviewOptions m_previewOptions;
     ui::PreviewSync m_previewSync;
     std::filesystem::path m_previewRoot;

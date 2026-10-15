@@ -11,6 +11,7 @@
 #include "ui/shader_catalog.h"
 #include "vmt/document.h"
 #include <fstream>
+#include <thread>
 
 #include <QMenuBar>
 #include <QMenu>
@@ -114,6 +115,20 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_previewSyncTimer, &QTimer::timeout, this, &MainWindow::onPreviewSyncTimeout);
 
     setupUi();
+
+    // Populate the inspector's shader dropdown with the full catalog (known
+    // shaders plus every shader the loaded schemas cover) so the user can pick
+    // one instead of typing it by hand.
+    {
+        const auto names = ui::shader_picker_names(&m_schemas);
+        QStringList shaderNames;
+        shaderNames.reserve(static_cast<int>(names.size()));
+        for (const std::string& name : names) {
+            shaderNames.append(QString::fromStdString(name));
+        }
+        m_inspector->setAvailableShaders(shaderNames);
+    }
+
     m_notificationPopup = new NotificationPopup(this);
     setupMenus();
     setupToolBar();
@@ -125,16 +140,17 @@ MainWindow::MainWindow(QWidget* parent)
     // Default template document
     onNewFile();
 
-    // Try auto-starting preview if game paths are already set
+    // Asynchronously connect to the engine preview in the background so the
+    // window appears immediately without blocking startup.
     if (!m_settings.last_bin_dir.empty() && !m_settings.last_game_dir.empty()) {
-        QString err;
-        ensureEngine(err);
+        ensureEngineAsync();
     }
 
     refreshMaterialRoots();
 }
 
 MainWindow::~MainWindow() {
+    *m_alive = false;
     saveSettings();
     if (m_engine) {
         m_engine->shutdown();
@@ -484,6 +500,9 @@ void MainWindow::updateStatus() {
     if (m_engine && m_engine->initialized()) {
         m_statusEngine->setText(tr("Engine: Connected (HLMV 32-bit)"));
         m_statusEngine->setStyleSheet("color: #4ec9b0;");
+    } else if (m_engineConnecting) {
+        m_statusEngine->setText(tr("Engine: Connecting..."));
+        m_statusEngine->setStyleSheet("color: #dcdcaa;");
     } else {
         m_statusEngine->setText(tr("Engine: Idle"));
         m_statusEngine->setStyleSheet("color: #dcdcaa;");
@@ -493,6 +512,11 @@ void MainWindow::updateStatus() {
 bool MainWindow::ensureEngine(QString& error) {
     if (m_engine && m_engine->initialized()) {
         return true;
+    }
+
+    if (m_engineConnecting) {
+        error = tr("Engine is currently connecting in the background. Please wait a moment.");
+        return false;
     }
 
     if (m_settings.last_bin_dir.empty() || m_settings.last_game_dir.empty()) {
@@ -537,6 +561,88 @@ bool MainWindow::ensureEngine(QString& error) {
     (void)m_engine->resize(0, 0);
     updateStatus();
     return true;
+}
+
+void MainWindow::ensureEngineAsync() {
+    if (m_engineConnecting) {
+        return;
+    }
+    if (m_engine && m_engine->initialized()) {
+        return;
+    }
+    if (m_settings.last_bin_dir.empty() || m_settings.last_game_dir.empty()) {
+        return;
+    }
+
+    m_engineConnecting = true;
+    updateStatus();
+    m_viewport->setStatusText(tr("Source Engine Preview\nConnecting to HLMV backend in background..."));
+
+    bridge::EngineViewConfig config;
+    config.bin_dir = m_settings.last_bin_dir;
+    config.game_dir = m_settings.last_game_dir;
+    config.child_window = reinterpret_cast<void*>(m_viewport->hostHwnd());
+    config.width = std::max(64, m_viewport->width());
+    config.height = std::max(64, m_viewport->height());
+
+    auto alive = m_alive;
+    std::filesystem::path previewRoot = m_previewRoot;
+    ui::PreviewOptions previewOptions = m_previewOptions;
+    std::string renderMode = m_currentRenderMode;
+
+    std::thread([this, config, alive, previewRoot, previewOptions, renderMode]() {
+        auto createRes = bridge::EngineView::create();
+        if (!createRes) {
+            std::string errMsg = createRes.error().message;
+            QMetaObject::invokeMethod(qApp, [this, alive, errMsg]() {
+                if (!*alive) return;
+                m_engineConnecting = false;
+                m_viewport->setStatusText(tr("Engine Initialization Error:\n%1").arg(QString::fromStdString(errMsg)));
+                updateStatus();
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        auto engine = std::move(createRes.value());
+        auto initRes = engine->initialize(config);
+        if (!initRes) {
+            std::string errMsg = initRes.error().message;
+            QMetaObject::invokeMethod(qApp, [this, alive, errMsg]() {
+                if (!*alive) return;
+                m_engineConnecting = false;
+                m_viewport->setStatusText(tr("Engine Initialization Error:\n%1").arg(QString::fromStdString(errMsg)));
+                updateStatus();
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        // Mount temporary preview root
+        std::error_code ec;
+        std::filesystem::create_directories(previewRoot / "materials", ec);
+        (void)engine->mount_directory(previewRoot, true);
+
+        auto rawEngine = engine.release();
+        QMetaObject::invokeMethod(qApp, [this, alive, rawEngine, previewOptions, renderMode]() {
+            if (!*alive) {
+                delete rawEngine;
+                return;
+            }
+
+            m_engine.reset(rawEngine);
+            m_engineConnecting = false;
+
+            // Apply lighting and shapes
+            (void)m_engine->set_preview_shape(to_bridge_shape(previewOptions.shape));
+            (void)m_engine->set_lighting(to_bridge_lighting(previewOptions.lighting));
+            (void)m_engine->set_render_mode(renderMode);
+
+            m_viewport->setEngineView(m_engine.get());
+            (void)m_engine->resize(0, 0);
+            updateStatus();
+
+            syncPreview();
+        }, Qt::QueuedConnection);
+    }).detach();
 }
 
 void MainWindow::refreshMaterialRoots() {
@@ -626,6 +732,9 @@ void MainWindow::syncPreview() {
 }
 
 void MainWindow::onPreviewSyncTimeout() {
+    if (m_engineConnecting) {
+        return;
+    }
     QString err;
     if (!ensureEngine(err)) {
         return;
@@ -1081,9 +1190,7 @@ void MainWindow::onOpenGameConnection() {
             m_engine->shutdown();
             m_engine.reset();
         }
-        QString err;
-        ensureEngine(err);
-        syncPreview();
+        ensureEngineAsync();
     }
 }
 
