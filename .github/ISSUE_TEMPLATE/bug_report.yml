@@ -1,0 +1,106 @@
+name: "Bug Report"
+description: "Report an issue, crash, or rendering defect in VMT-Studio"
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue with VMT-Studio!
+        Please fill in the details below to help us diagnose and fix the bug quickly.
+
+  - type: input
+    id: game_tested
+    attributes:
+      label: "Game Tested & Source Engine Branch"
+      description: "Which Source game or SDK installation was connected? (e.g., Half-Life 2, Team Fortress 2, Counter-Strike: Source, Garry's Mod, Source SDK 2013, Custom Mod)"
+      placeholder: "e.g., Team Fortress 2 (Steam / retail 32-bit)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os_version
+    attributes:
+      label: "Operating System Version"
+      description: "What Windows version and architecture are you running?"
+      options:
+        - "Windows 11 64-bit (23H2 or newer)"
+        - "Windows 11 64-bit (22H2 or older)"
+        - "Windows 10 64-bit (21H2 / 22H2)"
+        - "Windows 10 64-bit (older build)"
+        - "Other (specify below)"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu_model
+    attributes:
+      label: "GPU & Graphics Driver Version"
+      description: "What GPU and driver version does your machine use? (HLMV Direct3D 9 backend interacts directly with your graphics driver)"
+      placeholder: "e.g., NVIDIA GeForce RTX 3080 (Driver 551.86) / AMD Radeon RX 6700 XT"
+    validations:
+      required: true
+
+  - type: input
+    id: material_tested
+    attributes:
+      label: "Material (.vmt) or Texture (.vtf) Tested"
+      description: "Path, name, or shader of the material causing the issue (e.g. materials/models/player/heavy/heavy_head.vmt)"
+      placeholder: "e.g., materials/brick/brickwall001a.vmt (Shader: LightmappedGeneric)"
+    validations:
+      required: false
+
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: "Steps to Reproduce"
+      description: "Step-by-step description of how to trigger the problem."
+      placeholder: |
+        1. Launch vmtstudio.exe
+        2. Set game connection to ...
+        3. Open material ...
+        4. Adjust parameter or switch preview shape to ...
+        5. See error or crash
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: "Expected Behavior"
+      description: "A clear and concise description of what you expected to happen."
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: "Actual Behavior"
+      description: "What actually happened? (Include error dialog messages, rendering artifacts, or attach screenshots)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs_minidump
+    attributes:
+      label: "Diagnostic Logs / Crash MiniDump"
+      description: |
+        Please check and paste relevant logs from:
+        - `%LOCALAPPDATA%\VMTStudio\vmtstudio.log`
+        - Console or `hlmv_debug.log`
+        If a crash occurred, mention if a `.mdmp` crash dump was generated.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Checklist"
+      options:
+        - label: "I have searched existing issues to verify this is not a duplicate."
+          required: true
+        - label: "I am using the latest release or master build of VMT-Studio."
+          required: true
+        - label: "The connected game folder passed 'Test Connection' with green status."
+          required: false

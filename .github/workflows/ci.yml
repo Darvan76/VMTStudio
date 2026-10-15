@@ -1,0 +1,106 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - master
+      - 'release/*'
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+      - 'release/*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Test (Windows x64 + Win32)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Qt 6.8
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.8.2'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          dir: 'C:/'
+          modules: 'qttools'
+
+      - name: Apply VTFLib patches
+        shell: pwsh
+        run: |
+          cmake -P thirdparty/patches/apply_vtflib_patches.cmake
+
+      - name: Build VTFLib++ (Win32 & x64)
+        shell: pwsh
+        run: |
+          Write-Host "Building 32-bit VTFLib++ (Win32)..."
+          cmake -B thirdparty/vtflib/build_vtflib -S thirdparty/vtflib -A Win32 `
+                -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
+          cmake --build thirdparty/vtflib/build_vtflib --config Release
+
+          Write-Host "Building 64-bit VTFLib++ (x64)..."
+          cmake -B thirdparty/vtflib/build_vtflib64 -S thirdparty/vtflib -A x64 `
+                -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
+          cmake --build thirdparty/vtflib/build_vtflib64 --config Release
+
+      - name: Checkout Source SDK 2013 Public Headers
+        shell: pwsh
+        run: |
+          Write-Host "Cloning Source SDK 2013 public headers (sparse checkout)..."
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/ValveSoftware/source-sdk-2013.git "$env:RUNNER_TEMP/source-sdk-2013"
+          git -C "$env:RUNNER_TEMP/source-sdk-2013" sparse-checkout set src/public
+
+      - name: Build 32-bit Backend (HLMV)
+        shell: pwsh
+        run: |
+          $sdkPublic = "$env:RUNNER_TEMP/source-sdk-2013/src/public" -replace '\\', '/'
+          Write-Host "Configuring Win32 build with SOURCE_SDK_PUBLIC=$sdkPublic..."
+          cmake -S . -B build -A Win32 -DSOURCE_SDK_PUBLIC="$sdkPublic"
+          Write-Host "Compiling 32-bit HLMV backend..."
+          cmake --build build --config Release --target hlmv_backend
+
+      - name: Build 64-bit VMT-Studio & Test Suite
+        shell: pwsh
+        run: |
+          Write-Host "Configuring 64-bit build with Qt at ${{ env.QT_ROOT_DIR }}..."
+          cmake -S . -B build64 -A x64 -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT_DIR }}"
+          Write-Host "Compiling 64-bit VMT-Studio and unit tests..."
+          cmake --build build64 --config Release
+
+      - name: Run CTest Unit Tests
+        shell: pwsh
+        run: |
+          Write-Host "Running 64-bit CTest test suite..."
+          ctest --test-dir build64 -C Release --output-on-failure
+
+      - name: Package Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1
+
+      - name: Upload Release to GitHub
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            *.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

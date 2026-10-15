@@ -99,12 +99,15 @@ cmake-build-*/
 # Herramientas locales, logs, volcados y temporales
 # ------------------------------------------------------------------------------
 .omo/
+.agent/
 *.log
 *.tmp
 *.temp
 *.dmp
 *.mdmp
 crashpad/
+dist/
+*.zip
 
 # Volcados de texturas / capturas temporales de pruebas de HLMV
 *.tga

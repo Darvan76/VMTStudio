@@ -3,7 +3,7 @@
   <assemblyIdentity
       type="win32"
       name="VMTStudio.UI"
-      version="0.2.0.0"
+      version="0.1.0.0"
       processorArchitecture="*"/>
 
   <!-- Common Controls v6. Without this dependency the shell falls back to the

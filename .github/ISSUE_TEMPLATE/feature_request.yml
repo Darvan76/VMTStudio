@@ -1,0 +1,62 @@
+name: "Feature Request"
+description: "Suggest an idea, shader parameter support, or enhancement for VMT-Studio"
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a feature for VMT-Studio!
+        Please share details about your workflow and how this improvement helps Source Engine modders and material authors.
+
+  - type: textarea
+    id: problem_description
+    attributes:
+      label: "Problem or Limitation"
+      description: "Is your feature request related to a specific limitation or pain point in your current workflow?"
+      placeholder: "e.g., When authoring materials with complex lightwarps or cubemaps, it is difficult to..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_feature
+    attributes:
+      label: "Proposed Solution"
+      description: "Describe the feature, tool, or behavior you would like to see in VMT-Studio."
+      placeholder: "A clear and concise description of what you want to happen."
+    validations:
+      required: true
+
+  - type: textarea
+    id: source_context
+    attributes:
+      label: "Source Engine / Shader Context"
+      description: "Which Source Engine branch, games, or shaders (e.g. VertexLitGeneric, LightmappedGeneric, Refract, custom mod shaders) does this relate to?"
+      placeholder: "e.g. LightmappedGeneric parallax mapping ($bumptransform, $height), TF2 jarate overlay proxy, etc."
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives_considered
+    attributes:
+      label: "Alternatives Considered"
+      description: "Have you considered any alternative solutions, external tools, or workarounds?"
+      placeholder: "e.g., Currently using external VTFEdit or manually editing text in Notepad..."
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: "Additional Context"
+      description: "Add any other context, links to Valve Developer Community docs, UI mockups, or screenshots."
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Checklist"
+      options:
+        - label: "I have searched existing issues and feature requests to confirm this is not a duplicate."
+          required: true

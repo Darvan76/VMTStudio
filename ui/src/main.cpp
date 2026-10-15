@@ -28,7 +28,7 @@ int main(int argc, char* argv[]) {
 
     QApplication app(argc, argv);
     app.setApplicationName("VMT-Studio");
-    app.setApplicationVersion("0.2.0");
+    app.setApplicationVersion("0.1.0");
     app.setOrganizationName("VMT-Studio");
     app.setWindowIcon(QIcon(":/icons/app.png"));
 

@@ -1,12 +1,19 @@
+<div align="center">
+
+<img src="vmtstudio-icon.png" alt="Logo de VMT-Studio" width="128" height="128" />
+
 # VMT-Studio
 
-[![Plataforma: Windows](https://img.shields.io/badge/Plataforma-Windows-blue.svg)](https://microsoft.com/windows)
-[![C++17](https://img.shields.io/badge/Lenguaje-C%2B%2B17-00599C.svg)](https://isocpp.org/)
-[![UI: Qt 6](https://img.shields.io/badge/UI-Qt%206-41CD52.svg)](https://www.qt.io/)
+![Release](https://img.shields.io/badge/release-v0.1.0-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![C++](https://img.shields.io/badge/standard-C%2B%2B17-blue.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)
+![Qt](https://img.shields.io/badge/GUI-Qt%206.8-green.svg)
 [![Motor: Source Engine](https://img.shields.io/badge/Renderizador-Source%20Engine%20(Nativo%20HLMV)-F37021.svg)](https://developer.valvesoftware.com/wiki/Half-Life_Model_Viewer)
-[![Licencia: MIT](https://img.shields.io/badge/Licencia-MIT-green.svg)](LICENSE)
 
 *Leer en otros idiomas: [English](README.md)*
+
+</div>
 
 **VMT-Studio** es un entorno y estudio de materiales moderno y de alto rendimiento, inspector de parámetros y previsualizador 3D en tiempo real para materiales (`.vmt`) y texturas (`.vtf`) del motor Source de Valve.
 
@@ -22,6 +29,7 @@ A diferencia de visores genéricos que intentan aproximar los shaders de Source 
   - [Renderizado Nativo de Brushes y Modelos Studio](#renderizado-nativo-de-brushes-y-modelos-studio)
   - [Módulos del Proyecto](#módulos-del-proyecto)
 - [Juegos y Motores Compatibles](#juegos-y-motores-compatibles)
+- [Versión Portable (Inicio Rápido)](#versión-portable-inicio-rápido)
 - [Requisitos de Compilación](#requisitos-de-compilación)
 - [Guía de Compilación](#guía-de-compilación)
   - [Paso 1: Clonar e Inicializar Submódulos](#paso-1-clonar-e-inicializar-submódulos)
@@ -60,6 +68,17 @@ A diferencia de visores genéricos que intentan aproximar los shaders de Source 
   - Presets de iluminación: *Studio Dark*, *Studio Light*, *Outdoor* y *Flat*.
 - **Modos de Sombreado y Depuración**:
   - Textured / Shaded, Flatshaded, Wireframe y vista de depuración de Normal Map / Bumpmap.
+- **Detección Automática de Bibliotecas de Steam y Selector de Juegos**:
+  - Consulta automáticamente el registro de Windows (`HKCU\Software\Valve\Steam`) y la variable de entorno `STEAMPATH` para localizar la instalación de Steam.
+  - Parsea manifiestos de bibliotecas múltiples (`libraryfolders.vdf`) para detectar todos los juegos y mods de Source instalados en cualquier unidad de disco.
+  - Menú desplegable interactivo **Juegos conocidos** en la configuración de conexión con selección en un clic e indicadores de estado de instalación en tiempo real.
+- **Validación Exhaustiva de la Instalación del Motor**:
+  - Verificación rigurosa en múltiples etapas antes de iniciar el backend del motor: valida estructura de directorios, `gameinfo.txt`, cabeceras PE y arquitectura binaria (garantizando binarios de 32 bits x86 requeridos por el motor).
+  - Comprobación de DLLs esenciales del motor (`tier0.dll`, `vstdlib.dll`, `filesystem_stdio.dll`, `materialsystem.dll`, `shaderapidx9.dll`).
+  - Validación de tablas de exportación esenciales (`CreateInterface`, `CommandLine_Tier0`) con diagnósticos claros y accionables (`carpeta vacía`, `DLL faltante`, `arquitectura incorrecta`, `sin exportaciones`).
+- **Parsing VMT de Alto Rendimiento y Decodificación VTF Optimizada**:
+  - **`vmt_core`**: Escaneo de tokens sin asignaciones de memoria mediante tablas de delimitadores ASCII, tabla de líneas (`LineTable`) con búsqueda binaria para mapeo instantáneo de ubicaciones y serialización AST exacta sin pérdidas.
+  - **`vtf_reader`**: Escalado optimizado de ruta rápida para texturas RGBA8888 sin asignaciones intermedias, liberación inmediata de buffers para minimizar el pico de memoria y protección mediante exclusión mutua de ámbito (`std::scoped_lock`).
 - **Flujo de Trabajo Seguro y Atómico**:
   - Guardado atómico mediante archivos `.tmp` para evitar corrupciones en caso de cierre inesperado.
   - Guardado como override suelto: opción `File > Save to game folder...` para guardar directamente en la carpeta `materials/` del juego activo sobreescribiendo el contenido de los VPK.
@@ -120,11 +139,11 @@ El backend `hlmv_backend` integra un módulo dedicado `brush_render` que interac
 
 ### Módulos del Proyecto
 
-- **`vmt_core`**: Parser de KeyValues, modelo AST y serializador VMT sin pérdidas. Preserva comentarios, espacios exactos, mayúsculas/minúsculas y comillas. No depende de Windows ni de Qt.
-- **`vtf_reader`**: Decodificador rápido de texturas VTF basado en `VTFLib++`. Decodifica formatos como DXT1, DXT5, RGBA8888, BC4/BC5, cubemaps y mipmaps a buffers RGBA8.
+- **`vmt_core`**: Parser de KeyValues, modelo AST y serializador VMT sin pérdidas. Incorpora escaneo de tokens sin asignaciones de memoria mediante tablas de delimitadores ASCII, mapeo de líneas mediante `LineTable` con búsqueda binaria y serialización exacta byte a byte. Preserva comentarios, espacios exactos, mayúsculas/minúsculas y comillas. No depende de Windows ni de Qt.
+- **`vtf_reader`**: Decodificador rápido de texturas VTF basado en `VTFLib++`. Decodifica formatos como DXT1, DXT5, RGBA8888, BC4/BC5, cubemaps y mipmaps a buffers RGBA8, con optimizaciones de ruta rápida para texturas sin comprimir y gestión eficiente de memoria pico.
 - **`hlmv_backend`**: Proceso de 32 bits que contiene el código de Half-Life Model Viewer, MX Toolkit (`mxtk`), renderizado de brushes y escucha IPC.
-- **`engine_bridge`**: Capa de comunicación IPC, gestión del ciclo de vida del subproceso y shims de compatibilidad (como el ajuste de vtable para `VFileSystem022` de Garry's Mod).
-- **`game_profiles`**: Detección de juegos instalados mediante la lectura de `gameinfo.txt` y localización de carpetas `/bin`.
+- **`engine_bridge`**: Capa de comunicación IPC, gestión del ciclo de vida del subproceso, inspección de cabeceras PE y shims de compatibilidad (como el ajuste de vtable para `VFileSystem022` de Garry's Mod).
+- **`game_profiles`**: Detección automática de juegos Source instalados. Lee bibliotecas de Steam en múltiples discos, parsea `gameinfo.txt` y realiza una validación exhaustiva de los binarios PE (arquitectura x86 de 32 bits, DLLs requeridas y validación de exportaciones).
 - **`ui`**: Aplicación gráfica Qt 6 (`vmtstudio`), docks acoplables, diálogos, inspectores y resaltador de sintaxis.
 - **`data/schema`**: Definición en formato JSON de las propiedades válidas de cada shader de Source.
 
@@ -140,6 +159,25 @@ El puente del motor es compatible de forma automática con cualquier rama deriva
 - **Source SDK Base 2013 Singleplayer / Multiplayer**
 - **Garry's Mod** (escaneo de VPK y sistema de archivos mediante shim de vtable)
 - **Mods personalizados de Source** que cuenten con un archivo `gameinfo.txt` y carpeta `/bin`.
+
+---
+
+## Versión Portable (Inicio Rápido)
+
+Si prefieres utilizar VMT-Studio directamente sin compilar el proyecto desde el código fuente, dispones de una versión portable lista para usar:
+
+1. **Descargar**: Descarga el archivo `vmt-studio-v0.1.0-windows-x64.zip` desde la página de [Releases](https://github.com/tu-usuario/VMT-Studio/releases) del proyecto.
+2. **Descomprimir**: Extrae el contenido del archivo ZIP en la carpeta que elijas (por ejemplo, `C:\Herramientas\VMT-Studio`). No requiere instalación ni permisos de administrador.
+3. **Ejecutar**: Inicia `vmtstudio.exe`.
+4. **Conectar con Source Engine**:
+   - Abre el diálogo **Game > Connection Settings...**.
+   - Selecciona tu juego instalado en la lista desplegable **Juegos conocidos**, o haz clic en **Discover...** para escanear de forma automática tus bibliotecas de Steam en todas las unidades de almacenamiento.
+   - Opcionalmente, especifica de forma manual la carpeta del juego o mod (aquella que contiene `gameinfo.txt`, p. ej. `Half-Life 2/hl2`) y la carpeta `/bin` del motor.
+   - Pulsa en **Test Connection** para validar la instalación (comprueba arquitectura PE de 32 bits, DLLs necesarias y exportaciones del motor).
+5. **Comenzar a Editar**: Abre cualquier archivo `.vmt` mediante **File > Open** o a través del **Material Browser (`F3`)** para inspeccionar y previsualizar materiales en tiempo real.
+
+> [!NOTE]
+> El paquete ZIP portable agrupa `vmtstudio.exe` (interfaz gráfica Qt 6 en 64 bits), `hlmv_backend.exe` (backend de renderizado nativo en 32 bits), `VTFLib.dll` y todas las dependencias necesarias de Qt 6. No se distribuyen binarios ni recursos propietarios de Valve; estos se cargan dinámicamente desde la instalación local de Source del usuario.
 
 ---
 
@@ -218,8 +256,9 @@ build64/bin/Release/vmtstudio.exe
 
 1. Ejecuta `build64/bin/Release/vmtstudio.exe`.
 2. Dirígete a **Game > Connection Settings...**:
-   - Selecciona el **Game Directory** (carpeta que contiene `gameinfo.txt`, por ejemplo: `C:/Program Files (x86)/Steam/steamapps/common/Half-Life 2/hl2`).
-   - Selecciona el **Bin Directory** (ejemplo: `C:/Program Files (x86)/Steam/steamapps/common/Half-Life 2/bin`).
+   - Selecciona un juego detectado directamente en el menú desplegable **Juegos conocidos** o pulsa **Discover...** para escanear cualquier biblioteca de Steam o carpeta del Source SDK.
+   - O configura manualmente el **Directorio del Juego** (que contiene `gameinfo.txt`, por ejemplo: `C:/Program Files (x86)/Steam/steamapps/common/Half-Life 2/hl2`) y el **Directorio Bin** (ejemplo: `C:/Program Files (x86)/Steam/steamapps/common/Half-Life 2/bin`).
+   - Haz clic en **Test Connection** para ejecutar la validación de la instalación en tiempo real (comprueba arquitectura PE de 32 bits, DLLs requeridas y exportaciones del motor).
 3. Abre cualquier archivo `.vmt` desde **File > Open**, o utiliza el **Material Browser (`F3`)** para explorar los materiales instalados o empaquetados en VPK.
 4. El visor 3D iniciará el backend de HLMV de manera transparente, renderizando el material con fidelidad idéntica al motor Source.
 

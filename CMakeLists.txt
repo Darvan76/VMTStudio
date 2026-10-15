@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(VMTStudio
-    VERSION 0.2.0
+    VERSION 0.1.0
     DESCRIPTION "Native Windows material studio for Source Engine VMT/VTF"
     LANGUAGES CXX
 )
 
-list(APPEND CMAKE_PREFIX_PATH "C:/Qt/6.8.2/msvc2022_64")
+if(NOT DEFINED CMAKE_PREFIX_PATH AND EXISTS "C:/Qt/6.8.2/msvc2022_64")
+    list(APPEND CMAKE_PREFIX_PATH "C:/Qt/6.8.2/msvc2022_64")
+endif()
 
 # --- Language settings --------------------------------------------------------
 set(CMAKE_CXX_STANDARD 17)
@@ -46,8 +48,16 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Build-time location of the Source SDK 2013 public headers.
-set(SOURCE_SDK_PUBLIC "C:/Users/Dario/Documents/source-sdk-2013/source-sdk-2013/src/public"
-    CACHE PATH "Source SDK 2013 src/public directory")
+if(DEFINED ENV{SOURCE_SDK_PUBLIC})
+    set(DEFAULT_SOURCE_SDK_PUBLIC "$ENV{SOURCE_SDK_PUBLIC}")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/source-sdk-2013/src/public")
+    set(DEFAULT_SOURCE_SDK_PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/source-sdk-2013/src/public")
+elseif(EXISTS "C:/Users/Dario/Documents/source-sdk-2013/source-sdk-2013/src/public")
+    set(DEFAULT_SOURCE_SDK_PUBLIC "C:/Users/Dario/Documents/source-sdk-2013/source-sdk-2013/src/public")
+else()
+    set(DEFAULT_SOURCE_SDK_PUBLIC "")
+endif()
+set(SOURCE_SDK_PUBLIC "${DEFAULT_SOURCE_SDK_PUBLIC}" CACHE PATH "Source SDK 2013 src/public directory")
 
 enable_testing()
 
