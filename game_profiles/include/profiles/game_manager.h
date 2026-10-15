@@ -8,6 +8,8 @@
 // be fully resolved are still returned with empty paths so the UI can report
 // the failure instead of crashing.
 
+#include "profiles/install_check.h"
+
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -22,7 +24,8 @@ struct GameProfile {
     std::filesystem::path game_dir; // folder containing gameinfo.txt
     std::filesystem::path bin_dir;  // folder containing tier0.dll / vstdlib.dll
     std::string gameinfo_game;       // "game" value from gameinfo.txt
-    bool is_valid = false;          // gameinfo.txt + at least one bin dir present
+    bool is_valid = false;          // same as install.usable (all required engine DLLs usable)
+    InstallReport install;          // why the install is (not) usable: problem + detail
 };
 
 class GameManager {

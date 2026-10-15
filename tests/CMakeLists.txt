@@ -93,3 +93,23 @@ target_link_libraries(steam_detection_tests PRIVATE
 vtf_deploy_vtflib_runtime(steam_detection_tests)
 
 add_test(NAME steam_detection_tests COMMAND steam_detection_tests)
+
+# --- install validation tests --------------------------------------------------
+
+add_executable(install_check_tests
+    test_main.cpp
+    install_check_tests.cpp
+)
+
+target_include_directories(install_check_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/framework"
+)
+
+target_link_libraries(install_check_tests PRIVATE
+    game_profiles
+    vmtviewer_warnings
+)
+
+vtf_deploy_vtflib_runtime(install_check_tests)
+
+add_test(NAME install_check_tests COMMAND install_check_tests)

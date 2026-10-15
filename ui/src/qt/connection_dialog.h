@@ -5,9 +5,11 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QListWidget>
+#include <QComboBox>
 
 #include "ui/settings.h"
 #include "ui/connection_model.h"
+#include "profiles/game_manager.h"
 
 namespace ui {
 namespace qt {
@@ -23,11 +25,18 @@ private slots:
     void onBrowseBin();
     void onBrowseGame();
     void onAutoDetectGame();
+    void onDiscoverGames();
+    void onGameSelected(int index);
+    void populateGameCombo();
     void onTestConnection();
     void onSaveAndConnect();
 
 private:
     ui::UISettings& m_settings;
+    profiles::GameManager m_gameManager;
+
+    QComboBox* m_gameCombo = nullptr;
+    QPushButton* m_discoverBtn = nullptr;
 
     QLineEdit* m_binEdit = nullptr;
     QPushButton* m_binBrowseBtn = nullptr;

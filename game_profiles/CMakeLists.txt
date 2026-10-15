@@ -1,6 +1,7 @@
 add_library(game_profiles STATIC
     src/game_profiles.cpp
     src/game_manager.cpp
+    src/install_check.cpp
     src/steam_library.cpp
 )
 

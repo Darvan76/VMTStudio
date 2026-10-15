@@ -231,7 +231,10 @@ void GameManager::scan(const std::filesystem::path& root, int depth) {
             profile.name = profile.gameinfo_game.empty() ? profile.id : profile.gameinfo_game;
             profile.bin_dir = detect_bin_dir(root);
             profile.engine_branch = detect_engine_branch(root, profile.bin_dir);
-            profile.is_valid = !profile.bin_dir.empty();
+            // Full install validation: the report explains WHY a profile is
+            // not usable (empty folder, missing DLLs, wrong arch, ...).
+            profile.install = check_install(profile);
+            profile.is_valid = profile.install.usable;
             profiles_.push_back(profile);
         }
     }

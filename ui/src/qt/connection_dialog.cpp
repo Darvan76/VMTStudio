@@ -19,6 +19,16 @@ ConnectionDialog::ConnectionDialog(ui::UISettings& settings, QWidget* parent)
     auto* mainLayout = new QVBoxLayout(this);
     mainLayout->setSpacing(10);
 
+    // Group: Discovered games
+    auto* discoverRow = new QHBoxLayout();
+    discoverRow->addWidget(new QLabel(tr("Known games:"), this));
+    m_gameCombo = new QComboBox(this);
+    m_gameCombo->addItem(tr("(no games discovered)"));
+    discoverRow->addWidget(m_gameCombo, 1);
+    m_discoverBtn = new QPushButton(tr("Discover..."), this);
+    discoverRow->addWidget(m_discoverBtn);
+    mainLayout->addLayout(discoverRow);
+
     // Group: Paths
     auto* pathsGroup = new QGroupBox(tr("Source Engine Paths"), this);
     auto* pathsLayout = new QFormLayout(pathsGroup);
@@ -86,12 +96,22 @@ ConnectionDialog::ConnectionDialog(ui::UISettings& settings, QWidget* parent)
     connect(m_binBrowseBtn, &QPushButton::clicked, this, &ConnectionDialog::onBrowseBin);
     connect(m_gameBrowseBtn, &QPushButton::clicked, this, &ConnectionDialog::onBrowseGame);
     connect(m_autoDetectBtn, &QPushButton::clicked, this, &ConnectionDialog::onAutoDetectGame);
+    connect(m_discoverBtn, &QPushButton::clicked, this, &ConnectionDialog::onDiscoverGames);
+    connect(m_gameCombo, QOverload<int>::of(&QComboBox::activated),
+            this, &ConnectionDialog::onGameSelected);
     connect(m_testBtn, &QPushButton::clicked, this, &ConnectionDialog::onTestConnection);
     connect(m_saveBtn, &QPushButton::clicked, this, &ConnectionDialog::onSaveAndConnect);
     connect(m_cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
 
-    // If paths are populated, test right away
+    // Discover games from the last known location, then test right away.
     if (!m_settings.last_bin_dir.empty()) {
+        std::filesystem::path bin(m_settings.last_bin_dir);
+        std::filesystem::path root = bin.parent_path().parent_path();
+        if (root.empty()) {
+            root = bin;
+        }
+        m_gameManager.discover(root, 6);
+        populateGameCombo();
         onTestConnection();
     }
 }
@@ -132,6 +152,50 @@ void ConnectionDialog::onAutoDetectGame() {
     std::filesystem::path detected = ui::detect_game_dir(binPath);
     if (!detected.empty()) {
         m_gameEdit->setText(QString::fromStdWString(detected.wstring()));
+    }
+}
+
+void ConnectionDialog::onDiscoverGames() {
+    QString root = QFileDialog::getExistingDirectory(
+        this, tr("Select a Steam library or Source SDK root to scan for games"),
+        m_binEdit->text().isEmpty() ? QString() : m_binEdit->text());
+    if (root.isEmpty()) {
+        return;
+    }
+
+    m_gameManager.discover(std::filesystem::path(root.toStdWString()), 6);
+    populateGameCombo();
+}
+
+void ConnectionDialog::onGameSelected(int index) {
+    if (index <= 0 || index - 1 >= static_cast<int>(m_gameManager.profiles().size())) {
+        return;
+    }
+    const profiles::GameProfile& profile = m_gameManager.profiles()[static_cast<std::size_t>(index - 1)];
+    if (!profile.bin_dir.empty()) {
+        m_binEdit->setText(QString::fromStdWString(profile.bin_dir.wstring()));
+    }
+    if (!profile.game_dir.empty()) {
+        m_gameEdit->setText(QString::fromStdWString(profile.game_dir.wstring()));
+    }
+    onTestConnection();
+}
+
+void ConnectionDialog::populateGameCombo() {
+    m_gameCombo->clear();
+    m_gameCombo->addItem(tr("(no games discovered)"));
+    for (const profiles::GameProfile& profile : m_gameManager.profiles()) {
+        QString label = QString::fromStdString(profile.name.empty() ? profile.id : profile.name);
+        if (!profile.is_valid) {
+            // Show WHY the profile is unusable, e.g. "Game (invalid: empty folder)".
+            const char* tag = profiles::to_string(profile.install.problem);
+            if (tag != nullptr && *tag != '\0') {
+                label += tr(" (invalid: %1)").arg(QString::fromLatin1(tag));
+            } else {
+                label += tr(" (invalid)");
+            }
+        }
+        m_gameCombo->addItem(label);
     }
 }
 

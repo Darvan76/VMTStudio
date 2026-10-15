@@ -55,6 +55,7 @@ ConnectionCheck test_connection(const std::filesystem::path& bin_dir) {
         bool all_present_x86 = true;
         bool any_present = false;
         std::size_t ok_count = 0;
+        std::string missing_names;
         for (std::size_t i = 0; i < reports.size(); ++i) {
             const bridge::DllReport& report = reports[i];
             const RequiredDll& required = kRequiredDlls[i];
@@ -77,6 +78,13 @@ ConnectionCheck test_connection(const std::filesystem::path& bin_dir) {
                 if (report.arch != bridge::PeArch::X86) {
                     all_present_x86 = false;
                 }
+            } else {
+                // Simply absent from disk: name it in the summary so the user
+                // does not have to read the per-DLL lines to know what to fix.
+                if (!missing_names.empty()) {
+                    missing_names += ", ";
+                }
+                missing_names += report.name;
             }
 
             std::string line;
@@ -109,7 +117,10 @@ ConnectionCheck test_connection(const std::filesystem::path& bin_dir) {
                                   " required DLLs loaded (architecture " + check.architecture + ")"
                             : "Not connected: " +
                                   std::to_string(reports.size() - ok_count) + " of " +
-                                  std::to_string(reports.size()) + " checks failed";
+                                  std::to_string(reports.size()) + " checks failed" +
+                                  (missing_names.empty()
+                                       ? ""
+                                       : " (missing: " + missing_names + ")");
         return check;
     } catch (...) {
         check.connected = false;

@@ -15,7 +15,8 @@ connection dialog and the catalogue scan behave identically.
 
 - `GameProfile` (in `game_profiles`): immutable-ish description of one game
   installation: `id`, display `name`, `game_dir`, `bin_dir`, `engine_branch`,
-  `is_valid`.
+  `is_valid`. It also carries an `InstallReport install` (see *Install
+  validation* below) that says **why** the install is (not) usable.
 - `GameManager` (in `game_profiles`): owns a vector of `GameProfile` and can
   `discover(root, depth)` by walking a filesystem root. It also exposes the
   filesystem detection helpers as public static methods:
@@ -60,6 +61,58 @@ connection dialog and the catalogue scan behave identically.
 - Recursion depth is bounded (default 4) so scanning a Steam library root is
   cheap.
 
+## Install validation
+
+Every discovered profile is run through `profiles::check_install(profile)`
+(`game_profiles/include/profiles/install_check.h`), a read-only, best-effort,
+never-throwing check of the real files on disk. Its result is stored in
+`GameProfile::install` and `GameProfile::is_valid` is set to
+`install.usable`, so "valid" now means "the game can actually be driven by
+this application", not merely "a bin folder exists".
+
+`InstallReport` fields:
+
+- `usable`: true only when `problem == InstallProblem::None`.
+- `problem`: one of the failure categories below.
+- `detail`: human-readable, actionable sentence naming the offending path
+  (and DLLs) and the suggested fix; shown in the UI.
+- `missing_dlls`: the required DLLs that are absent (filled for `MissingDll`).
+
+Failure taxonomy (`InstallProblem`, checked in this order):
+
+| Problem | Meaning | Typical real-world cause |
+|---|---|---|
+| `None` | All checks passed; `usable == true`. | — |
+| `EmptyFolder` | Game folder missing or contains no files. | Install moved/uninstalled; stale library entry. |
+| `NoGameInfo` | Folder has content but no `gameinfo.txt`. | User picked the wrong folder (not a Source mod). |
+| `NoBin` | No `/bin` with engine DLLs in or near the folder. | Incomplete download / dedicated-server-only install. |
+| `MissingDll` | `/bin` exists but required DLLs are absent (`missing_dlls` lists them). | Partial/corrupted install; verify files in Steam. |
+| `WrongArch` | DLLs exist but are not 32-bit x86 PE images (or are corrupt). | 64-bit engine builds; this app drives the 32-bit `hlmv_backend`. |
+| `NoExports` | DLLs present with the right arch but lack the expected exports (`CreateInterface` / `CommandLine_Tier0`). | Unsupported engine build; interface layout changed. |
+
+Required DLL set (same order/names as `ui::test_connection`):
+`tier0.dll`, `vstdlib.dll`, `filesystem_stdio.dll`, `materialsystem.dll`,
+`shaderapidx9.dll`.
+
+Details of the check, in order:
+
+1. `game_dir` exists and is non-empty, else `EmptyFolder`.
+2. `gameinfo.txt` exists, else `NoGameInfo`.
+3. A bin folder is resolved: the profile's own `bin_dir`, then
+   `GameManager::detect_bin_dir`, then a plain `<game>/bin` (or `<parent>/bin`)
+   even if it lacks the marker DLLs — so the report can name what is missing.
+   Nothing resolves → `NoBin`.
+4. All required DLLs exist, else `MissingDll`.
+5. Every DLL is a valid PE image and 32-bit (x86), else `WrongArch`
+   (corrupt/non-PE files also land here).
+6. Best-effort export check: a DLL whose export table clearly lacks the
+   expected export is flagged `NoExports`; an unreadable/unparsable export
+   table is skipped rather than failed.
+
+`profiles::to_string(problem)` returns a short tag ("empty folder",
+"missing DLLs", ...) used by the connection dialog, which renders unusable
+profiles as `Name (invalid: <tag>)` in the "Known games" combo.
+
 ## Non-goals (for now)
 
 - No automatic Steam registry parsing yet; callers can pass library roots.
@@ -77,6 +130,11 @@ connection dialog and the catalogue scan behave identically.
 - Unit tests for the static helpers through the `ui::detect_bin_dir` /
   `ui::detect_game_dir` wrappers (mods, game roots, Steam libraries,
   tier0-only folders are rejected).
+- `install_check_tests.cpp` builds the fixtures from synthesized minimal PE
+  images (`tests/framework/pe_stub.h`) and covers the whole taxonomy: empty
+  folder, missing `gameinfo.txt`, no bin, missing required DLLs, 64-bit /
+  corrupt DLLs, missing exports, a fully valid install, and the
+  `GameManager::scan` wiring (`is_valid` == `install.usable`).
 - Integration tests reuse `ui::test_connection` against detected `bin_dir`.
 
 ## Next steps
