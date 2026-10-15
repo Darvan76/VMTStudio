@@ -1,4 +1,5 @@
 #include "bridge/engine_view.h"
+#include "bridge/ipc_dump.h"
 
 #include <fstream>
 #if !defined(_WIN64)
@@ -7,6 +8,10 @@
 
 #include <windows.h>
 #include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <iterator>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -18,6 +23,32 @@ namespace {
 vmt::Error engine_error(vmt::ErrorCode code, std::string message) {
     return vmt::make_error(std::move(code), std::move(message),
                            "Check the game folders in Game > Connection and try again");
+}
+
+// WM_COPYDATA round trip of the plain commands; DUMP/RAW jobs do real work in
+// the backend and get the longer deadline below (docs/IPC_PROTOCOL.md).
+constexpr unsigned kCommandTimeoutMs = 1000;
+constexpr unsigned kDumpTimeoutMs = 10000;
+
+// Response-file directory of the model viewer queries: %TEMP%\VMTStudio\ipc.
+// initialize() creates it and passes it to the backend with -ipc-dir.
+std::filesystem::path dump_dir() {
+    wchar_t temp_path[MAX_PATH] = {};
+    const DWORD length = GetTempPathW(MAX_PATH, temp_path);
+    const std::filesystem::path base =
+        (length > 0 && length < MAX_PATH) ? std::filesystem::path(temp_path)
+                                          : std::filesystem::path(L".");
+    return base / L"VMTStudio" / L"ipc";
+}
+
+// Removes every response file the backend may leave for `token`.
+void remove_dump_files(const std::string& token) {
+    constexpr const char* const kExtensions[] = { "dat", "bin", "done", "err" };
+    const std::filesystem::path dir = dump_dir();
+    for (const char* extension : kExtensions) {
+        std::error_code ec;
+        std::filesystem::remove(dir / (token + "." + extension), ec);
+    }
 }
 
 std::filesystem::path find_hlmv_backend() {
@@ -78,13 +109,20 @@ public:
                 "hlmv_backend.exe not found at " + backend_exe.string()));
         }
 
-        // 3. Build command line
+        // 3. Build command line. The model viewer queries exchange response
+        // files in %TEMP%\VMTStudio\ipc; the backend also creates the folder
+        // when it is missing, so a failure here is not fatal.
+        const std::filesystem::path ipc_dir = dump_dir();
+        std::error_code ipc_error;
+        std::filesystem::create_directories(ipc_dir, ipc_error);
+
         std::wstring cmd = L"\"" + backend_exe.wstring() + L"\"";
         if (config.child_window != nullptr) {
             cmd += L" -embed " + std::to_wstring(reinterpret_cast<uintptr_t>(config.child_window));
         }
         cmd += L" -game \"" + config.game_dir.wstring() + L"\"";
         cmd += L" -bin \"" + config.bin_dir.wstring() + L"\"";
+        cmd += L" -ipc-dir \"" + ipc_dir.wstring() + L"\"";
 
         // 4. Temporarily update PATH so child process loader finds tier0.dll, etc.
         std::wstring old_path;
@@ -432,27 +470,44 @@ public:
     }
 
     // --- Model viewer: queries ------------------------------------------------
-    // The response-file plumbing behind these four lives in the IPC protocol v2
-    // work; until then they fail cleanly instead of pretending to work.
+    // The response-file plumbing of docs/IPC_PROTOCOL.md. Each query blocks the
+    // calling thread while it polls for the backend's answer (up to 10 s), so
+    // run them on a worker thread. Concurrent calls are safe: every job
+    // generates its own token under a mutex.
 
-    vmt::Result<ModelList> list_models(const std::string&) override {
-        return vmt::Err<ModelList>(engine_error(vmt::ErrorCode::Internal,
-                                                "list_models is not implemented yet"));
+    vmt::Result<ModelList> list_models(const std::string& prefix) override {
+        if (!backend_running()) {
+            return list_models_from_disk(prefix);
+        }
+        const vmt::Result<std::string> dump = request_dump("models", prefix);
+        if (!dump.ok()) {
+            return vmt::Err<ModelList>(dump.error());
+        }
+        return parse_models_dump(dump.value());
     }
 
     vmt::Result<ModelScene> query_model_scene() override {
-        return vmt::Err<ModelScene>(engine_error(vmt::ErrorCode::Internal,
-                                                 "query_model_scene is not implemented yet"));
+        const vmt::Result<std::string> dump = request_dump("model_scene", std::string());
+        if (!dump.ok()) {
+            return vmt::Err<ModelScene>(dump.error());
+        }
+        return parse_model_scene_dump(dump.value());
     }
 
     vmt::Result<AnimState> query_anim_state() override {
-        return vmt::Err<AnimState>(engine_error(vmt::ErrorCode::Internal,
-                                                "query_anim_state is not implemented yet"));
+        const vmt::Result<std::string> dump = request_dump("anim_state", std::string());
+        if (!dump.ok()) {
+            return vmt::Err<AnimState>(dump.error());
+        }
+        return parse_anim_state_dump(dump.value());
     }
 
     vmt::Result<std::vector<unsigned char>> read_game_binary(
         const std::string& game_path) override {
-        return read_binary_file(game_path);
+        if (!backend_running()) {
+            return read_binary_file(game_path);
+        }
+        return request_raw(game_path);
     }
 
     // --- Model viewer: animation control --------------------------------------
@@ -568,7 +623,19 @@ private:
         return false;
     }
 
+    // True when the backend process is up; the query methods fall back to the
+    // local game folder when it is not.
+    bool backend_running() const {
+        return initialized_ && is_backend_alive();
+    }
+
     bool send_command(const std::string& cmd) {
+        return send_command_with_timeout(cmd, kCommandTimeoutMs);
+    }
+
+    // send_command() with an explicit WM_COPYDATA timeout; DUMP/RAW jobs run
+    // longer than the 1 s round trip of the plain commands.
+    bool send_command_with_timeout(const std::string& cmd, unsigned timeout_ms) {
         if (child_hwnd_ == nullptr || !IsWindow(child_hwnd_)) {
             return false;
         }
@@ -580,7 +647,7 @@ private:
         if (SendMessageTimeoutA(child_hwnd_, WM_COPYDATA,
                                 reinterpret_cast<WPARAM>(host_hwnd_),
                                 reinterpret_cast<LPARAM>(&cds),
-                                SMTO_ABORTIFHUNG, 1000, &result) != 0) {
+                                SMTO_ABORTIFHUNG, timeout_ms, &result) != 0) {
             return result != 0;
         }
         return false;
@@ -593,6 +660,173 @@ private:
                                                "hlmv_backend rejected: " + cmd));
         }
         return vmt::Ok();
+    }
+
+    // --- Response-file plumbing of the queries (docs/IPC_PROTOCOL.md) --------
+
+    // Token of one query job: "ui_<pid>_<counter>_<tick>", matching the
+    // [A-Za-z0-9_-]{1,64} rule. The counter is guarded so worker threads never
+    // share a token.
+    std::string generate_token() {
+        std::lock_guard<std::mutex> lock(token_mutex_);
+        ++token_counter_;
+        return "ui_" + std::to_string(GetCurrentProcessId()) + "_" +
+               std::to_string(token_counter_) + "_" + std::to_string(GetTickCount64());
+    }
+
+    // Sends a DUMP/RAW command and waits up to 10 s for `<token>.done` or
+    // `<token>.err` (polled every 5 ms). On success the path of the
+    // `<token>.<payload_extension>` file is returned; the response files are
+    // removed on every failure path.
+    vmt::Result<std::filesystem::path> run_dump_job(const std::string& command,
+                                                    const std::string& token,
+                                                    const char* payload_extension) {
+        if (!backend_running()) {
+            return vmt::Err<std::filesystem::path>(engine_error(
+                vmt::ErrorCode::RenderFailed, "hlmv_backend is not initialized or running"));
+        }
+
+        const std::filesystem::path dir = dump_dir();
+        if (!send_command_with_timeout(command, kDumpTimeoutMs)) {
+            remove_dump_files(token);
+            return vmt::Err<std::filesystem::path>(engine_error(
+                vmt::ErrorCode::RenderFailed,
+                "failed to send \"" + command + "\" to hlmv_backend"));
+        }
+
+        const std::filesystem::path done = dir / (token + ".done");
+        const std::filesystem::path err = dir / (token + ".err");
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(kDumpTimeoutMs);
+        for (;;) {
+            std::error_code ec;
+            if (std::filesystem::exists(err, ec)) {
+                std::ifstream file(err, std::ios::binary);
+                std::string message;
+                if (file) {
+                    message.assign(std::istreambuf_iterator<char>(file),
+                                   std::istreambuf_iterator<char>());
+                }
+                while (!message.empty() && (message.back() == '\n' || message.back() == '\r')) {
+                    message.pop_back();
+                }
+                remove_dump_files(token);
+                if (message.empty()) {
+                    message = "hlmv_backend rejected \"" + command + "\"";
+                }
+                return vmt::Err<std::filesystem::path>(
+                    engine_error(vmt::ErrorCode::Internal, std::move(message)));
+            }
+            if (std::filesystem::exists(done, ec)) {
+                return vmt::Ok(dir / (token + "." + payload_extension));
+            }
+            if (!is_backend_alive()) {
+                remove_dump_files(token);
+                return vmt::Err<std::filesystem::path>(engine_error(
+                    vmt::ErrorCode::RenderFailed,
+                    "hlmv_backend exited while \"" + command + "\" was in flight"));
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                remove_dump_files(token);
+                return vmt::Err<std::filesystem::path>(engine_error(
+                    vmt::ErrorCode::RenderFailed,
+                    "timed out after " + std::to_string(kDumpTimeoutMs / 1000) +
+                        " s waiting for hlmv_backend to answer \"" + command + "\""));
+            }
+            Sleep(5);
+        }
+    }
+
+    // DUMP <kind> <token> [args] -> the UTF-8 payload of `<token>.dat`.
+    vmt::Result<std::string> request_dump(const std::string& kind, const std::string& args) {
+        const std::string token = generate_token();
+        std::string command = "DUMP " + kind + " " + token;
+        if (!args.empty()) {
+            command += " " + args;
+        }
+
+        const vmt::Result<std::filesystem::path> payload = run_dump_job(command, token, "dat");
+        if (!payload.ok()) {
+            return vmt::Err<std::string>(payload.error());
+        }
+
+        std::ifstream file(payload.value(), std::ios::binary);
+        std::string text;
+        const bool read_ok = static_cast<bool>(file);
+        if (file) {
+            text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        }
+        remove_dump_files(token);
+        if (!read_ok) {
+            return vmt::Err<std::string>(engine_error(
+                vmt::ErrorCode::IoError,
+                "failed to read the hlmv_backend dump file " + payload.value().string()));
+        }
+        return vmt::Ok(std::move(text));
+    }
+
+    // RAW <token> <game path> -> the bytes of `<token>.bin`.
+    vmt::Result<std::vector<unsigned char>> request_raw(const std::string& game_path) {
+        const std::string token = generate_token();
+        const std::string command = "RAW " + token + " " + game_path;
+
+        const vmt::Result<std::filesystem::path> payload = run_dump_job(command, token, "bin");
+        if (!payload.ok()) {
+            return vmt::Err<std::vector<unsigned char>>(payload.error());
+        }
+
+        std::ifstream file(payload.value(), std::ios::binary);
+        std::vector<unsigned char> bytes;
+        const bool read_ok = static_cast<bool>(file);
+        if (file) {
+            bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        }
+        remove_dump_files(token);
+        if (!read_ok) {
+            return vmt::Err<std::vector<unsigned char>>(engine_error(
+                vmt::ErrorCode::IoError,
+                "failed to read the hlmv_backend binary file " + payload.value().string()));
+        }
+        return vmt::Ok(std::move(bytes));
+    }
+
+    // list_models() without a backend: walks the loose <game_dir>/models tree.
+    // VPK content is only visible to the backend, so everything found here is
+    // reported as loose.
+    vmt::Result<ModelList> list_models_from_disk(const std::string& prefix) const {
+        if (config_.game_dir.empty()) {
+            return vmt::Err<ModelList>(engine_error(
+                vmt::ErrorCode::EngineInitFailed,
+                "hlmv_backend is not running and no game folder is set to scan for models"));
+        }
+
+        ModelList models;
+        std::error_code dir_error;
+        std::filesystem::recursive_directory_iterator it(config_.game_dir / L"models", dir_error);
+        const std::filesystem::recursive_directory_iterator end;
+        while (it != end) {
+            const std::filesystem::directory_entry entry = *it;
+            it.increment(dir_error);
+            if (dir_error) break;
+
+            std::error_code type_error;
+            if (!entry.is_regular_file(type_error) || type_error) continue;
+            if (entry.path().extension() != L".mdl") continue;
+
+            std::error_code relative_error;
+            const std::filesystem::path relative =
+                std::filesystem::relative(entry.path(), config_.game_dir, relative_error);
+            if (relative_error) continue;
+
+            std::string name = relative.generic_string();
+            if (!prefix.empty() && name.compare(0, prefix.size(), prefix) != 0) continue;
+
+            ModelEntry model;
+            model.name = std::move(name);
+            model.loose = true;
+            models.entries.push_back(std::move(model));
+        }
+        return vmt::Ok(std::move(models));
     }
 
     void terminate_backend() {
@@ -621,6 +855,11 @@ private:
     HWND host_hwnd_ = nullptr;
     HWND child_hwnd_ = nullptr;
     PROCESS_INFORMATION process_info_{};
+
+    // Query job state, shared by the worker threads that call the four
+    // blocking query methods.
+    std::mutex token_mutex_;
+    std::uint64_t token_counter_ = 0;
 };
 
 } // namespace

@@ -121,13 +121,15 @@ void ViewportWidget::paintEvent(QPaintEvent* event) {
     painter.setFont(font);
     painter.setPen(QColor(110, 110, 115));
     QRect subRect = textRect.adjusted(0, 40, 0, 0);
-    painter.drawText(subRect, Qt::AlignCenter, tr("Drop a .vmt file here or use File > Open"));
+    painter.drawText(subRect, Qt::AlignCenter, tr("Drop a .vmt or .mdl file here, or use File > Open"));
 }
 
 void ViewportWidget::dragEnterEvent(QDragEnterEvent* event) {
     if (event->mimeData()->hasUrls()) {
         for (const QUrl& url : event->mimeData()->urls()) {
-            if (url.toLocalFile().endsWith(".vmt", Qt::CaseInsensitive)) {
+            const QString path = url.toLocalFile();
+            if (path.endsWith(".vmt", Qt::CaseInsensitive) ||
+                path.endsWith(".mdl", Qt::CaseInsensitive)) {
                 event->acceptProposedAction();
                 return;
             }
@@ -139,15 +141,37 @@ void ViewportWidget::dragEnterEvent(QDragEnterEvent* event) {
 void ViewportWidget::dropEvent(QDropEvent* event) {
     if (event->mimeData()->hasUrls()) {
         for (const QUrl& url : event->mimeData()->urls()) {
-            QString path = url.toLocalFile();
+            const QString path = url.toLocalFile();
+            if (path.isEmpty()) {
+                continue;
+            }
             if (path.endsWith(".vmt", Qt::CaseInsensitive)) {
                 emit fileDropped(path);
+                event->acceptProposedAction();
+                return;
+            }
+            if (path.endsWith(".mdl", Qt::CaseInsensitive)) {
+                emit modelDropped(path);
                 event->acceptProposedAction();
                 return;
             }
         }
     }
     QWidget::dropEvent(event);
+}
+
+bool ViewportWidget::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
+    // The native renderer posts WM_USER+422 while a model is playing (see
+    // docs/IPC_PROTOCOL.md). The tick is re-emitted as a signal and the message
+    // is never swallowed: return false so the default handling still sees it.
+    if (eventType == "windows_generic_MSG" && message != nullptr) {
+        const MSG* msg = static_cast<const MSG*>(message);
+        if (msg->message == WM_USER + 422u) {
+            emit playheadTick(static_cast<int>(msg->wParam), static_cast<qintptr>(msg->lParam));
+            return false;
+        }
+    }
+    return QWidget::nativeEvent(eventType, message, result);
 }
 
 } // namespace qt

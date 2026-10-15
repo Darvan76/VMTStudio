@@ -34,12 +34,18 @@ public:
 signals:
     void viewportResized(int width, int height);
     void fileDropped(const QString& filePath);
+    // A .mdl file was dropped on the viewport; the path is a local disk path.
+    void modelDropped(const QString& filePath);
+    // Live playback tick posted by the backend (WM_USER+422): the current frame
+    // and cycle * 10000. Best-effort; the receiver may ignore it entirely.
+    void playheadTick(int frame, qintptr cycle_x10000);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
 
 private slots:
     void onResizeTimeout();

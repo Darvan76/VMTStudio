@@ -4,12 +4,20 @@
 #include "vmt_highlighter.h"
 #include "preview_options_dialog.h"
 #include "material_browser_dialog.h"
+#include "model_browser_dialog.h"
+#include "model_materials_dock.h"
+#include "animation_dock.h"
+#include "export_materials_dialog.h"
 #include "connection_dialog.h"
 #include "about_dialog.h"
 #include "notification_popup.h"
 #include "app_log.h"
+#include "ui/animation_model.h"
 #include "ui/shader_catalog.h"
 #include "vmt/document.h"
+#include <algorithm>
+#include <cctype>
+#include <iterator>
 #include <fstream>
 #include <thread>
 
@@ -19,6 +27,7 @@
 #include <QStatusBar>
 #include <QSplitter>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QCloseEvent>
 #include <QHeaderView>
@@ -82,6 +91,59 @@ std::filesystem::path app_data_dir() {
         return std::filesystem::temp_directory_path() / "VMTStudio";
     }
     return std::filesystem::path(buffer) / L"VMTStudio";
+}
+
+// <preview root>/materials/<game-relative material name>.vmt: the loose override
+// the engine resolves first for a model material. Empty when the name cannot be
+// used as a relative path (absolute segments, "..", drive letters).
+std::filesystem::path preview_override_path(const std::filesystem::path& preview_root,
+                                            const std::string& material_name) {
+    if (preview_root.empty() || material_name.empty()) {
+        return {};
+    }
+    std::filesystem::path target = preview_root / L"materials";
+    std::string component;
+    for (std::size_t i = 0; i <= material_name.size(); ++i) {
+        const char c = i < material_name.size() ? material_name[i] : '/';
+        if (c == '/' || c == '\\') {
+            if (component.empty() || component == ".") {
+                // skip empty / current-directory components
+            } else if (component == "..") {
+                return {};
+            } else {
+                target /= std::filesystem::path(component);
+            }
+            component.clear();
+        } else if (c == ':') {
+            return {};
+        } else {
+            component += c;
+        }
+    }
+    target += L".vmt";
+    return target;
+}
+
+// The transparent stand-in the experimental isolate mode writes for every
+// material of the model except the kept one.
+constexpr const char* kTransparentVmt =
+    "\"UnlitGeneric\"\n"
+    "{\n"
+    "    \"$basetexture\" \"vgui/white\"\n"
+    "    \"$translucent\" \"1\"\n"
+    "    \"$alpha\" \"0\"\n"
+    "}\n";
+
+// Case-insensitive equality for game-relative material names (the engine file
+// system is case-insensitive).
+bool material_name_equal(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    return std::equal(a.begin(), a.end(), b.begin(), [](char ca, char cb) {
+        return std::tolower(static_cast<unsigned char>(ca)) ==
+               std::tolower(static_cast<unsigned char>(cb));
+    });
 }
 
 } // namespace
@@ -152,6 +214,12 @@ MainWindow::MainWindow(QWidget* parent)
 MainWindow::~MainWindow() {
     *m_alive = false;
     saveSettings();
+    // The animation dock must never outlive the engine it talks to.
+    if (m_animationDock) {
+        m_animationDock->setEngine(nullptr);
+    }
+    // Remove the experimental isolate substitutes from the preview root.
+    cleanupIsolation(false);
     if (m_engine) {
         m_engine->shutdown();
         m_engine.reset();
@@ -204,6 +272,10 @@ void MainWindow::setupUi() {
             this, &MainWindow::onViewportResized);
     connect(m_viewport, &ViewportWidget::fileDropped,
             this, &MainWindow::onMaterialDropped);
+    connect(m_viewport, &ViewportWidget::modelDropped,
+            this, &MainWindow::onModelDropped);
+    connect(m_viewport, &ViewportWidget::playheadTick,
+            this, &MainWindow::onPlayheadTick);
 
     // Connect code editor signals
     connect(m_codeEditor, &QPlainTextEdit::textChanged,
@@ -276,6 +348,15 @@ void MainWindow::setupMenus() {
     advAction->setChecked(m_showAdvanced);
 
     viewMenu->addAction(tr("&Reset Layout"), this, &MainWindow::onResetLayout);
+    viewMenu->addSeparator();
+
+    m_materialsDockAction = viewMenu->addAction(tr("&Materials Dock"));
+    m_materialsDockAction->setCheckable(true);
+    m_materialsDockAction->setChecked(true);
+
+    m_animationDockAction = viewMenu->addAction(tr("&Animation Dock"));
+    m_animationDockAction->setCheckable(true);
+    m_animationDockAction->setChecked(false);
 
     // --- Preview Menu ---
     auto* previewMenu = menuBar()->addMenu(tr("&Preview"));
@@ -297,6 +378,8 @@ void MainWindow::setupMenus() {
 
     auto* animMenu = previewMenu->addMenu(tr("&Animation"));
     m_animAction = animMenu->addAction(tr("Play / Pause"), QKeySequence(Qt::Key_Space), this, &MainWindow::onToggleAnimation);
+    animMenu->addAction(tr("Halve Playback Speed"), QKeySequence(Qt::Key_BracketLeft), this, &MainWindow::onAnimationSpeedDown);
+    animMenu->addAction(tr("Double Playback Speed"), QKeySequence(Qt::Key_BracketRight), this, &MainWindow::onAnimationSpeedUp);
     animMenu->addAction(tr("0.5x Speed"), [this]() { onSetAnimationSpeed(0.5f); });
     animMenu->addAction(tr("1.0x Normal Speed"), [this]() { onSetAnimationSpeed(1.0f); });
     animMenu->addAction(tr("2.0x Speed"), [this]() { onSetAnimationSpeed(2.0f); });
@@ -305,10 +388,21 @@ void MainWindow::setupMenus() {
     previewMenu->addAction(tr("Preview &Options..."), QKeySequence(Qt::CTRL | Qt::Key_P), this, &MainWindow::onOpenPreviewOptions);
     previewMenu->addAction(tr("Load Custom &Model (.mdl)..."), QKeySequence(Qt::CTRL | Qt::Key_M), this, &MainWindow::onLoadModel);
 
+    // --- Model Menu ---
+    auto* modelMenu = menuBar()->addMenu(tr("&Model"));
+    modelMenu->addAction(tr("&Open Model..."), QKeySequence(Qt::Key_F4), this, &MainWindow::onOpenModel);
+    m_closeModelAction = modelMenu->addAction(tr("&Close Model"), this, &MainWindow::onCloseModel);
+    m_closeModelAction->setEnabled(false);
+    m_recentModelsMenu = modelMenu->addMenu(tr("Recent &Models"));
+    updateRecentModelsMenu();
+
     // --- Tools Menu ---
     auto* toolsMenu = menuBar()->addMenu(tr("&Tools"));
     toolsMenu->addAction(tr("Material &Browser..."), QKeySequence(Qt::Key_F3), this, &MainWindow::onOpenMaterialBrowser);
     toolsMenu->addAction(tr("&Validate Material"), QKeySequence(Qt::Key_F7), this, &MainWindow::onValidateMaterial);
+    toolsMenu->addSeparator();
+    m_exportMaterialsAction = toolsMenu->addAction(tr("&Export Model Materials..."), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E), this, &MainWindow::onExportModelMaterials);
+    m_exportMaterialsAction->setEnabled(false);
     toolsMenu->addSeparator();
     toolsMenu->addAction(tr("Toggle &Debug Console"), QKeySequence(Qt::Key_F12), this, &MainWindow::onToggleDebugConsole);
 
@@ -383,6 +477,35 @@ void MainWindow::setupDock() {
     m_validationDock->setWidget(m_validationTable);
     addDockWidget(Qt::BottomDockWidgetArea, m_validationDock);
     m_validationDock->hide(); // Hidden by default until validation is run
+
+    // --- Model viewer docks -------------------------------------------------
+    m_materialsDock = new ModelMaterialsDock(this);
+    addDockWidget(Qt::LeftDockWidgetArea, m_materialsDock);
+    m_materialsDock->setEnabled(false); // enabled only while a model is loaded
+    connect(m_materialsDock, &ModelMaterialsDock::materialSelected,
+            this, &MainWindow::onModelMaterialSelected);
+    connect(m_materialsDock, &ModelMaterialsDock::materialActivated,
+            this, &MainWindow::onModelMaterialActivated);
+    connect(m_materialsDock, &ModelMaterialsDock::materialExportRequested,
+            this, &MainWindow::onModelMaterialsExported);
+    connect(m_materialsDock, &ModelMaterialsDock::isolateToggled,
+            this, &MainWindow::onIsolateToggled);
+
+    m_animationDock = new AnimationDock(this);
+    addDockWidget(Qt::RightDockWidgetArea, m_animationDock);
+    m_animationDock->setEngine(m_engine.get());
+    connect(m_animationDock, &AnimationDock::statusMessage, this, [this](const QString& text) {
+        statusBar()->showMessage(text, 4000);
+    });
+    m_animationDock->hide(); // hidden until a model is loaded
+
+    // Keep the View menu toggles and the dock visibility in sync both ways.
+    connect(m_materialsDockAction, &QAction::toggled, m_materialsDock, &QWidget::setVisible);
+    connect(m_materialsDock, &QDockWidget::visibilityChanged, m_materialsDockAction, &QAction::setChecked);
+    connect(m_animationDockAction, &QAction::toggled, m_animationDock, &QWidget::setVisible);
+    connect(m_animationDock, &QDockWidget::visibilityChanged, m_animationDockAction, &QAction::setChecked);
+
+    updateModelActions();
 }
 
 void MainWindow::loadSettings() {
@@ -476,6 +599,15 @@ void MainWindow::addRecentFile(const QString& path) {
 }
 
 void MainWindow::updateTitle() {
+    if (!m_currentModelName.isEmpty()) {
+        QString title = tr("VMT-Studio - %1").arg(m_currentModelName);
+        if (m_session.dirty()) {
+            title += " *";
+        }
+        setWindowTitle(title);
+        return;
+    }
+
     QString title = tr("VMT-Studio");
     if (!m_session.path().empty()) {
         title = QString::fromStdWString(m_session.path().filename().wstring()) + " - " + title;
@@ -563,6 +695,9 @@ bool MainWindow::ensureEngine(QString& error) {
     (void)m_engine->set_render_mode(m_currentRenderMode);
 
     m_viewport->setEngineView(m_engine.get());
+    if (m_animationDock) {
+        m_animationDock->setEngine(m_engine.get());
+    }
     (void)m_engine->resize(0, 0);
     updateStatus();
     return true;
@@ -653,10 +788,21 @@ void MainWindow::ensureEngineAsync() {
             (void)m_engine->set_render_mode(renderMode);
 
             m_viewport->setEngineView(m_engine.get());
+            if (m_animationDock) {
+                m_animationDock->setEngine(m_engine.get());
+            }
             (void)m_engine->resize(0, 0);
             updateStatus();
 
-            syncPreview();
+            // A model requested while the engine was starting owns the
+            // viewport; the flat material preview must not override it.
+            if (!m_pendingModelPath.isEmpty()) {
+                const QString pending = m_pendingModelPath;
+                m_pendingModelPath.clear();
+                loadModelNow(pending);
+            } else {
+                syncPreview();
+            }
         }, Qt::QueuedConnection);
     }).detach();
 }
@@ -756,6 +902,40 @@ void MainWindow::onPreviewSyncTimeout() {
         return;
     }
 
+    // A model load queued while the engine was starting owns the viewport as
+    // soon as it begins; the flat material preview must not override it.
+    if (!m_pendingModelPath.isEmpty()) {
+        const QString pending = m_pendingModelPath;
+        m_pendingModelPath.clear();
+        loadModelNow(pending);
+        return;
+    }
+
+    // A material of the loaded model is previewed through its loose override at
+    // the material's own game-relative path (docs/IPC_PROTOCOL.md): drop any
+    // forced material and re-resolve just that slot, so the engine keeps
+    // painting the model with its own materials.
+    if (!m_currentModelMaterial.empty()) {
+        const std::string modelMaterial = m_currentModelMaterial;
+        if (m_session.dirty()) {
+            if (!m_session.text_is_valid()) {
+                statusBar()->showMessage(tr("Preview paused: fix the VMT syntax error first."), 4000);
+                return;
+            }
+            const vmt::Result<void> writeRes =
+                ui::write_preview_material_at(m_previewRoot, modelMaterial, m_session.text());
+            if (!writeRes) {
+                statusBar()->showMessage(
+                    tr("Preview update failed: %1")
+                        .arg(QString::fromStdString(writeRes.error().message)), 5000);
+                return;
+            }
+        }
+        (void)m_engine->set_material("");
+        (void)m_engine->reload_material_by_name(modelMaterial);
+        return;
+    }
+
     std::string materialName = "vmtviewer_preview";
     if (!m_session.path().empty()) {
         materialName = ui::vtf_texture_path(m_session.path());
@@ -817,6 +997,7 @@ void MainWindow::onNewFile() {
         "}\n";
 
     (void)m_session.open_text(defaultVmt, "untitled.vmt");
+    m_currentModelMaterial.clear();
 
     m_suppressSync = true;
     m_codeEditor->setPlainText(QString::fromStdString(defaultVmt));
@@ -841,6 +1022,7 @@ bool MainWindow::openFile(const QString& filePath) {
 
     addRecentFile(filePath);
     refreshMaterialRoots();
+    m_currentModelMaterial.clear();
 
     if (m_engine && m_engine->initialized()) {
         const auto& matRoot = m_session.material_root();
@@ -882,6 +1064,8 @@ bool MainWindow::openGameMaterial(const QString& materialName) {
     }
 
     (void)m_session.open_text(readRes.value(), materialName.toStdString() + ".vmt");
+    // Materials of the loaded model keep the in-place override path on save.
+    m_currentModelMaterial = containsModelMaterial(materialName) ? materialName.toStdString() : std::string();
 
     m_suppressSync = true;
     m_codeEditor->setPlainText(QString::fromStdString(m_session.text()));
@@ -905,6 +1089,10 @@ void MainWindow::onOpenFile() {
 }
 
 void MainWindow::onSaveFile() {
+    if (!m_currentModelMaterial.empty()) {
+        saveModelMaterialOverride();
+        return;
+    }
     if (m_session.path().empty()) {
         onSaveFileAs();
         return;
@@ -928,6 +1116,8 @@ void MainWindow::onSaveFileAs() {
         QMessageBox::warning(this, tr("Save Failed"), QString::fromStdString(res.error().message));
     } else {
         addRecentFile(file);
+        // The session now targets an explicit file, not a model override.
+        m_currentModelMaterial.clear();
     }
     updateTitle();
     updateStatus();
@@ -1085,9 +1275,7 @@ void MainWindow::onToggleAnimation() {
 }
 
 void MainWindow::onSetAnimationSpeed(float speed) {
-    if (m_engine && m_engine->initialized()) {
-        (void)m_engine->set_speed(speed);
-    }
+    setAnimationSpeedScale(speed);
 }
 
 void MainWindow::onOpenPreviewOptions() {
@@ -1139,9 +1327,589 @@ void MainWindow::onLoadModel() {
     QString file = QFileDialog::getOpenFileName(
         this, tr("Select Source Engine Model (.mdl)"),
         QString(), tr("Source Models (*.mdl);;All Files (*.*)"));
-    if (!file.isEmpty() && m_engine && m_engine->initialized()) {
-        (void)m_engine->set_model(std::filesystem::path(file.toStdWString()));
+    if (!file.isEmpty()) {
+        // Route through openModel so the docks, recents and title stay in sync.
+        openModel(file);
     }
+}
+
+// --- Model viewer -------------------------------------------------------------
+
+void MainWindow::onOpenModel() {
+    if (!m_engine || !m_engine->initialized()) {
+        QString err;
+        if (!ensureEngine(err)) {
+            statusBar()->showMessage(
+                tr("The model browser needs a connected engine: %1").arg(err), 6000);
+            return;
+        }
+    }
+
+    ModelBrowserDialog dlg(m_engine.get(), this);
+    connect(&dlg, &ModelBrowserDialog::modelSelected, this, &MainWindow::onModelSelected);
+    dlg.exec();
+}
+
+void MainWindow::onModelSelected(const QString& gameRelative, bool loose) {
+    Q_UNUSED(loose); // vpk and loose models load through the same engine path
+    openModel(gameRelative);
+}
+
+void MainWindow::onCloseModel() {
+    if (m_currentModelName.isEmpty() && m_requestedModelPath.isEmpty()) {
+        return;
+    }
+    cleanupIsolation(true);
+    clearModelView();
+    statusBar()->showMessage(tr("Model closed."), 3000);
+}
+
+void MainWindow::onRecentModelTriggered() {
+    auto* action = qobject_cast<QAction*>(sender());
+    if (!action) {
+        return;
+    }
+    const QString path = action->data().toString();
+    if (path.isEmpty()) {
+        return;
+    }
+
+    // Absolute entries can disappear between sessions; drop those instead of
+    // turning the menu into a list of broken entries.
+    if (QFileInfo(path).isAbsolute() && !QFileInfo::exists(path)) {
+        m_settings.recent_models.erase(
+            std::remove(m_settings.recent_models.begin(), m_settings.recent_models.end(),
+                        path.toStdString()),
+            m_settings.recent_models.end());
+        updateRecentModelsMenu();
+        saveSettings();
+        statusBar()->showMessage(tr("The model \"%1\" no longer exists.").arg(path), 5000);
+        return;
+    }
+
+    openModel(path);
+}
+
+void MainWindow::openModel(const QString& modelPath) {
+    const QString path = modelPath.trimmed();
+    if (path.isEmpty()) {
+        return;
+    }
+
+    if (m_engine && m_engine->initialized()) {
+        loadModelNow(path);
+        return;
+    }
+
+    if (m_engineConnecting) {
+        m_pendingModelPath = path;
+        statusBar()->showMessage(
+            tr("Connecting to the engine: \"%1\" will load automatically.").arg(path), 5000);
+        return;
+    }
+
+    QString err;
+    if (ensureEngine(err)) {
+        loadModelNow(path);
+        return;
+    }
+
+    // Not configured yet or initialization failed: remember the request; the
+    // asynchronous connect (started here or later after Game > Connection
+    // Settings) picks it up.
+    m_pendingModelPath = path;
+    ensureEngineAsync();
+    statusBar()->showMessage(
+        tr("\"%1\" is queued and will load once the engine is ready.").arg(path), 6000);
+}
+
+void MainWindow::updateRecentModelsMenu() {
+    if (!m_recentModelsMenu) {
+        return;
+    }
+    m_recentModelsMenu->clear();
+    if (m_settings.recent_models.empty()) {
+        auto* action = m_recentModelsMenu->addAction(tr("(No recent models)"));
+        action->setEnabled(false);
+        return;
+    }
+    for (const std::string& pathStr : m_settings.recent_models) {
+        const QString path = QString::fromStdString(pathStr);
+        auto* action = m_recentModelsMenu->addAction(path, this, &MainWindow::onRecentModelTriggered);
+        action->setData(path);
+    }
+}
+
+void MainWindow::addRecentModel(const QString& path) {
+    if (path.isEmpty()) {
+        return;
+    }
+    m_settings.last_model = path.toStdString();
+    m_settings.remember_model(m_settings.last_model);
+    updateRecentModelsMenu();
+    saveSettings();
+}
+
+void MainWindow::loadModelNow(const QString& modelPath) {
+    if (!m_engine || !m_engine->initialized()) {
+        return;
+    }
+
+    QString target = modelPath.trimmed();
+    if (target.isEmpty()) {
+        return;
+    }
+
+    // Absolute disk paths below the game folder are addressed by their
+    // game-relative name: the backend resolves those through the engine file
+    // system (VPK entries included), a bare disk path would miss mounted VPKs.
+    if (QFileInfo(target).isAbsolute()) {
+        const QString relative = gameRelativePath(target);
+        if (!relative.isEmpty()) {
+            target = relative;
+        }
+    }
+    target.replace('\\', '/');
+
+    // A new model replaces the current one: drop the previous isolation, stale
+    // scene state and any queued preview sync that would force a material over
+    // the fresh model.
+    cleanupIsolation(true);
+    clearModelView();
+    m_previewSyncTimer->stop();
+
+    m_requestedModelPath = target;
+    const vmt::Result<void> loadRes =
+        m_engine->set_model(std::filesystem::path(target.toStdWString()));
+    if (!loadRes) {
+        const QString message = QString::fromStdString(loadRes.error().message);
+        m_requestedModelPath.clear();
+        updateModelActions();
+        statusBar()->showMessage(tr("Cannot load model \"%1\": %2").arg(target, message), 8000);
+        return;
+    }
+
+    // Drop a forced material left over from the flat preview flow
+    // (docs/IPC_PROTOCOL.md: SET_MATERIAL with an empty name clears it).
+    (void)m_engine->set_material("");
+
+    updateModelActions();
+    statusBar()->showMessage(tr("Loading model \"%1\"...").arg(target), 4000);
+    queryModelSceneAsync();
+}
+
+void MainWindow::queryModelSceneAsync() {
+    if (!m_engine || !m_engine->initialized()) {
+        return;
+    }
+    bridge::EngineView* engine = m_engine.get();
+    const quint64 generation = m_modelSceneGeneration;
+    auto alive = m_alive;
+
+    std::thread([this, engine, generation, alive]() {
+        auto result = engine->query_model_scene();
+        if (!*alive) {
+            return;
+        }
+        if (result) {
+            auto scene = std::make_shared<bridge::ModelScene>(std::move(result.value()));
+            QMetaObject::invokeMethod(qApp, [this, alive, generation, scene]() {
+                if (!*alive || generation != m_modelSceneGeneration) {
+                    return; // superseded by a newer load or a close
+                }
+                onModelSceneLoaded(scene);
+            }, Qt::QueuedConnection);
+        } else {
+            const std::string message = result.error().message;
+            QMetaObject::invokeMethod(qApp, [this, alive, generation, message]() {
+                if (!*alive || generation != m_modelSceneGeneration) {
+                    return;
+                }
+                onModelSceneFailed(QString::fromStdString(message));
+            }, Qt::QueuedConnection);
+        }
+    }).detach();
+}
+
+void MainWindow::onModelSceneLoaded(const std::shared_ptr<bridge::ModelScene>& scene) {
+    if (!scene || scene->model_name.empty()) {
+        onModelSceneFailed(tr("The engine did not report a loaded model."));
+        return;
+    }
+
+    m_modelScene = scene;
+    m_currentModelName = QString::fromStdString(scene->model_name);
+    m_requestedModelPath = m_currentModelName;
+
+    if (m_materialsDock) {
+        m_materialsDock->setScene(*scene);
+        m_materialsDock->setEnabled(true);
+    }
+    if (m_animationDock) {
+        m_animationDock->setScene(*scene);
+        m_animationDock->show();
+    }
+
+    addRecentModel(m_currentModelName);
+    updateModelActions();
+    updateTitle();
+    updateStatus();
+    statusBar()->showMessage(
+        tr("Model \"%1\" loaded: %2 material(s), %3 sequence(s).")
+            .arg(m_currentModelName)
+            .arg(static_cast<int>(scene->materials.size()))
+            .arg(static_cast<int>(scene->sequences.size())),
+        6000);
+}
+
+void MainWindow::onModelSceneFailed(const QString& error) {
+    const QString attempted = m_requestedModelPath;
+    clearModelView();
+    statusBar()->showMessage(
+        tr("Cannot load model \"%1\": %2").arg(attempted, error), 8000);
+}
+
+void MainWindow::clearModelView() {
+    ++m_modelSceneGeneration; // invalidates any in-flight scene query
+
+    m_modelScene.reset();
+    m_currentModelName.clear();
+    m_requestedModelPath.clear();
+    m_currentModelMaterial.clear();
+
+    if (m_materialsDock) {
+        m_materialsDock->clear();
+        m_materialsDock->setEnabled(false);
+    }
+    if (m_animationDock) {
+        m_animationDock->clear();
+        m_animationDock->hide();
+    }
+
+    updateModelActions();
+    updateTitle();
+    updateStatus();
+}
+
+void MainWindow::updateModelActions() {
+    const bool hasModel = !m_currentModelName.isEmpty() || !m_requestedModelPath.isEmpty();
+    if (m_closeModelAction) {
+        m_closeModelAction->setEnabled(hasModel);
+    }
+    if (m_exportMaterialsAction) {
+        m_exportMaterialsAction->setEnabled(
+            m_modelScene != nullptr && m_engine != nullptr && m_engine->initialized());
+    }
+}
+
+QString MainWindow::gameRelativePath(const QString& diskPath) const {
+    if (diskPath.isEmpty() || m_settings.last_game_dir.empty()) {
+        return QString();
+    }
+
+    std::error_code ec;
+    const std::filesystem::path file(diskPath.toStdWString());
+    const std::filesystem::path root(m_settings.last_game_dir);
+    const std::filesystem::path relative = std::filesystem::relative(file, root, ec);
+    if (ec || relative.empty() || relative.is_absolute() || *relative.begin() == L"..") {
+        return QString(); // outside the game folder (or not resolvable)
+    }
+    return QString::fromStdWString(relative.generic_wstring());
+}
+
+bool MainWindow::containsModelMaterial(const QString& gameName) const {
+    if (!m_modelScene || gameName.isEmpty()) {
+        return false;
+    }
+    const std::string name = gameName.toStdString();
+    for (const bridge::ModelMaterial& material : m_modelScene->materials) {
+        if (material_name_equal(material.name, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::onModelMaterialSelected(const QString& gameName) {
+    if (gameName.isEmpty() || m_currentModelName.isEmpty()) {
+        return; // the dock cleared its own selection
+    }
+    openModelMaterial(gameName, false);
+}
+
+void MainWindow::onModelMaterialActivated(const QString& gameName) {
+    if (gameName.isEmpty() || m_currentModelName.isEmpty()) {
+        return;
+    }
+    openModelMaterial(gameName, true);
+}
+
+bool MainWindow::openModelMaterial(const QString& gameName, bool focusEditor) {
+    if (gameName.isEmpty() || m_currentModelName.isEmpty()) {
+        return false;
+    }
+    const std::string name = gameName.toStdString();
+
+    if (m_currentModelMaterial == name) {
+        // Already open: keep the editor buffer (a re-activation must not load
+        // over unsynced keystrokes), only re-assert the model preview.
+        if (focusEditor) {
+            m_codeEditor->setFocus();
+        }
+        if (m_engine && m_engine->initialized()) {
+            (void)m_engine->set_material("");
+        }
+        return true;
+    }
+
+    // Leaving a material: flush its latest valid text to the override before
+    // the editor buffer is replaced. A failed write aborts the switch so
+    // unsynced edits cannot slip away.
+    if (!m_currentModelMaterial.empty() &&
+        m_session.dirty() && m_session.text_is_valid()) {
+        const std::string previous = m_currentModelMaterial;
+        const vmt::Result<void> flushRes =
+            ui::write_preview_material_at(m_previewRoot, previous, m_session.text());
+        if (!flushRes) {
+            statusBar()->showMessage(
+                tr("Cannot switch material: the pending edits of \"%1\" could not be written (%2).")
+                    .arg(QString::fromStdString(previous),
+                         QString::fromStdString(flushRes.error().message)),
+                8000);
+            return false;
+        }
+        if (m_engine && m_engine->initialized()) {
+            (void)m_engine->reload_material_by_name(previous);
+        }
+    }
+
+    // Prefer the loose override (the preview root outranks the game files):
+    // reopening a material shows what was written last, the engine copy only
+    // seeds a material that has no override yet. On the x64 UI the engine copy
+    // is read from the game folder on disk.
+    std::string text;
+    bool loaded = false;
+    const std::filesystem::path overrideFile = preview_override_path(m_previewRoot, name);
+    if (!overrideFile.empty()) {
+        std::ifstream stream(overrideFile, std::ios::binary);
+        if (stream) {
+            std::string contents((std::istreambuf_iterator<char>(stream)),
+                                 std::istreambuf_iterator<char>());
+            if (!contents.empty()) {
+                text = std::move(contents);
+                loaded = true;
+            }
+        }
+    }
+
+    if (!loaded) {
+        if (!m_engine || !m_engine->initialized()) {
+            statusBar()->showMessage(
+                tr("Material \"%1\" needs a connected engine to read.").arg(gameName), 5000);
+            return false;
+        }
+        auto readRes = m_engine->read_text_file("materials/" + name + ".vmt");
+        if (!readRes) {
+            statusBar()->showMessage(
+                tr("Cannot read material \"%1\": %2")
+                    .arg(gameName, QString::fromStdString(readRes.error().message)),
+                6000);
+            return false;
+        }
+        text = std::move(readRes.value());
+    }
+
+    auto openRes = m_session.open_text(std::move(text), name + ".vmt");
+    if (!openRes) {
+        statusBar()->showMessage(
+            tr("Cannot open material \"%1\": %2")
+                .arg(gameName, QString::fromStdString(openRes.error().message)),
+            6000);
+        return false;
+    }
+    m_currentModelMaterial = name;
+
+    m_suppressSync = true;
+    m_codeEditor->setPlainText(QString::fromStdString(m_session.text()));
+    m_inspector->updateFromDocument(m_session.document(), m_schemas, m_showAdvanced);
+    m_suppressSync = false;
+
+    // The model keeps its own materials; only the edited slot is re-resolved
+    // (the forced material preview is dropped, docs/IPC_PROTOCOL.md).
+    if (m_engine && m_engine->initialized()) {
+        (void)m_engine->set_material("");
+        (void)m_engine->reload_material_by_name(name);
+    }
+
+    if (focusEditor) {
+        m_codeEditor->setFocus();
+    }
+    updateTitle();
+    updateStatus();
+    checkBrushMaterial(true);
+    return true;
+}
+
+void MainWindow::saveModelMaterialOverride() {
+    const std::string name = m_currentModelMaterial;
+    if (name.empty()) {
+        return;
+    }
+
+    const std::filesystem::path file = preview_override_path(m_previewRoot, name);
+    if (file.empty()) {
+        QMessageBox::warning(this, tr("Save Failed"),
+            tr("The material name cannot be mapped to a preview override path."));
+        return;
+    }
+
+    // save_as() writes atomically and marks the session clean; the written
+    // file IS the in-place override the engine re-reads.
+    auto res = m_session.save_as(file);
+    if (!res) {
+        QMessageBox::warning(this, tr("Save Failed"), QString::fromStdString(res.error().message));
+        return;
+    }
+
+    if (m_engine && m_engine->initialized()) {
+        (void)m_engine->reload_material_by_name(name);
+    }
+    updateTitle();
+    updateStatus();
+    statusBar()->showMessage(
+        tr("Model material saved as a loose override: %1")
+            .arg(QString::fromStdWString(file.wstring())),
+        5000);
+}
+
+void MainWindow::onModelMaterialsExported(const QStringList& materials) {
+    if (materials.isEmpty()) {
+        return;
+    }
+    if (!m_engine || !m_engine->initialized()) {
+        statusBar()->showMessage(tr("Exporting needs a connected engine."), 4000);
+        return;
+    }
+    ExportMaterialsDialog dlg(m_engine.get(), materials, m_currentModelName, this);
+    dlg.exec();
+}
+
+void MainWindow::onExportModelMaterials() {
+    if (!m_modelScene || m_modelScene->materials.empty()) {
+        statusBar()->showMessage(tr("No model materials to export."), 4000);
+        return;
+    }
+    QStringList materials;
+    for (const bridge::ModelMaterial& material : m_modelScene->materials) {
+        if (material.name.empty()) {
+            continue;
+        }
+        const QString name = QString::fromStdString(material.name);
+        if (!materials.contains(name, Qt::CaseInsensitive)) {
+            materials.append(name);
+        }
+    }
+    onModelMaterialsExported(materials);
+}
+
+void MainWindow::onIsolateToggled(const QString& gameName, bool enabled) {
+    if (gameName.isEmpty() || m_currentModelName.isEmpty()) {
+        return; // the dock cleared its own selection
+    }
+    if (enabled) {
+        applyIsolation(gameName);
+    } else {
+        cleanupIsolation(true);
+    }
+}
+
+void MainWindow::applyIsolation(const QString& keepName) {
+    if (!m_engine || !m_engine->initialized() || !m_modelScene) {
+        statusBar()->showMessage(
+            tr("Isolate mode needs a connected engine and a loaded model."), 5000);
+        return;
+    }
+
+    // Replacing a previous isolation restores those materials first.
+    cleanupIsolation(true);
+
+    const std::string keep = keepName.toStdString();
+    int substituted = 0;
+    for (const bridge::ModelMaterial& material : m_modelScene->materials) {
+        // Never hide the kept material or the one open in the editor.
+        if (material.name.empty() || material_name_equal(material.name, keep) ||
+            material_name_equal(material.name, m_currentModelMaterial)) {
+            continue;
+        }
+
+        const std::filesystem::path file = preview_override_path(m_previewRoot, material.name);
+        if (file.empty()) {
+            continue;
+        }
+        std::error_code ec;
+        if (std::filesystem::exists(file, ec)) {
+            continue; // a real override stays untouched
+        }
+        std::filesystem::create_directories(file.parent_path(), ec);
+
+        std::ofstream stream(file, std::ios::binary);
+        if (!stream) {
+            continue;
+        }
+        stream << kTransparentVmt;
+        stream.close();
+
+        m_isolateSubstitutes.push_back({ file, material.name });
+        (void)m_engine->reload_material_by_name(material.name);
+        ++substituted;
+    }
+
+    if (substituted == 0) {
+        statusBar()->showMessage(
+            tr("Nothing to isolate: every other material already has an override."), 5000);
+    } else {
+        statusBar()->showMessage(
+            tr("Isolating \"%1\": %2 material(s) hidden.").arg(keepName).arg(substituted), 5000);
+    }
+}
+
+void MainWindow::cleanupIsolation(bool reload) {
+    if (m_isolateSubstitutes.empty()) {
+        return;
+    }
+
+    std::vector<std::string> restore;
+    restore.reserve(m_isolateSubstitutes.size());
+    std::error_code ec;
+    for (const IsolateSubstitute& substitute : m_isolateSubstitutes) {
+        std::filesystem::remove(substitute.file, ec);
+        restore.push_back(substitute.material);
+    }
+    m_isolateSubstitutes.clear();
+
+    if (reload && m_engine && m_engine->initialized()) {
+        for (const std::string& material : restore) {
+            (void)m_engine->reload_material_by_name(material);
+        }
+    }
+}
+
+void MainWindow::setAnimationSpeedScale(float speed) {
+    m_animSpeedScale = ui::clamp_animation_speed(speed);
+    if (m_engine && m_engine->initialized()) {
+        (void)m_engine->set_speed(m_animSpeedScale);
+    }
+    statusBar()->showMessage(
+        tr("Playback speed: %1x").arg(QString::number(static_cast<double>(m_animSpeedScale), 'f', 2)),
+        3000);
+}
+
+void MainWindow::onAnimationSpeedDown() {
+    setAnimationSpeedScale(m_animSpeedScale * 0.5f);
+}
+
+void MainWindow::onAnimationSpeedUp() {
+    setAnimationSpeedScale(m_animSpeedScale * 2.0f);
 }
 
 void MainWindow::onOpenMaterialBrowser() {
@@ -1222,6 +1990,15 @@ void MainWindow::onOpenGameConnection() {
     if (dlg.exec() == QDialog::Accepted) {
         saveSettings();
         refreshMaterialRoots();
+
+        // Tear the model view down before the engine goes away: the animation
+        // dock must never keep a dangling engine pointer.
+        if (m_animationDock) {
+            m_animationDock->setEngine(nullptr);
+        }
+        cleanupIsolation(false);
+        clearModelView();
+
         if (m_engine) {
             m_engine->shutdown();
             m_engine.reset();
@@ -1325,6 +2102,20 @@ void MainWindow::onViewportResized(int width, int height) {
 
 void MainWindow::onMaterialDropped(const QString& filePath) {
     openFile(filePath);
+}
+
+void MainWindow::onModelDropped(const QString& filePath) {
+    if (filePath.isEmpty()) {
+        return;
+    }
+    openModel(filePath);
+}
+
+void MainWindow::onPlayheadTick(int frame, qintptr cycle_x10000) {
+    if (!m_animationDock || !m_animationDock->isVisible() || m_currentModelName.isEmpty()) {
+        return; // nothing to scrub without a model in view
+    }
+    m_animationDock->updatePlayhead(frame, static_cast<int>(cycle_x10000));
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {

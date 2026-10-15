@@ -4,6 +4,11 @@
 // folder". Windows-free and unit testable: it only computes paths, names and
 // conflicts; reading the .vmt text through the engine and writing the files is
 // the caller's job.
+//
+// The planner never touches the filesystem, keeps the input order and is
+// deterministic: the same material list and options always produce the same
+// plan. Relative paths that would collide are reported instead of silently
+// overwriting each other.
 
 #include "vmt/result.h"
 
@@ -40,11 +45,23 @@ struct ExportPlan {
 // MaterialsTree layout: "materials/models/props_c17/oildrum001.vmt".
 // Fails with InvalidArgument when the destination is empty or a material name
 // cannot produce a safe file name.
+//
+// `items` preserves the input order and holds one entry per exported file:
+// when two different materials map to the same relative path the first one
+// keeps the slot and the later ones are listed in `duplicates` (they are not
+// exported; the caller decides how to report them). Repeating the same
+// material name is de-duplicated silently. Material names carrying ".."
+// elements or absolute components are rejected with InvalidArgument, so every
+// produced path stays inside `destination`.
 vmt::Result<ExportPlan> plan_material_export(const std::vector<std::string>& materials,
                                              const ExportOptions& options);
 
-// "models_props_c17_oildrum001.vmt" for "models/props_c17/oildrum001":
+// "models_props_c17/oildrum001.vmt" for "models/props_c17/oildrum001":
 // separators and any character outside [A-Za-z0-9._-] become '_'.
+//
+// Returns an empty string when nothing usable remains after sanitizing (empty
+// or blank names, or names made only of underscores such as "///");
+// plan_material_export() reports those with InvalidArgument.
 std::string flat_material_file_name(const std::string& material);
 
 } // namespace ui

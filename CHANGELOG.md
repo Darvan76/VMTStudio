@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Model Viewer (Studio `.mdl` inspection)**:
+  - Model browser (**Model > Open Model... (`F4`)**) that delegates the scan to the engine file system (loose folders and mounted `.vpk` archives) with search, source filters and inline loading, so the window never blocks.
+  - Model loading via drag & drop of a `.mdl` onto the viewport, the **Model > Recent Models** menu, or the command line: `vmtstudio --model <path>` (a positional `.mdl` path is accepted too).
+  - **Materials dock**: every material of the loaded model grouped by bodypart, with search and previous/next walk-through (`Alt+Left` / `Alt+Right`).
+  - **Animation dock**: sequence list with activity filters, timeline scrubbing fed by the live engine tick, playback speed, blending, overlay layers, pose parameters, bodygroups and skins.
+  - **Play / Pause (`Space`)** now also drives the loaded model; **Halve / Double Playback Speed (`[` / `]`)**.
+  - **In-place material editing**: selecting a model material opens it in the VMT editor; edits are written as a loose override at the material's own game-relative path and the engine re-resolves only that slot, so the rest of the model keeps rendering. **Save (`Ctrl+S`)** commits the override atomically.
+  - **Export Model Materials... (`Ctrl+Shift+E`)**: exports every material of the loaded model as `.vmt` files, flat or mirroring `materials/`.
+  - **Isolate (experimental)**: transparent substitute overrides hide every other material of the model; every written substitute is tracked and removed when isolation is turned off, a model is closed/replaced, the connection changes or the app exits.
+- **Persistent model state**: `last_model` and repeated `recent_models` entries in the settings store (additive keys; existing settings files remain compatible).
+
 ## [0.1.0] - 2026-10-15
 
 ### Added

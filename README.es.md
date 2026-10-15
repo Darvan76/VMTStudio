@@ -37,6 +37,7 @@ A diferencia de visores genéricos que intentan aproximar los shaders de Source 
   - [Paso 3: Compilar el Backend HLMV de 32 bits](#paso-3-compilar-el-backend-hlmv-de-32-bits)
   - [Paso 4: Compilar el Frontend Qt 6 de 64 bits](#paso-4-compilar-el-frontend-qt-6-de-64-bits)
 - [Uso y Configuración](#uso-y-configuración)
+- [Visor de Modelos](#visor-de-modelos)
 - [Pruebas Automatizadas](#pruebas-automatizadas)
 - [Licencias y Avisos Legales](#licencias-y-avisos-legales)
 - [Declaración sobre Inteligencia Artificial](#declaración-sobre-inteligencia-artificial)
@@ -261,6 +262,30 @@ build64/bin/Release/vmtstudio.exe
    - Haz clic en **Test Connection** para ejecutar la validación de la instalación en tiempo real (comprueba arquitectura PE de 32 bits, DLLs requeridas y exportaciones del motor).
 3. Abre cualquier archivo `.vmt` desde **File > Open**, o utiliza el **Material Browser (`F3`)** para explorar los materiales instalados o empaquetados en VPK.
 4. El visor 3D iniciará el backend de HLMV de manera transparente, renderizando el material con fidelidad idéntica al motor Source.
+
+---
+
+## Visor de Modelos
+
+VMT-Studio puede cargar e inspeccionar modelos de estudio (`.mdl`) de Source Engine con el mismo renderizador nativo que usa para los materiales:
+
+- **Abrir un modelo** desde **Model > Open Model... (`F4`)** (explorador con búsqueda y filtros VPK/sueltos), **arrastrando y soltando** un archivo `.mdl` sobre el visor, desde el menú **Model > Recent Models**, o desde la línea de comandos: `vmtstudio --model models/props_c17/oildrum001.mdl`.
+- **Panel de materiales**: todos los materiales del modelo, agrupados por la parte del cuerpo (bodypart) que los usa, con búsqueda y botones de navegación anterior/siguiente.
+- **Panel de animación**: lista de secuencias con filtros por actividad, línea de tiempo (sincronizada con el tick de reproducción en vivo), velocidad de reproducción, blending, capas superpuestas (overlays), parámetros de pose, bodygroups y skins.
+- **Edición de materiales in situ**: al seleccionar un material del modelo se abre su VMT en el editor; los cambios se escriben como override suelto en la ruta game-relative del propio material y el motor vuelve a resolver solo esa ranura, de modo que el resto del modelo sigue renderizándose con sus propios materiales. **Ctrl+S** guarda el override de forma atómica.
+- **Export Model Materials... (`Ctrl+Shift+E`)**: exporta todos los materiales del modelo cargado a disco como archivos `.vmt`, de forma plana o replicando la jerarquía `materials/`.
+- **Isolate (experimental)**: oculta todos los materiales del modelo excepto el seleccionado usando overrides sustitutos transparentes. Los sustitutos se eliminan automáticamente al desactivar el aislamiento, cerrar o reemplazar el modelo, cambiar la conexión del juego o salir de la aplicación.
+
+Atajos del visor de modelos:
+
+| Atajo | Acción |
+| --- | --- |
+| `F4` | Abrir el explorador de modelos |
+| `Espacio` | Reproducir / pausar la animación del modelo |
+| `[` / `]` | Reducir a la mitad / duplicar la velocidad de reproducción |
+| `Alt+Izquierda` / `Alt+Derecha` | Seleccionar el material anterior / siguiente (panel enfocado) |
+| `Ctrl+Shift+E` | Exportar todos los materiales del modelo |
+| `Ctrl+M` | Cargar un modelo desde un diálogo de archivo (atajo heredado) |
 
 ---
 

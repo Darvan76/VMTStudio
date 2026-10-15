@@ -19,6 +19,8 @@ add_executable(hlmv_backend WIN32
     src/viewersettings.cpp
     src/hlmv_compat.cpp
     src/backend_ipc.cpp
+    src/backend_query.cpp
+    src/anim_control.cpp
     src/hlmv.rc
 
     # MX Toolkit

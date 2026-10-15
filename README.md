@@ -37,6 +37,7 @@ Unlike generic material viewers that attempt to approximate Source shaders throu
   - [Step 3: Build the 32-bit HLMV Backend](#step-3-build-the-32-bit-hlmv-backend)
   - [Step 4: Build the 64-bit Qt 6 Frontend](#step-4-build-the-64-bit-qt-6-frontend)
 - [Running and Configuring](#running-and-configuring)
+- [Model Viewer](#model-viewer)
 - [Testing](#testing)
 - [Licenses and Legal Notices](#licenses-and-legal-notices)
 - [AI Disclosure](#ai-disclosure)
@@ -261,6 +262,30 @@ build64/bin/Release/vmtstudio.exe
    - Click **Test Connection** to run the live install validation (checks 32-bit PE architecture, required DLLs, and engine exports).
 3. Open any `.vmt` file via **File > Open**, or browse the game files directly with the **Material Browser (`F3`)**.
 4. The 3D viewport will automatically spawn the embedded HLMV backend and render the material with full Source Engine fidelity.
+
+---
+
+## Model Viewer
+
+VMT-Studio can load and inspect Source Engine studio models (`.mdl`) with the same native renderer used for materials:
+
+- **Open a model** through **Model > Open Model... (`F4`)** (browser with search and VPK/loose filters), by **dragging & dropping** a `.mdl` file onto the viewport, from the **Model > Recent Models** menu, or from the command line: `vmtstudio --model models/props_c17/oildrum001.mdl`.
+- **Materials dock**: every material of the model, grouped by the bodypart that uses it, with search and previous/next walk-through buttons.
+- **Animation dock**: sequence list with activity filters, timeline scrubbing (fed by the live playback tick), playback speed, blending, overlay layers, pose parameters, bodygroups and skins.
+- **Edit materials in place**: selecting a material of the model opens its VMT in the editor; edits are written as a loose override at the material's own game-relative path and the engine re-resolves only that slot, so the rest of the model keeps rendering with its own materials. **Ctrl+S** saves the override atomically.
+- **Export Model Materials... (`Ctrl+Shift+E`)**: writes every material of the loaded model to disk as `.vmt` files, either flat or mirroring the `materials/` hierarchy.
+- **Isolate (experimental)**: hides every material of the model except the selected one using transparent substitute overrides. The substitutes are removed automatically when isolation is turned off, the model is closed or replaced, the game connection changes, or the app exits.
+
+Model viewer shortcuts:
+
+| Shortcut | Action |
+| --- | --- |
+| `F4` | Open the model browser |
+| `Space` | Play / pause the model animation |
+| `[` / `]` | Halve / double the playback speed |
+| `Alt+Left` / `Alt+Right` | Select the previous / next material (dock focused) |
+| `Ctrl+Shift+E` | Export all model materials |
+| `Ctrl+M` | Load a model from a file dialog (legacy shortcut) |
 
 ---
 

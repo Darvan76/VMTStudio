@@ -1,7 +1,9 @@
 #pragma once
 
+#include <QAction>
 #include <QMainWindow>
 #include <QPlainTextEdit>
+#include <QStringList>
 #include <QTableWidget>
 #include <QComboBox>
 #include <QLabel>
@@ -10,6 +12,8 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "ui/session.h"
 #include "ui/settings.h"
@@ -26,6 +30,9 @@ class ViewportWidget;
 class InspectorWidget;
 class VmtHighlighter;
 class NotificationPopup;
+class ModelBrowserDialog;
+class ModelMaterialsDock;
+class AnimationDock;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -36,6 +43,12 @@ public:
 
     bool openFile(const QString& filePath);
     bool openGameMaterial(const QString& materialName);
+
+    // Loads a model by game-relative name ("models/props_c17/oildrum001.mdl")
+    // or by absolute disk path. Used by drag & drop, the recent-models menu and
+    // the --model command line option. Defers the load while the engine is
+    // still connecting.
+    void openModel(const QString& modelPath);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -67,8 +80,27 @@ private slots:
     void onRenderModeSelected(int index);
     void onToggleAnimation();
     void onSetAnimationSpeed(float speed);
+    void onAnimationSpeedDown();
+    void onAnimationSpeedUp();
     void onOpenPreviewOptions();
     void onLoadModel();
+
+    // Model menu
+    void onOpenModel();
+    void onCloseModel();
+    void onRecentModelTriggered();
+    void onModelSelected(const QString& gameRelative, bool loose);
+
+    // Model materials dock
+    void onModelMaterialSelected(const QString& gameName);
+    void onModelMaterialActivated(const QString& gameName);
+    void onModelMaterialsExported(const QStringList& materials);
+    void onIsolateToggled(const QString& gameName, bool enabled);
+    void onExportModelMaterials();
+
+    // Viewport model interaction
+    void onModelDropped(const QString& filePath);
+    void onPlayheadTick(int frame, qintptr cycle_x10000);
 
     // Tools & Game
     void onOpenMaterialBrowser();
@@ -111,6 +143,36 @@ private:
     void syncPreview();
     void refreshMaterialRoots();
 
+    // --- Model viewer -------------------------------------------------------
+    void loadModelNow(const QString& modelPath);
+    void queryModelSceneAsync();
+    void onModelSceneLoaded(const std::shared_ptr<bridge::ModelScene>& scene);
+    void onModelSceneFailed(const QString& error);
+    void clearModelView();
+    void updateModelActions();
+    void updateRecentModelsMenu();
+    void addRecentModel(const QString& path);
+    // Game-relative path of a disk file below the configured game folder; empty
+    // when the game folder is unknown or the file lives outside of it.
+    QString gameRelativePath(const QString& diskPath) const;
+    bool containsModelMaterial(const QString& gameName) const;
+
+    // In-place editing of a material that belongs to the loaded model: opens it
+    // in the VMT editor and previews it through the loose override at its own
+    // game-relative path (no global forced preview).
+    bool openModelMaterial(const QString& gameName, bool focusEditor);
+    void saveModelMaterialOverride();
+    void setAnimationSpeedScale(float speed);
+
+    // Experimental isolate mode: transparent substitutes for every material of
+    // the model except the kept one; every written file is tracked here.
+    struct IsolateSubstitute {
+        std::filesystem::path file;
+        std::string material;
+    };
+    void applyIsolation(const QString& keepName);
+    void cleanupIsolation(bool reload);
+
     bool isCurrentMaterialBrushOnly() const;
     QString getCurrentShaderName() const;
     QString getMaterialDisplayName() const;
@@ -134,6 +196,16 @@ private:
     bool m_animPlaying = true;
     bool m_showAdvanced = false;
 
+    // Model viewer state.
+    std::shared_ptr<bridge::ModelScene> m_modelScene;
+    QString m_currentModelName;   // game-relative name of the loaded model
+    QString m_requestedModelPath; // path the model was requested with (game-relative preferred)
+    QString m_pendingModelPath;   // load deferred until the engine is ready
+    std::string m_currentModelMaterial; // model material open in the editor, empty when none
+    quint64 m_modelSceneGeneration = 0; // drops stale scene queries after reload/close
+    float m_animSpeedScale = 1.0f;
+    std::vector<IsolateSubstitute> m_isolateSubstitutes;
+
     // Brush shader tracking
     std::string m_lastShader;
     bool m_wasBrushMaterial = false;
@@ -146,16 +218,23 @@ private:
     QDockWidget* m_validationDock = nullptr;
     QTableWidget* m_validationTable = nullptr;
     NotificationPopup* m_notificationPopup = nullptr;
+    ModelMaterialsDock* m_materialsDock = nullptr;
+    AnimationDock* m_animationDock = nullptr;
 
     QComboBox* m_shapeCombo = nullptr;
     QComboBox* m_renderModeCombo = nullptr;
     QAction* m_animAction = nullptr;
+    QAction* m_materialsDockAction = nullptr;
+    QAction* m_animationDockAction = nullptr;
+    QAction* m_closeModelAction = nullptr;
+    QAction* m_exportMaterialsAction = nullptr;
 
     QLabel* m_statusDoc = nullptr;
     QLabel* m_statusEngine = nullptr;
     QLabel* m_statusFindings = nullptr;
 
     QMenu* m_recentMenu = nullptr;
+    QMenu* m_recentModelsMenu = nullptr;
 
     QTimer* m_previewSyncTimer = nullptr;
     bool m_suppressSync = false;

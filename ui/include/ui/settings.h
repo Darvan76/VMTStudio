@@ -13,6 +13,10 @@
 //   preview_rig=0.3000 38.0000 42.0000 1.0000 0.1600
 //   browser_root=D:\Games\GarrysMod\garrysmod\materials
 //
+// The model viewer reuses the same store:
+//   last_model=models/props_c17/oildrum001.mdl
+//   recent_models=models/props_c17/oildrum001.mdl   (repeated, most recent first)
+//
 // Saves are crash-safe: the file is written next to its target and renamed
 // over it only after the bytes are on disk, so a crash mid-write cannot leave
 // a truncated settings file behind.
@@ -48,6 +52,11 @@ struct UISettings {
     std::string splitter_sizes;        // comma-separated splitter pane sizes
     bool validation_dock_visible = false;
 
+    // Model viewer: the last loaded model and the recent-models list. Entries
+    // are either game-relative .mdl paths or absolute disk paths.
+    std::string last_model;
+    std::vector<std::string> recent_models; // most recent first
+
     // Missing or unreadable files yield defaults; a malformed line is ignored.
     static UISettings load(const std::filesystem::path& file);
 
@@ -57,6 +66,9 @@ struct UISettings {
 
     // Moves the path to the front, removing duplicates, capped at the maximum.
     void remember_file(const std::string& path);
+
+    // Same, for the recent-models list.
+    void remember_model(const std::string& path);
 };
 
 } // namespace ui

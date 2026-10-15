@@ -164,14 +164,16 @@ struct ModelScene {
     std::vector<ModelPoseParameter> pose_parameters;
 };
 
-// Playback state polled for the animation UI. `frame` is 0-based.
+// Playback state polled for the animation UI. `frame` is 0-based. The defaults
+// describe "no data": running at normal speed, which keeps the formatted status
+// neutral until the first real dump arrives.
 struct AnimState {
     int sequence = 0;
     float frame = 0.0f;
     float cycle = 0.0f;
     float speed = 1.0f;
     float ground_speed = 0.0f;
-    bool paused = true;
+    bool paused = false;
 };
 
 struct EngineViewConfig {

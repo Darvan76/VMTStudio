@@ -55,9 +55,15 @@ UISettings UISettings::load(const std::filesystem::path& file) {
             settings.splitter_sizes = value;
         } else if (key == "validation_dock_visible") {
             settings.validation_dock_visible = value == "1" || value == "true";
+        } else if (key == "last_model") {
+            settings.last_model = value;
         } else if (key == "recent") {
             if (!value.empty() && settings.recent_files.size() < kMaxRecentFiles) {
                 settings.recent_files.push_back(value);
+            }
+        } else if (key == "recent_models") {
+            if (!value.empty() && settings.recent_models.size() < kMaxRecentFiles) {
+                settings.recent_models.push_back(value);
             }
         }
     }
@@ -91,8 +97,12 @@ bool UISettings::save(const std::filesystem::path& file) const {
         stream << "window_height=" << window_height << "\n";
         stream << "splitter_sizes=" << splitter_sizes << "\n";
         stream << "validation_dock_visible=" << (validation_dock_visible ? 1 : 0) << "\n";
+        stream << "last_model=" << last_model << "\n";
         for (const std::string& recent : recent_files) {
             stream << "recent=" << recent << "\n";
+        }
+        for (const std::string& model : recent_models) {
+            stream << "recent_models=" << model << "\n";
         }
         stream.close();
         if (!stream) {
@@ -126,6 +136,15 @@ void UISettings::remember_file(const std::string& path) {
     recent_files.insert(recent_files.begin(), path);
     if (recent_files.size() > kMaxRecentFiles) {
         recent_files.resize(kMaxRecentFiles);
+    }
+}
+
+void UISettings::remember_model(const std::string& path) {
+    recent_models.erase(std::remove(recent_models.begin(), recent_models.end(), path),
+                        recent_models.end());
+    recent_models.insert(recent_models.begin(), path);
+    if (recent_models.size() > kMaxRecentFiles) {
+        recent_models.resize(kMaxRecentFiles);
     }
 }
 

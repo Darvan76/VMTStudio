@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QFileInfo>
 #include <QIcon>
+#include <QStringList>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -37,11 +38,32 @@ int main(int argc, char* argv[]) {
     ui::qt::MainWindow mainWindow;
     mainWindow.show();
 
-    if (argc > 1) {
-        QString initialFile = QString::fromLocal8Bit(argv[1]);
-        if (QFileInfo::exists(initialFile) && initialFile.endsWith(".vmt", Qt::CaseInsensitive)) {
-            mainWindow.openFile(initialFile);
+    // Command line: [--model <path>] [material.vmt]
+    QString initialMaterial;
+    QString initialModel;
+    const QStringList arguments = app.arguments();
+    for (int i = 1; i < arguments.size(); ++i) {
+        const QString argument = arguments.at(i);
+        if (argument == QStringLiteral("--model")) {
+            if (i + 1 < arguments.size()) {
+                initialModel = arguments.at(++i);
+            }
+        } else if (argument.startsWith(QLatin1Char('-'))) {
+            continue; // unknown option
+        } else if (argument.endsWith(".vmt", Qt::CaseInsensitive)) {
+            if (initialMaterial.isEmpty()) {
+                initialMaterial = argument;
+            }
+        } else if (initialModel.isEmpty()) {
+            initialModel = argument;
         }
+    }
+
+    if (!initialMaterial.isEmpty() && QFileInfo::exists(initialMaterial)) {
+        mainWindow.openFile(initialMaterial);
+    }
+    if (!initialModel.isEmpty()) {
+        mainWindow.openModel(initialModel);
     }
 
     int result = app.exec();
