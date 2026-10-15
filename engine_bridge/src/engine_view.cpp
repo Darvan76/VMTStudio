@@ -269,6 +269,15 @@ public:
 
     vmt::Result<std::vector<unsigned char>> read_binary_file(
         const std::string& game_path) override {
+        // The engine file system resolves loose files and VPK entries alike, so
+        // prefer it while the backend is running; the paths below are the
+        // fallback for the in-process spike and for backend-less setups.
+        if (backend_running()) {
+            const vmt::Result<std::vector<unsigned char>> raw = request_raw(game_path);
+            if (raw.ok()) {
+                return raw;
+            }
+        }
 #if !defined(_WIN64)
         const spike::BinaryFile result = spike::read_binary_file(game_path);
         if (result.ok && result.found) {
@@ -291,6 +300,14 @@ public:
     }
 
     vmt::Result<std::string> read_text_file(const std::string& game_path) override {
+        // Same policy as read_binary_file(): the engine file system first (it
+        // sees VPK content), the direct disk read as the fallback.
+        if (backend_running()) {
+            const vmt::Result<std::vector<unsigned char>> raw = request_raw(game_path);
+            if (raw.ok()) {
+                return vmt::Ok(std::string(raw.value().begin(), raw.value().end()));
+            }
+        }
 #if !defined(_WIN64)
         const spike::TextFile result = spike::read_text_file(game_path);
         if (result.ok && result.found) {
@@ -756,6 +773,8 @@ private:
         if (file) {
             text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
         }
+        // Windows refuses to delete an open file, so close it before cleanup.
+        file.close();
         remove_dump_files(token);
         if (!read_ok) {
             return vmt::Err<std::string>(engine_error(
@@ -781,6 +800,8 @@ private:
         if (file) {
             bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
         }
+        // Windows refuses to delete an open file, so close it before cleanup.
+        file.close();
         remove_dump_files(token);
         if (!read_ok) {
             return vmt::Err<std::vector<unsigned char>>(engine_error(

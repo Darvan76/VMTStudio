@@ -111,6 +111,24 @@ UT_TEST_CASE("ipc_dump: models: unknown rows are ignored") {
     UT_CHECK_EQ(parsed.value().entries.size(), std::size_t{1});
 }
 
+UT_TEST_CASE("ipc_dump: models: the truncation note is exposed") {
+    const vmt::Result<bridge::ModelList> capped = bridge::parse_models_dump(dump_text("models", {
+        "model\tmodels/props_c17/oildrum001.mdl\tloose",
+        "note\ttruncated",
+    }));
+    UT_CHECK(capped.ok());
+    if (!capped.ok()) return;
+    UT_CHECK(capped.value().truncated);
+    UT_CHECK_EQ(capped.value().entries.size(), std::size_t{1});
+
+    const vmt::Result<bridge::ModelList> whole = bridge::parse_models_dump(dump_text("models", {
+        "model\tmodels/props_c17/oildrum001.mdl\tloose",
+    }));
+    UT_CHECK(whole.ok());
+    if (!whole.ok()) return;
+    UT_CHECK(!whole.value().truncated);
+}
+
 UT_TEST_CASE("ipc_dump: models: malformed rows fail with ParseError") {
     const vmt::Result<bridge::ModelList> missing_column = bridge::parse_models_dump(dump_text("models", {
         "model\tmodels/props_c17/oildrum001.mdl\tloose",

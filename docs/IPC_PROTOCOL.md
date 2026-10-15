@@ -117,7 +117,11 @@ kind\t<kind>
 
 ```
 model\t<game-relative path ending in .mdl>\t<loose|vpk>
+note\ttruncated
 ```
+
+* `note\ttruncated` is only written when the scan hit its safety cap; a parser
+  should surface it as "refine the search" (the list is incomplete).
 
 `kind=model_scene`:
 

@@ -259,6 +259,14 @@ vmt::Result<ModelList> parse_models_dump(const std::string& text) {
     ModelList models;
     for (const DumpRow& row : rows.value()) {
         const std::vector<std::string> fields = split_tabs(row.text);
+        if (fields[0] == "note") {
+            // The backend ends a capped scan with "note\ttruncated"; unknown
+            // note rows are ignored like any other unknown row.
+            if (fields.size() >= 2 && fields[1] == "truncated") {
+                models.truncated = true;
+            }
+            continue;
+        }
         if (fields[0] != "model") continue;  // forward compatible: ignore unknown rows
 
         vmt::Error error;
