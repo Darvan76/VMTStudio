@@ -851,6 +851,17 @@ MatSysWindow::draw ()
 
 
 	int polycount = 0;
+	if (!BrushRender_IsBrushShape() && g_pForcedPreviewMaterial)
+	{
+		const char* shaderName = g_pForcedPreviewMaterial->GetShaderName();
+		if (shaderName && (_stricmp(shaderName, "LightmappedGeneric") == 0 ||
+		                   _stricmp(shaderName, "WorldVertexTransition") == 0 ||
+		                   _stricmp(shaderName, "Water") == 0))
+		{
+			BrushRender_SetShape(BRUSH_SHAPE_WALL);
+		}
+	}
+
 	if (BrushRender_IsBrushShape())
 	{
 		StudioModel::UpdateStudioRenderConfig(

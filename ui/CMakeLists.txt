@@ -25,6 +25,9 @@ add_library(ui STATIC
     src/shader_catalog.cpp
     src/validate.cpp
     src/app_log.cpp
+    src/model_scene.cpp
+    src/animation_model.cpp
+    src/export_plan.cpp
 )
 
 target_include_directories(ui PUBLIC
@@ -63,6 +66,14 @@ add_executable(vmtstudio WIN32
     src/qt/about_dialog.cpp
     src/qt/notification_popup.h
     src/qt/notification_popup.cpp
+    src/qt/model_browser_dialog.h
+    src/qt/model_browser_dialog.cpp
+    src/qt/model_materials_dock.h
+    src/qt/model_materials_dock.cpp
+    src/qt/animation_dock.h
+    src/qt/animation_dock.cpp
+    src/qt/export_materials_dialog.h
+    src/qt/export_materials_dialog.cpp
     src/qt/theme.h
     src/qt/theme.cpp
     resources/vmtstudio.qrc

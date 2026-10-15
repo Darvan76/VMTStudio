@@ -64,6 +64,116 @@ struct Thumbnail {
     std::vector<unsigned char> bgra;
 };
 
+// --- Model viewer data (IPC protocol v2, see docs/IPC_PROTOCOL.md) ------------
+//
+// Every type below is a plain value type filled by the query methods of
+// EngineView. "Game-relative" always means a forward-slash path relative to the
+// game folder ("models/props_c17/oildrum001.mdl"), which is how the engine file
+// system addresses loose files and VPK entries alike.
+
+// One .mdl found by list_models().
+struct ModelEntry {
+    std::string name;      // game-relative, ends in ".mdl"
+    bool loose = false;    // true when it lives on disk (not inside a VPK)
+};
+
+struct ModelList {
+    std::vector<ModelEntry> entries;
+    bool truncated = false; // the backend stopped after its safety cap
+};
+
+// A material of the loaded model, indexed by the model's texture table.
+struct ModelMaterial {
+    int texture_index = -1;
+    std::string name;    // game-relative, no extension
+    std::string shader;  // empty when the material could not be resolved
+};
+
+// A bodypart/submodel that references a material (the same material can be
+// shared by several submodels).
+struct ModelMaterialUse {
+    int texture_index = -1;
+    int bodypart = -1;
+    int submodel = -1;
+    std::string bodypart_name;
+};
+
+struct ModelSequence {
+    int index = 0;
+    std::string label;
+    std::string activity;  // empty when the sequence has no activity
+    float fps = 0.0f;
+    int frames = 0;
+    float duration = 0.0f; // seconds
+    bool looping = false;
+    bool hidden = false;   // STUDIO_HIDDEN
+};
+
+struct ModelBodypart {
+    int index = 0;
+    std::string name;
+    int models = 0;   // number of submodels
+    int current = 0;  // currently selected submodel
+};
+
+struct ModelSkin {
+    int index = 0;
+    std::string name;
+};
+
+struct ModelBone {
+    int index = 0;
+    std::string name;
+    int parent = -1;
+};
+
+struct ModelAttachment {
+    int index = 0;
+    std::string name;
+};
+
+struct ModelPoseParameter {
+    int index = 0;
+    std::string name;
+    float min_value = 0.0f;
+    float max_value = 1.0f;
+};
+
+struct ModelStats {
+    int polys = 0;
+    int batches = 0;
+    int bones = 0;
+    int lods = 0;
+    int materials = 0;
+    float bbox_min[3] = { 0.0f, 0.0f, 0.0f };
+    float bbox_max[3] = { 0.0f, 0.0f, 0.0f };
+};
+
+// Everything the UI knows about the loaded model. `model_name` is empty when no
+// model is loaded.
+struct ModelScene {
+    std::string model_name;
+    ModelStats stats;
+    std::vector<ModelMaterial> materials;
+    std::vector<ModelMaterialUse> material_uses;
+    std::vector<ModelSequence> sequences;
+    std::vector<ModelBodypart> bodyparts;
+    std::vector<ModelSkin> skins;
+    std::vector<ModelBone> bones;
+    std::vector<ModelAttachment> attachments;
+    std::vector<ModelPoseParameter> pose_parameters;
+};
+
+// Playback state polled for the animation UI. `frame` is 0-based.
+struct AnimState {
+    int sequence = 0;
+    float frame = 0.0f;
+    float cycle = 0.0f;
+    float speed = 1.0f;
+    float ground_speed = 0.0f;
+    bool paused = true;
+};
+
 struct EngineViewConfig {
     std::filesystem::path bin_dir;    // folder with tier0.dll, materialsystem.dll, ...
     std::filesystem::path game_dir;   // folder containing gameinfo.txt
@@ -146,6 +256,55 @@ public:
 
     // Sets animation playback speed scale (e.g. 1.0f is normal speed).
     virtual vmt::Result<void> set_speed(float speed) = 0;
+
+    // --- Model viewer: queries (protocol v2) ---------------------------------
+    //
+    // Query methods talk to the backend through response files and wait for
+    // them, so they block the calling thread for a few milliseconds up to the
+    // timeout. Call them from a worker thread, never from the UI thread.
+
+    // Every .mdl in the game file system (loose folders and VPKs). `prefix` is
+    // an optional game-relative filter ("models/props_c17/"); empty lists all.
+    virtual vmt::Result<ModelList> list_models(const std::string& prefix) = 0;
+
+    // Everything the UI needs about the currently loaded model in one round
+    // trip. Fails when no model is loaded.
+    virtual vmt::Result<ModelScene> query_model_scene() = 0;
+
+    // Playback state of the loaded model (frame, cycle, speed, ground speed).
+    virtual vmt::Result<AnimState> query_anim_state() = 0;
+
+    // Reads a game file as raw bytes through the engine file system, so assets
+    // inside VPKs are reachable (textures above all), same contract as
+    // read_binary_file().
+    virtual vmt::Result<std::vector<unsigned char>> read_game_binary(
+        const std::string& game_path) = 0;
+
+    // --- Model viewer: animation control (protocol v2) -----------------------
+
+    virtual vmt::Result<void> set_sequence(int index) = 0;
+    virtual vmt::Result<void> set_sequence_label(const std::string& label) = 0;
+    virtual vmt::Result<void> set_frame(int frame) = 0;
+    virtual vmt::Result<void> step_frame(int delta) = 0;
+    virtual vmt::Result<void> set_loop(bool enabled) = 0;
+    virtual vmt::Result<void> stop_animation() = 0;
+    virtual vmt::Result<void> set_blend_time(float seconds) = 0;
+    virtual vmt::Result<void> blend_now() = 0;
+
+    // Overlay layers are 1-based (1..4); sequence -1 clears the layer.
+    virtual vmt::Result<void> set_overlay(int layer, int sequence, float weight) = 0;
+    virtual vmt::Result<void> set_pose_parameter(int index, float value) = 0;
+    virtual vmt::Result<void> set_bodygroup(int group, int value) = 0;
+    virtual vmt::Result<void> set_skin(int skin) = 0;
+
+    // View flags: "bones", "hitboxes", "attachments", "ground", "movement",
+    // "overlay_wireframe", "normals", "tangents", "shadow", "sequence_boxes".
+    virtual vmt::Result<void> set_view_flag(const std::string& flag, bool enabled) = 0;
+
+    // Forces the named material to be reloaded from the mounted search paths
+    // after the file changed on disk, without setting it as the global
+    // override. Used by the "edit the material in place" workflow.
+    virtual vmt::Result<void> reload_material_by_name(const std::string& material_name) = 0;
 
     // Draws and presents one frame. Call from the host's message loop/timer.
     virtual vmt::Result<void> render() = 0;

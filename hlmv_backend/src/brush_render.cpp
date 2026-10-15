@@ -38,9 +38,11 @@ struct BrushVertex
     float u0, v0;
     float u1, v1;
     unsigned char r, g, b, a;
+    float tx, ty, tz;
+    float bx, by, bz;
 };
 
-inline void EmitVertex(CMeshBuilder& mb, const BrushVertex& v, bool bHasColor, bool bHasLightmapUV)
+inline void EmitVertex(CMeshBuilder& mb, const BrushVertex& v, bool bHasColor, bool bHasLightmapUV, bool bHasTangent)
 {
     mb.Position3f(v.x, v.y, v.z);
     mb.Normal3f(v.nx, v.ny, v.nz);
@@ -53,10 +55,15 @@ inline void EmitVertex(CMeshBuilder& mb, const BrushVertex& v, bool bHasColor, b
     {
         mb.Color4ub(v.r, v.g, v.b, v.a);
     }
+    if (bHasTangent)
+    {
+        mb.TangentS3f(v.tx, v.ty, v.tz);
+        mb.TangentT3f(v.bx, v.by, v.bz);
+    }
     mb.AdvanceVertex();
 }
 
-void BuildWall(IMesh* pMesh, bool bHasColor, bool bHasLightmapUV)
+void BuildWall(IMesh* pMesh, bool bHasColor, bool bHasLightmapUV, bool bHasTangent)
 {
     // Vertical quad centered at (0, 0, 64), width 128 (in Y: -64 to +64), height 128 (in Z: 0 to 128)
     // Facing +X (towards default HLMV camera looking towards origin from +X)
@@ -65,24 +72,24 @@ void BuildWall(IMesh* pMesh, bool bHasColor, bool bHasLightmapUV)
 
     const BrushVertex verts[4] = {
         // v0: Bottom-Right
-        { 0.0f, -64.0f,   0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 1.0f,  1.0f, 1.0f,  255, 255, 255, 255 },
+        { 0.0f, -64.0f,   0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f, -1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
         // v1: Bottom-Left
-        { 0.0f,  64.0f,   0.0f,  1.0f, 0.0f, 0.0f,  0.0f, 1.0f,  0.0f, 1.0f,  255, 255, 255, 255 },
+        { 0.0f,  64.0f,   0.0f,  1.0f, 0.0f, 0.0f,  0.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f, -1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
         // v2: Top-Left
-        { 0.0f,  64.0f, 128.0f,  1.0f, 0.0f, 0.0f,  0.0f, 0.0f,  0.0f, 0.0f,  255, 255, 255, 255 },
+        { 0.0f,  64.0f, 128.0f,  1.0f, 0.0f, 0.0f,  0.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f, -1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
         // v3: Top-Right
-        { 0.0f, -64.0f, 128.0f,  1.0f, 0.0f, 0.0f,  1.0f, 0.0f,  1.0f, 0.0f,  255, 255, 255, 255 },
+        { 0.0f, -64.0f, 128.0f,  1.0f, 0.0f, 0.0f,  1.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f, -1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
     };
 
     for (int i = 0; i < 4; ++i)
     {
-        EmitVertex(mb, verts[i], bHasColor, bHasLightmapUV);
+        EmitVertex(mb, verts[i], bHasColor, bHasLightmapUV, bHasTangent);
     }
 
     mb.End();
 }
 
-void BuildFloor(IMesh* pMesh, bool bHasColor, bool bHasLightmapUV)
+void BuildFloor(IMesh* pMesh, bool bHasColor, bool bHasLightmapUV, bool bHasTangent)
 {
     // Horizontal 128x128 quad in XY plane at Z=0, facing +Z (normal 0, 0, 1)
     // Centered at (0, 0, 0), X in [-64, 64], Y in [-64, 64]
@@ -91,76 +98,76 @@ void BuildFloor(IMesh* pMesh, bool bHasColor, bool bHasLightmapUV)
 
     const BrushVertex verts[4] = {
         // v0: Near-Right (X=+64, Y=-64)
-        {  64.0f, -64.0f, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f,  1.0f, 1.0f,  255, 255, 255, 255 },
+        {  64.0f, -64.0f, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f, 0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
         // v1: Near-Left (X=+64, Y=+64)
-        {  64.0f,  64.0f, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f,  0.0f, 1.0f,  255, 255, 255, 255 },
+        {  64.0f,  64.0f, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f, 0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
         // v2: Far-Left (X=-64, Y=+64)
-        { -64.0f,  64.0f, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f,  0.0f, 0.0f,  255, 255, 255, 255 },
+        { -64.0f,  64.0f, 0.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f, 0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
         // v3: Far-Right (X=-64, Y=-64)
-        { -64.0f, -64.0f, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f,  1.0f, 0.0f,  255, 255, 255, 255 },
+        { -64.0f, -64.0f, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f, 0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
     };
 
     for (int i = 0; i < 4; ++i)
     {
-        EmitVertex(mb, verts[i], bHasColor, bHasLightmapUV);
+        EmitVertex(mb, verts[i], bHasColor, bHasLightmapUV, bHasTangent);
     }
 
     mb.End();
 }
 
-void BuildCube(IMesh* pMesh, bool bHasColor, bool bHasLightmapUV)
+void BuildCube(IMesh* pMesh, bool bHasColor, bool bHasLightmapUV, bool bHasTangent)
 {
-    // 64x64x64 box centered at (0, 0, 32), 6 quad faces, each face with correct normal and UVs
+    // 64x64x64 box centered at (0, 0, 32), 6 quad faces, each face with correct normal, UVs, and tangents
     CMeshBuilder mb;
     mb.Begin(pMesh, MATERIAL_QUADS, 6);
 
     const BrushVertex verts[24] = {
         // 1. Front face (+X, normal 1, 0, 0)
-        {  32.0f, -32.0f,  0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 1.0f,  1.0f, 1.0f,  255, 255, 255, 255 },
-        {  32.0f,  32.0f,  0.0f,  1.0f, 0.0f, 0.0f,  0.0f, 1.0f,  0.0f, 1.0f,  255, 255, 255, 255 },
-        {  32.0f,  32.0f, 64.0f,  1.0f, 0.0f, 0.0f,  0.0f, 0.0f,  0.0f, 0.0f,  255, 255, 255, 255 },
-        {  32.0f, -32.0f, 64.0f,  1.0f, 0.0f, 0.0f,  1.0f, 0.0f,  1.0f, 0.0f,  255, 255, 255, 255 },
+        {  32.0f, -32.0f,  0.0f,  1.0f, 0.0f, 0.0f,  1.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f, -1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        {  32.0f,  32.0f,  0.0f,  1.0f, 0.0f, 0.0f,  0.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f, -1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        {  32.0f,  32.0f, 64.0f,  1.0f, 0.0f, 0.0f,  0.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f, -1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        {  32.0f, -32.0f, 64.0f,  1.0f, 0.0f, 0.0f,  1.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f, -1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
 
         // 2. Back face (-X, normal -1, 0, 0)
-        { -32.0f,  32.0f,  0.0f, -1.0f, 0.0f, 0.0f,  1.0f, 1.0f,  1.0f, 1.0f,  255, 255, 255, 255 },
-        { -32.0f, -32.0f,  0.0f, -1.0f, 0.0f, 0.0f,  0.0f, 1.0f,  0.0f, 1.0f,  255, 255, 255, 255 },
-        { -32.0f, -32.0f, 64.0f, -1.0f, 0.0f, 0.0f,  0.0f, 0.0f,  0.0f, 0.0f,  255, 255, 255, 255 },
-        { -32.0f,  32.0f, 64.0f, -1.0f, 0.0f, 0.0f,  1.0f, 0.0f,  1.0f, 0.0f,  255, 255, 255, 255 },
+        { -32.0f,  32.0f,  0.0f, -1.0f, 0.0f, 0.0f,  1.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f,  1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        { -32.0f, -32.0f,  0.0f, -1.0f, 0.0f, 0.0f,  0.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f,  1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        { -32.0f, -32.0f, 64.0f, -1.0f, 0.0f, 0.0f,  0.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f,  1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        { -32.0f,  32.0f, 64.0f, -1.0f, 0.0f, 0.0f,  1.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  0.0f,  1.0f, 0.0f,  0.0f, 0.0f, -1.0f },
 
         // 3. Left face (+Y, normal 0, 1, 0)
-        {  32.0f,  32.0f,  0.0f,  0.0f, 1.0f, 0.0f,  0.0f, 1.0f,  0.0f, 1.0f,  255, 255, 255, 255 },
-        { -32.0f,  32.0f,  0.0f,  0.0f, 1.0f, 0.0f,  1.0f, 1.0f,  1.0f, 1.0f,  255, 255, 255, 255 },
-        { -32.0f,  32.0f, 64.0f,  0.0f, 1.0f, 0.0f,  1.0f, 0.0f,  1.0f, 0.0f,  255, 255, 255, 255 },
-        {  32.0f,  32.0f, 64.0f,  0.0f, 1.0f, 0.0f,  0.0f, 0.0f,  0.0f, 0.0f,  255, 255, 255, 255 },
+        {  32.0f,  32.0f,  0.0f,  0.0f, 1.0f, 0.0f,  0.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        { -32.0f,  32.0f,  0.0f,  0.0f, 1.0f, 0.0f,  1.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        { -32.0f,  32.0f, 64.0f,  0.0f, 1.0f, 0.0f,  1.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        {  32.0f,  32.0f, 64.0f,  0.0f, 1.0f, 0.0f,  0.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f, 0.0f, -1.0f },
 
         // 4. Right face (-Y, normal 0, -1, 0)
-        { -32.0f, -32.0f,  0.0f,  0.0f,-1.0f, 0.0f,  0.0f, 1.0f,  0.0f, 1.0f,  255, 255, 255, 255 },
-        {  32.0f, -32.0f,  0.0f,  0.0f,-1.0f, 0.0f,  1.0f, 1.0f,  1.0f, 1.0f,  255, 255, 255, 255 },
-        {  32.0f, -32.0f, 64.0f,  0.0f,-1.0f, 0.0f,  1.0f, 0.0f,  1.0f, 0.0f,  255, 255, 255, 255 },
-        { -32.0f, -32.0f, 64.0f,  0.0f,-1.0f, 0.0f,  0.0f, 0.0f,  0.0f, 0.0f,  255, 255, 255, 255 },
+        { -32.0f, -32.0f,  0.0f,  0.0f,-1.0f, 0.0f,  0.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255, -1.0f,  0.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        {  32.0f, -32.0f,  0.0f,  0.0f,-1.0f, 0.0f,  1.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255, -1.0f,  0.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        {  32.0f, -32.0f, 64.0f,  0.0f,-1.0f, 0.0f,  1.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255, -1.0f,  0.0f, 0.0f,  0.0f, 0.0f, -1.0f },
+        { -32.0f, -32.0f, 64.0f,  0.0f,-1.0f, 0.0f,  0.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255, -1.0f,  0.0f, 0.0f,  0.0f, 0.0f, -1.0f },
 
         // 5. Top face (+Z, normal 0, 0, 1)
-        {  32.0f, -32.0f, 64.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f,  1.0f, 1.0f,  255, 255, 255, 255 },
-        {  32.0f,  32.0f, 64.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f,  0.0f, 1.0f,  255, 255, 255, 255 },
-        { -32.0f,  32.0f, 64.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f,  0.0f, 0.0f,  255, 255, 255, 255 },
-        { -32.0f, -32.0f, 64.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f,  1.0f, 0.0f,  255, 255, 255, 255 },
+        {  32.0f, -32.0f, 64.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
+        {  32.0f,  32.0f, 64.0f,  0.0f, 0.0f, 1.0f,  0.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
+        { -32.0f,  32.0f, 64.0f,  0.0f, 0.0f, 1.0f,  0.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
+        { -32.0f, -32.0f, 64.0f,  0.0f, 0.0f, 1.0f,  1.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
 
         // 6. Bottom face (-Z, normal 0, 0, -1)
-        { -32.0f, -32.0f,  0.0f,  0.0f, 0.0f,-1.0f,  1.0f, 1.0f,  1.0f, 1.0f,  255, 255, 255, 255 },
-        { -32.0f,  32.0f,  0.0f,  0.0f, 0.0f,-1.0f,  0.0f, 1.0f,  0.0f, 1.0f,  255, 255, 255, 255 },
-        {  32.0f,  32.0f,  0.0f,  0.0f, 0.0f,-1.0f,  0.0f, 0.0f,  0.0f, 0.0f,  255, 255, 255, 255 },
-        {  32.0f, -32.0f,  0.0f,  0.0f, 0.0f,-1.0f,  1.0f, 0.0f,  1.0f, 0.0f,  255, 255, 255, 255 },
+        { -32.0f, -32.0f,  0.0f,  0.0f, 0.0f,-1.0f,  1.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f,  1.0f, 0.0f },
+        { -32.0f,  32.0f,  0.0f,  0.0f, 0.0f,-1.0f,  0.0f, 1.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f,  1.0f, 0.0f },
+        {  32.0f,  32.0f,  0.0f,  0.0f, 0.0f,-1.0f,  0.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f,  1.0f, 0.0f },
+        {  32.0f, -32.0f,  0.0f,  0.0f, 0.0f,-1.0f,  1.0f, 0.0f,  0.5f, 0.5f,  255, 255, 255, 255,  1.0f,  0.0f, 0.0f,  0.0f,  1.0f, 0.0f },
     };
 
     for (int i = 0; i < 24; ++i)
     {
-        EmitVertex(mb, verts[i], bHasColor, bHasLightmapUV);
+        EmitVertex(mb, verts[i], bHasColor, bHasLightmapUV, bHasTangent);
     }
 
     mb.End();
 }
 
-void BuildDisplacement(IMesh* pMesh, bool bHasColor, bool bHasLightmapUV)
+void BuildDisplacement(IMesh* pMesh, bool bHasColor, bool bHasLightmapUV, bool bHasTangent)
 {
     // Subdivided 16x16 grid (128x128 units) with vertex alpha transitioning smoothly
     // from 0.0 (left side: Y=+64) to 1.0 (right side: Y=-64), and color white (255, 255, 255).
@@ -191,18 +198,18 @@ void BuildDisplacement(IMesh* pMesh, bool bHasColor, bool bHasLightmapUV)
 
             const BrushVertex cellVerts[4] = {
                 // v0: Near-Right (x0, y1)
-                { x0, y1, 0.0f,  0.0f, 0.0f, 1.0f,  u1, v0,  u1, v0,  255, 255, 255, a1 },
+                { x0, y1, 0.0f,  0.0f, 0.0f, 1.0f,  u1, v0,  0.5f, 0.5f,  255, 255, 255, a1,  1.0f, 0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
                 // v1: Near-Left (x0, y0)
-                { x0, y0, 0.0f,  0.0f, 0.0f, 1.0f,  u0, v0,  u0, v0,  255, 255, 255, a0 },
+                { x0, y0, 0.0f,  0.0f, 0.0f, 1.0f,  u0, v0,  0.5f, 0.5f,  255, 255, 255, a0,  1.0f, 0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
                 // v2: Far-Left (x1, y0)
-                { x1, y0, 0.0f,  0.0f, 0.0f, 1.0f,  u0, v1,  u0, v1,  255, 255, 255, a0 },
+                { x1, y0, 0.0f,  0.0f, 0.0f, 1.0f,  u0, v1,  0.5f, 0.5f,  255, 255, 255, a0,  1.0f, 0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
                 // v3: Far-Right (x1, y1)
-                { x1, y1, 0.0f,  0.0f, 0.0f, 1.0f,  u1, v1,  u1, v1,  255, 255, 255, a1 },
+                { x1, y1, 0.0f,  0.0f, 0.0f, 1.0f,  u1, v1,  0.5f, 0.5f,  255, 255, 255, a1,  1.0f, 0.0f, 0.0f,  0.0f, -1.0f, 0.0f },
             };
 
             for (int v = 0; v < 4; ++v)
             {
-                EmitVertex(mb, cellVerts[v], bHasColor, bHasLightmapUV);
+                EmitVertex(mb, cellVerts[v], bHasColor, bHasLightmapUV, bHasTangent);
             }
         }
     }
@@ -263,20 +270,21 @@ void BrushRender_Draw(IMaterial* pMaterial)
     const VertexFormat_t fmt = pMaterial->GetVertexFormat();
     const bool bHasColor = (fmt & VERTEX_COLOR) != 0;
     const bool bHasLightmapUV = (TexCoordSize(1, fmt) > 0);
+    const bool bHasTangent = (fmt & VERTEX_TANGENT_S) != 0 || (fmt & VERTEX_TANGENT_SPACE) != 0;
 
     switch (s_currentBrushShape)
     {
     case BRUSH_SHAPE_WALL:
-        BuildWall(pMesh, bHasColor, bHasLightmapUV);
+        BuildWall(pMesh, bHasColor, bHasLightmapUV, bHasTangent);
         break;
     case BRUSH_SHAPE_FLOOR:
-        BuildFloor(pMesh, bHasColor, bHasLightmapUV);
+        BuildFloor(pMesh, bHasColor, bHasLightmapUV, bHasTangent);
         break;
     case BRUSH_SHAPE_CUBE:
-        BuildCube(pMesh, bHasColor, bHasLightmapUV);
+        BuildCube(pMesh, bHasColor, bHasLightmapUV, bHasTangent);
         break;
     case BRUSH_SHAPE_DISPLACEMENT:
-        BuildDisplacement(pMesh, bHasColor, bHasLightmapUV);
+        BuildDisplacement(pMesh, bHasColor, bHasLightmapUV, bHasTangent);
         break;
     default:
         return;

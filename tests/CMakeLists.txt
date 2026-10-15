@@ -74,6 +74,29 @@ vtf_deploy_vtflib_runtime(ui_tests)
 
 add_test(NAME ui_tests COMMAND ui_tests)
 
+# --- model viewer tests (IPC dumps, model materials, animation, export plan) --
+
+add_executable(model_view_tests
+    test_main.cpp
+    ipc_dump_tests.cpp
+    model_scene_tests.cpp
+    animation_model_tests.cpp
+    export_plan_tests.cpp
+)
+
+target_include_directories(model_view_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/framework"
+)
+
+target_link_libraries(model_view_tests PRIVATE
+    ui
+    vmtviewer_warnings
+)
+
+vtf_deploy_vtflib_runtime(model_view_tests)
+
+add_test(NAME model_view_tests COMMAND model_view_tests)
+
 # --- steam detection tests ----------------------------------------------------
 
 add_executable(steam_detection_tests

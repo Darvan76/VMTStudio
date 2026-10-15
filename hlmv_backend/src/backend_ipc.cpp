@@ -208,7 +208,18 @@ bool Backend_SetShape(const std::string& shape)
 bool Backend_MountDirectory(const std::string& path)
 {
     if (!g_pFileSystem || path.empty()) return false;
-    g_pFileSystem->AddSearchPath(path.c_str(), "GAME", PATH_ADD_TO_HEAD);
+    std::string clean = path;
+    if (clean.size() >= 2 && clean.front() == '"' && clean.back() == '"')
+    {
+        clean = clean.substr(1, clean.size() - 2);
+    }
+    while (!clean.empty() && (clean.back() == '/' || clean.back() == '\\'))
+    {
+        clean.pop_back();
+    }
+    if (clean.empty()) return false;
+    g_pFileSystem->AddSearchPath(clean.c_str(), "GAME", PATH_ADD_TO_HEAD);
+    HLMV_Log("[IPC] Mounted directory: %s\n", clean.c_str());
     return true;
 }
 

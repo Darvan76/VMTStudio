@@ -2,6 +2,7 @@ add_library(engine_bridge STATIC
     src/engine_bridge.cpp
     src/pe.cpp
     src/dll_loader.cpp
+    src/ipc_dump.cpp
 )
 
 target_include_directories(engine_bridge PUBLIC

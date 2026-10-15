@@ -431,6 +431,91 @@ public:
         return vmt::Ok();
     }
 
+    // --- Model viewer: queries ------------------------------------------------
+    // The response-file plumbing behind these four lives in the IPC protocol v2
+    // work; until then they fail cleanly instead of pretending to work.
+
+    vmt::Result<ModelList> list_models(const std::string&) override {
+        return vmt::Err<ModelList>(engine_error(vmt::ErrorCode::Internal,
+                                                "list_models is not implemented yet"));
+    }
+
+    vmt::Result<ModelScene> query_model_scene() override {
+        return vmt::Err<ModelScene>(engine_error(vmt::ErrorCode::Internal,
+                                                 "query_model_scene is not implemented yet"));
+    }
+
+    vmt::Result<AnimState> query_anim_state() override {
+        return vmt::Err<AnimState>(engine_error(vmt::ErrorCode::Internal,
+                                                "query_anim_state is not implemented yet"));
+    }
+
+    vmt::Result<std::vector<unsigned char>> read_game_binary(
+        const std::string& game_path) override {
+        return read_binary_file(game_path);
+    }
+
+    // --- Model viewer: animation control --------------------------------------
+
+    vmt::Result<void> set_sequence(int index) override {
+        return send_simple("SET_SEQUENCE " + std::to_string(index));
+    }
+
+    vmt::Result<void> set_sequence_label(const std::string& label) override {
+        return send_simple("SET_SEQUENCE_LABEL " + label);
+    }
+
+    vmt::Result<void> set_frame(int frame) override {
+        return send_simple("SET_FRAME " + std::to_string(frame));
+    }
+
+    vmt::Result<void> step_frame(int delta) override {
+        return send_simple("STEP_FRAME " + std::to_string(delta));
+    }
+
+    vmt::Result<void> set_loop(bool enabled) override {
+        return send_simple(std::string("SET_LOOP ") + (enabled ? "1" : "0"));
+    }
+
+    vmt::Result<void> stop_animation() override {
+        return send_simple("SET_STOP");
+    }
+
+    vmt::Result<void> set_blend_time(float seconds) override {
+        return send_simple("SET_BLEND_TIME " + std::to_string(seconds));
+    }
+
+    vmt::Result<void> blend_now() override {
+        return send_simple("BLEND_NOW");
+    }
+
+    vmt::Result<void> set_overlay(int layer, int sequence, float weight) override {
+        return send_simple("SET_OVERLAY " + std::to_string(layer) + " " +
+                           std::to_string(sequence) + " " + std::to_string(weight));
+    }
+
+    vmt::Result<void> set_pose_parameter(int index, float value) override {
+        return send_simple("SET_POSEPARAM " + std::to_string(index) + " " +
+                           std::to_string(value));
+    }
+
+    vmt::Result<void> set_bodygroup(int group, int value) override {
+        return send_simple("SET_BODYGROUP " + std::to_string(group) + " " +
+                           std::to_string(value));
+    }
+
+    vmt::Result<void> set_skin(int skin) override {
+        return send_simple("SET_SKIN " + std::to_string(skin));
+    }
+
+    vmt::Result<void> set_view_flag(const std::string& flag, bool enabled) override {
+        return send_simple("SET_VIEWFLAG " + flag + (enabled ? " 1" : " 0"));
+    }
+
+    vmt::Result<void> reload_material_by_name(const std::string& material_name) override {
+        return send_simple("RELOAD_MATERIAL " + material_name);
+    }
+
     vmt::Result<void> render() override {
         if (child_hwnd_ != nullptr && IsWindow(child_hwnd_)) {
             InvalidateRect(child_hwnd_, nullptr, FALSE);
@@ -499,6 +584,15 @@ private:
             return result != 0;
         }
         return false;
+    }
+
+    // send_command() with the standard error for a rejected command.
+    vmt::Result<void> send_simple(const std::string& cmd) {
+        if (!send_command(cmd)) {
+            return vmt::Err<void>(engine_error(vmt::ErrorCode::RenderFailed,
+                                               "hlmv_backend rejected: " + cmd));
+        }
+        return vmt::Ok();
     }
 
     void terminate_backend() {
