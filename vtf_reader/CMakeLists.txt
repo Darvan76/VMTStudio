@@ -45,9 +45,11 @@ add_custom_target(vtflib_apply_patch
     COMMENT "Ensuring the VTFLib++ patches are applied"
     VERBATIM)
 
-if(NOT EXISTS "${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/VTFLib/Release/VTFLib++.lib")
+if(NOT EXISTS "${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/VTFLib/Release/VTFLib++.lib" AND
+   NOT EXISTS "${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/VTFLib/Debug/VTFLib++_d.lib" AND
+   NOT EXISTS "${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/VTFLib/Debug/VTFLib++.lib")
     message(FATAL_ERROR
-        "VTFLib++ has not been built yet (missing ${VTFLIB_BUILD_DIR}/VTFLib/Release/VTFLib++.lib).\n")
+        "VTFLib++ has not been built yet (missing ${VTFLIB_BUILD_DIR}/VTFLib library).\n")
 endif()
 
 add_library(vtf_reader STATIC

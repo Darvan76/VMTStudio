@@ -861,7 +861,11 @@ MDLViewer::handleEvent (mxEvent *event)
 
 	case mxEvent::Activate:
 	{
-		if (event->action)
+		// Embedded (vmtstudio hosts this window): the host owns the viewport,
+		// so the frame loop must keep running even when the child window is not
+		// the active one; clearing the idle window here would freeze playback
+		// and stop every redraw until the next command arrives.
+		if (event->action || CommandLine()->FindParm("-embed"))
 		{
 			mx::setIdleWindow( getMatSysWindow() );
 		}

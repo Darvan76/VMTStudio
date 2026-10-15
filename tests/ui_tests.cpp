@@ -12,6 +12,7 @@
 #include "ui/text_encoding.h"
 #include "ui/texture_thumbnail.h"
 #include "ui/validate.h"
+#include "ui/version.h"
 #include "vmt/schema.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -2578,4 +2579,77 @@ UT_TEST_CASE("ui texture: thumbnail decodes gracefully when texture has a typo o
         UT_CHECK(thumb.value().height > 0);
         UT_CHECK(!thumb.value().bgra.empty());
     }
+}
+
+UT_TEST_CASE("ui version: semantic version parsing and comparison") {
+    // Current compiled version
+    const ui::AppVersion current = ui::AppVersion::current();
+    UT_CHECK(current.is_valid());
+
+    // Basic parsing
+    const ui::AppVersion v1 = ui::AppVersion::parse("0.1.0");
+    UT_CHECK_EQ(v1.major, 0);
+    UT_CHECK_EQ(v1.minor, 1);
+    UT_CHECK_EQ(v1.patch, 0);
+    UT_CHECK_EQ(v1.build, 0);
+    UT_CHECK(v1.prerelease.empty());
+
+    // Leading 'v' and whitespace
+    const ui::AppVersion v1_tagged = ui::AppVersion::parse("  v0.1.0  ");
+    UT_CHECK_EQ(v1, v1_tagged);
+
+    // Prerelease suffix
+    const ui::AppVersion v_beta = ui::AppVersion::parse("v0.2.0-beta.1");
+    UT_CHECK_EQ(v_beta.major, 0);
+    UT_CHECK_EQ(v_beta.minor, 2);
+    UT_CHECK_EQ(v_beta.patch, 0);
+    UT_CHECK_EQ(v_beta.prerelease, std::string("beta.1"));
+
+    // Comparisons
+    UT_CHECK(ui::AppVersion::parse("v0.1.1") > ui::AppVersion::parse("0.1.0"));
+    UT_CHECK(ui::AppVersion::parse("v0.2.0") > ui::AppVersion::parse("v0.1.9"));
+    UT_CHECK(ui::AppVersion::parse("v1.0.0") > ui::AppVersion::parse("0.9.99"));
+    UT_CHECK(ui::AppVersion::parse("0.1.0") < ui::AppVersion::parse("0.1.1"));
+    UT_CHECK(ui::AppVersion::parse("0.2.0") == ui::AppVersion::parse("v0.2.0"));
+    UT_CHECK(ui::AppVersion::parse("0.2.0") != ui::AppVersion::parse("0.2.1"));
+
+    // SemVer: release without prerelease is newer than one with prerelease
+    UT_CHECK(ui::AppVersion::parse("0.2.0") > ui::AppVersion::parse("0.2.0-rc1"));
+    UT_CHECK(ui::AppVersion::parse("0.2.0-rc2") > ui::AppVersion::parse("0.2.0-rc1"));
+
+    // SemVer 2.0.0: numeric prerelease identifiers compared numerically ("rc.10" > "rc.2")
+    UT_CHECK(ui::AppVersion::parse("0.2.0-rc.10") > ui::AppVersion::parse("0.2.0-rc.2"));
+    UT_CHECK(ui::AppVersion::parse("0.2.0-alpha") < ui::AppVersion::parse("0.2.0-alpha.1"));
+    UT_CHECK(ui::AppVersion::parse("0.2.0-alpha.1") < ui::AppVersion::parse("0.2.0-alpha.beta"));
+    UT_CHECK(ui::AppVersion::parse("0.2.0-alpha.beta") < ui::AppVersion::parse("0.2.0-beta"));
+
+    // SemVer 2.0.0: build metadata (+...) is stripped and ignored for precedence
+    const ui::AppVersion v_build = ui::AppVersion::parse("1.0.0+20261015");
+    UT_CHECK(v_build.prerelease.empty());
+    UT_CHECK(v_build == ui::AppVersion::parse("1.0.0"));
+    UT_CHECK(!(v_build < ui::AppVersion::parse("1.0.0")));
+    UT_CHECK(!(ui::AppVersion::parse("1.0.0") < v_build));
+
+    const ui::AppVersion v_pre_build = ui::AppVersion::parse("1.0.0-rc.1+sha.abcdef");
+    UT_CHECK_EQ(v_pre_build.prerelease, std::string("rc.1"));
+    UT_CHECK(v_pre_build == ui::AppVersion::parse("1.0.0-rc.1"));
+
+    // Serialization
+    UT_CHECK_EQ(v1.to_string(), std::string("0.1.0"));
+    UT_CHECK_EQ(v_beta.to_string(), std::string("0.2.0-beta.1"));
+}
+
+UT_TEST_CASE("ui settings: updater options roundtrip") {
+    const fs::path dir = fresh_temp_dir();
+    const fs::path file = dir / "settings_updater.ini";
+
+    ui::UISettings settings;
+    settings.ignored_update_version = "v0.3.5";
+    settings.check_for_updates = false;
+
+    UT_CHECK(settings.save(file));
+
+    const ui::UISettings loaded = ui::UISettings::load(file);
+    UT_CHECK_EQ(loaded.ignored_update_version, std::string("v0.3.5"));
+    UT_CHECK(!loaded.check_for_updates);
 }

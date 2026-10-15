@@ -33,7 +33,11 @@ AboutDialog::AboutDialog(QWidget* parent)
     titleLabel->setStyleSheet("color: #e08214;"); // Source orange
     layout->addWidget(titleLabel);
 
+#ifdef VMTSTUDIO_VERSION_STRING
+    auto* versionLabel = new QLabel(tr("<b>Version %1 (Qt 6 Edition)</b>").arg(VMTSTUDIO_VERSION_STRING), this);
+#else
     auto* versionLabel = new QLabel(tr("<b>Version 0.1.0 (Qt 6 Edition)</b>"), this);
+#endif
     versionLabel->setAlignment(Qt::AlignCenter);
     layout->addWidget(versionLabel);
 

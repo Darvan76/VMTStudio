@@ -23,6 +23,8 @@
 #include "vmt/schema.h"
 #include "bridge/engine_view.h"
 
+#include <QPointer>
+
 namespace ui {
 namespace qt {
 
@@ -33,6 +35,9 @@ class NotificationPopup;
 class ModelBrowserDialog;
 class ModelMaterialsDock;
 class AnimationDock;
+class AppUpdater;
+class UpdateDialog;
+struct ReleaseInfo;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -108,6 +113,11 @@ private slots:
     void onToggleDebugConsole();
     void onOpenGameConnection();
     void onOpenAbout();
+    void onCheckForUpdates();
+    void onUpdateAvailable(const ui::qt::ReleaseInfo& release, bool manual);
+    void onUpToDate(bool manual);
+    void onCheckFailed(const QString& error, bool manual);
+    void onUserChoseSkip(const QString& versionTag);
 
     // Widget interactions
     void onCodeEditorTextChanged();
@@ -238,6 +248,9 @@ private:
 
     QTimer* m_previewSyncTimer = nullptr;
     bool m_suppressSync = false;
+
+    AppUpdater* m_updater = nullptr;
+    QPointer<UpdateDialog> m_updateDialog;
 };
 
 } // namespace qt

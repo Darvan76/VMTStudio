@@ -101,13 +101,24 @@ cmake-build-*/
 .omo/
 .agent/
 *.log
+hlmv_debug.log
 *.tmp
 *.temp
 *.dmp
 *.mdmp
+*.stackdump
+*.core
 crashpad/
 dist/
 *.zip
+*.7z
+*.tar.gz
+
+# Archivos de respuesta IPC local y temporales de prueba
+*.dat
+*.bin
+*.err
+vmtviewer_vtf_tests/
 
 # Volcados de texturas / capturas temporales de pruebas de HLMV
 *.tga

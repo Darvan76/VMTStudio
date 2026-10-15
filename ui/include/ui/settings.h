@@ -57,6 +57,10 @@ struct UISettings {
     std::string last_model;
     std::vector<std::string> recent_models; // most recent first
 
+    // Application updater configuration
+    std::string ignored_update_version; // version tag to suppress notification for (e.g. "v0.1.1")
+    bool check_for_updates = true;      // check GitHub releases on startup
+
     // Missing or unreadable files yield defaults; a malformed line is ignored.
     static UISettings load(const std::filesystem::path& file);
 

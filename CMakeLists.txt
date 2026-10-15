@@ -37,6 +37,20 @@ target_compile_options(vmtstudio_warnings INTERFACE
 )
 add_library(vmtviewer_warnings ALIAS vmtstudio_warnings)
 
+# --- Sanitizers ---------------------------------------------------------------
+# AddressSanitizer (ASan) configuration per .agent/skills/address-sanitizer/SKILL.md
+option(ENABLE_ASAN "Enable AddressSanitizer (ASan) for memory safety checks" OFF)
+if(ENABLE_ASAN)
+    if(MSVC)
+        message(STATUS "AddressSanitizer enabled (/fsanitize=address)")
+        add_compile_options(/fsanitize=address)
+    else()
+        message(STATUS "AddressSanitizer enabled (-fsanitize=address)")
+        add_compile_options(-fsanitize=address)
+        add_link_options(-fsanitize=address)
+    endif()
+endif()
+
 # --- Output layout ------------------------------------------------------------
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

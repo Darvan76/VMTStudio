@@ -1,24 +1,43 @@
 name: CI/CD
 
 on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - 'Release'
+          - 'Debug'
+          - 'Both'
+      create_release:
+        description: 'Publish release on GitHub'
+        required: false
+        default: false
+        type: boolean
   push:
     branches:
       - master
+      - main
       - 'release/*'
     tags:
       - 'v*'
   pull_request:
     branches:
       - master
+      - main
       - 'release/*'
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build & Test (Windows x64 + Win32)
+  build-release:
+    name: Build & Test Release (Windows x64 + Win32)
     runs-on: windows-latest
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.configuration == 'Release' || github.event.inputs.configuration == 'Both'
 
     steps:
       - name: Checkout repository
@@ -48,12 +67,12 @@ jobs:
       - name: Build VTFLib++ (Win32 & x64)
         shell: pwsh
         run: |
-          Write-Host "Building 32-bit VTFLib++ (Win32)..."
+          Write-Host "Configuring and compiling 32-bit VTFLib++ (Release)..."
           cmake -B thirdparty/vtflib/build_vtflib -S thirdparty/vtflib -A Win32 `
                 -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
           cmake --build thirdparty/vtflib/build_vtflib --config Release
 
-          Write-Host "Building 64-bit VTFLib++ (x64)..."
+          Write-Host "Configuring and compiling 64-bit VTFLib++ (Release)..."
           cmake -B thirdparty/vtflib/build_vtflib64 -S thirdparty/vtflib -A x64 `
                 -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
           cmake --build thirdparty/vtflib/build_vtflib64 --config Release
@@ -71,7 +90,7 @@ jobs:
           $sdkPublic = "$env:RUNNER_TEMP/source-sdk-2013/src/public" -replace '\\', '/'
           Write-Host "Configuring Win32 build with SOURCE_SDK_PUBLIC=$sdkPublic..."
           cmake -S . -B build -A Win32 -DSOURCE_SDK_PUBLIC="$sdkPublic"
-          Write-Host "Compiling 32-bit HLMV backend..."
+          Write-Host "Compiling 32-bit HLMV backend (Release)..."
           cmake --build build --config Release --target hlmv_backend
 
       - name: Build 64-bit VMT-Studio & Test Suite
@@ -79,28 +98,126 @@ jobs:
         run: |
           Write-Host "Configuring 64-bit build with Qt at ${{ env.QT_ROOT_DIR }}..."
           cmake -S . -B build64 -A x64 -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT_DIR }}"
-          Write-Host "Compiling 64-bit VMT-Studio and unit tests..."
+          Write-Host "Compiling 64-bit VMT-Studio and unit tests (Release)..."
           cmake --build build64 --config Release
 
       - name: Run CTest Unit Tests
         shell: pwsh
         run: |
-          Write-Host "Running 64-bit CTest test suite..."
+          Write-Host "Running 64-bit CTest test suite (Release)..."
           ctest --test-dir build64 -C Release --output-on-failure
 
-      - name: Package Release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Package Release Distribution
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1
+          Write-Host "Packaging Release distribution..."
+          powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1 -Config Release
+
+      - name: Upload Build Artifacts (ZIP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmtstudio-release-windows-x64
+          path: |
+            dist/*-Release*.zip
+            dist/*.zip
+          if-no-files-found: error
 
       - name: Upload Release to GitHub
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == true))
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            dist/*-Release*.zip
             dist/*.zip
             *.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-debug:
+    name: Build & Test Debug (Windows x64 + Win32)
+    runs-on: windows-latest
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.configuration == 'Debug' || github.event.inputs.configuration == 'Both'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Qt 6.8
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.8.2'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          dir: 'C:/'
+          modules: 'qttools'
+
+      - name: Apply VTFLib patches
+        shell: pwsh
+        run: |
+          cmake -P thirdparty/patches/apply_vtflib_patches.cmake
+
+      - name: Build VTFLib++ (Win32 & x64)
+        shell: pwsh
+        run: |
+          Write-Host "Configuring and compiling 32-bit VTFLib++ (Debug)..."
+          cmake -B thirdparty/vtflib/build_vtflib -S thirdparty/vtflib -A Win32 `
+                -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
+          cmake --build thirdparty/vtflib/build_vtflib --config Debug
+
+          Write-Host "Configuring and compiling 64-bit VTFLib++ (Debug)..."
+          cmake -B thirdparty/vtflib/build_vtflib64 -S thirdparty/vtflib -A x64 `
+                -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
+          cmake --build thirdparty/vtflib/build_vtflib64 --config Debug
+
+      - name: Checkout Source SDK 2013 Public Headers
+        shell: pwsh
+        run: |
+          Write-Host "Cloning Source SDK 2013 public headers (sparse checkout)..."
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/ValveSoftware/source-sdk-2013.git "$env:RUNNER_TEMP/source-sdk-2013"
+          git -C "$env:RUNNER_TEMP/source-sdk-2013" sparse-checkout set src/public
+
+      - name: Build 32-bit Backend (HLMV)
+        shell: pwsh
+        run: |
+          $sdkPublic = "$env:RUNNER_TEMP/source-sdk-2013/src/public" -replace '\\', '/'
+          Write-Host "Configuring Win32 build with SOURCE_SDK_PUBLIC=$sdkPublic..."
+          cmake -S . -B build -A Win32 -DSOURCE_SDK_PUBLIC="$sdkPublic"
+          Write-Host "Compiling 32-bit HLMV backend (Debug)..."
+          cmake --build build --config Debug --target hlmv_backend
+
+      - name: Build 64-bit VMT-Studio & Test Suite
+        shell: pwsh
+        run: |
+          Write-Host "Configuring 64-bit build with Qt at ${{ env.QT_ROOT_DIR }}..."
+          cmake -S . -B build64 -A x64 -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT_DIR }}"
+          Write-Host "Compiling 64-bit VMT-Studio and unit tests (Debug)..."
+          cmake --build build64 --config Debug
+
+      - name: Run CTest Unit Tests
+        shell: pwsh
+        run: |
+          Write-Host "Running 64-bit CTest test suite (Debug)..."
+          ctest --test-dir build64 -C Debug --output-on-failure
+
+      - name: Package Debug Distribution
+        shell: pwsh
+        run: |
+          Write-Host "Packaging Debug distribution..."
+          powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1 -Config Debug
+
+      - name: Upload Build Artifacts (ZIP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmtstudio-debug-windows-x64
+          path: |
+            dist/*-Debug*.zip
+            dist/*.zip
+          if-no-files-found: error

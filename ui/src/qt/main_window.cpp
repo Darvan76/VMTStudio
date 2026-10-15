@@ -11,6 +11,9 @@
 #include "connection_dialog.h"
 #include "about_dialog.h"
 #include "notification_popup.h"
+#include "app_updater.h"
+#include "update_dialog.h"
+#include "ui/version.h"
 #include "app_log.h"
 #include "ui/animation_model.h"
 #include "ui/shader_catalog.h"
@@ -213,6 +216,12 @@ MainWindow::MainWindow(QWidget* parent)
     }
 
     m_notificationPopup = new NotificationPopup(this);
+
+    m_updater = new AppUpdater(this);
+    connect(m_updater, &AppUpdater::updateAvailable, this, &MainWindow::onUpdateAvailable);
+    connect(m_updater, &AppUpdater::upToDate, this, &MainWindow::onUpToDate);
+    connect(m_updater, &AppUpdater::checkFailed, this, &MainWindow::onCheckFailed);
+
     setupMenus();
     setupToolBar();
     setupStatusBar();
@@ -433,6 +442,8 @@ void MainWindow::setupMenus() {
 
     // --- Help Menu ---
     auto* helpMenu = menuBar()->addMenu(tr("&Help"));
+    helpMenu->addAction(tr("Buscar &actualizaciones..."), this, &MainWindow::onCheckForUpdates);
+    helpMenu->addSeparator();
     helpMenu->addAction(tr("&About VMT-Studio..."), QKeySequence(Qt::Key_F1), this, &MainWindow::onOpenAbout);
 }
 
@@ -2035,6 +2046,60 @@ void MainWindow::onOpenAbout() {
     dlg.exec();
 }
 
+void MainWindow::onCheckForUpdates() {
+    if (m_updater) {
+        statusBar()->showMessage(tr("Comprobando actualizaciones en GitHub..."), 4000);
+        m_updater->checkForUpdates(true /* manual */, QString::fromStdString(m_settings.ignored_update_version));
+    }
+}
+
+void MainWindow::onUpdateAvailable(const ui::qt::ReleaseInfo& release, bool /*manual*/) {
+    if (m_updateDialog) {
+        m_updateDialog->raise();
+        m_updateDialog->activateWindow();
+        return;
+    }
+
+    m_updateDialog = new UpdateDialog(release, m_updater, this);
+    connect(m_updateDialog.data(), &UpdateDialog::userChoseSkip, this, &MainWindow::onUserChoseSkip);
+    m_updateDialog->setAttribute(Qt::WA_DeleteOnClose);
+    m_updateDialog->show();
+}
+
+void MainWindow::onUpToDate(bool manual) {
+    if (manual) {
+        const QString currentVer = QString::fromStdString(ui::AppVersion::current().to_string());
+        QMessageBox::information(
+            this,
+            tr("VMT-Studio al día"),
+            tr("¡Tienes instalada la versión más reciente! (v%1)").arg(currentVer)
+        );
+    }
+}
+
+void MainWindow::onCheckFailed(const QString& error, bool manual) {
+    if (manual) {
+        QMessageBox::warning(
+            this,
+            tr("Actualización de VMT-Studio"),
+            tr("No se pudo comprobar si hay actualizaciones en GitHub:\n\n%1").arg(error)
+        );
+    }
+}
+
+void MainWindow::onUserChoseSkip(const QString& versionTag) {
+    m_settings.ignored_update_version = versionTag.toStdString();
+    saveSettings();
+    if (m_notificationPopup) {
+        m_notificationPopup->showMessage(
+            tr("Actualización %1 omitida. No se volverá a recordar.").arg(versionTag),
+            NotificationSeverity::Info,
+            3500
+        );
+        m_notificationPopup->reposition(m_viewport);
+    }
+}
+
 void MainWindow::onCodeEditorTextChanged() {
     if (m_suppressSync) return;
 
@@ -2160,6 +2225,14 @@ void MainWindow::showEvent(QShowEvent* event) {
         }
         checkBrushMaterial(true);
     });
+
+    if (m_settings.check_for_updates) {
+        QTimer::singleShot(1000, this, [this]() {
+            if (m_updater) {
+                m_updater->checkForUpdates(false /* automatic */, QString::fromStdString(m_settings.ignored_update_version));
+            }
+        });
+    }
 }
 
 void MainWindow::resizeEvent(QResizeEvent* event) {

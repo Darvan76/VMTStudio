@@ -3,11 +3,42 @@
   "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
   "configurePresets": [
     {
+      "name": "x64-base",
+      "displayName": "Windows x64 (Visual Studio 2022)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "binaryDir": "${sourceDir}/build64",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "17"
+      }
+    },
+    {
+      "name": "x64-debug",
+      "displayName": "Windows x64 Debug",
+      "inherits": "x64-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "x64-release",
+      "displayName": "Windows x64 Release",
+      "inherits": "x64-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "x64-asan",
+      "displayName": "Windows x64 with AddressSanitizer",
+      "inherits": "x64-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_ASAN": "ON"
+      }
+    },
+    {
       "name": "x86-base",
       "displayName": "Windows x86 (Visual Studio 2022)",
       "generator": "Visual Studio 17 2022",
       "architecture": { "value": "Win32", "strategy": "set" },
-      "binaryDir": "${sourceDir}/build/${presetName}",
+      "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_CXX_STANDARD": "17"
       }
@@ -27,6 +58,21 @@
   ],
   "buildPresets": [
     {
+      "name": "x64-debug",
+      "configurePreset": "x64-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "x64-release",
+      "configurePreset": "x64-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "x64-asan",
+      "configurePreset": "x64-asan",
+      "configuration": "Debug"
+    },
+    {
       "name": "x86-debug",
       "configurePreset": "x86-debug",
       "configuration": "Debug"
@@ -38,6 +84,27 @@
     }
   ],
   "testPresets": [
+    {
+      "name": "x64-debug",
+      "configurePreset": "x64-debug",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "x64-release",
+      "configurePreset": "x64-release",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "x64-asan",
+      "configurePreset": "x64-asan",
+      "configuration": "Debug",
+      "environment": {
+        "ASAN_OPTIONS": "verbosity=1:abort_on_error=1:detect_leaks=0"
+      },
+      "output": { "outputOnFailure": true }
+    },
     {
       "name": "x86-debug",
       "configurePreset": "x86-debug",

@@ -57,6 +57,10 @@ UISettings UISettings::load(const std::filesystem::path& file) {
             settings.validation_dock_visible = value == "1" || value == "true";
         } else if (key == "last_model") {
             settings.last_model = value;
+        } else if (key == "ignored_update_version") {
+            settings.ignored_update_version = value;
+        } else if (key == "check_for_updates") {
+            settings.check_for_updates = value == "1" || value == "true";
         } else if (key == "recent") {
             if (!value.empty() && settings.recent_files.size() < kMaxRecentFiles) {
                 settings.recent_files.push_back(value);
@@ -98,6 +102,8 @@ bool UISettings::save(const std::filesystem::path& file) const {
         stream << "splitter_sizes=" << splitter_sizes << "\n";
         stream << "validation_dock_visible=" << (validation_dock_visible ? 1 : 0) << "\n";
         stream << "last_model=" << last_model << "\n";
+        stream << "ignored_update_version=" << ignored_update_version << "\n";
+        stream << "check_for_updates=" << (check_for_updates ? 1 : 0) << "\n";
         for (const std::string& recent : recent_files) {
             stream << "recent=" << recent << "\n";
         }

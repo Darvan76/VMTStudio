@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-find_package(Qt6 COMPONENTS Core Gui Widgets QUIET)
+find_package(Qt6 COMPONENTS Core Gui Widgets Network QUIET)
 
 if(Qt6_FOUND)
     set(CMAKE_AUTOMOC ON)
@@ -28,10 +28,15 @@ add_library(ui STATIC
     src/model_scene.cpp
     src/animation_model.cpp
     src/export_plan.cpp
+    src/version.cpp
 )
 
 target_include_directories(ui PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+
+target_compile_definitions(ui PUBLIC
+    VMTSTUDIO_VERSION_STRING="${PROJECT_VERSION}"
 )
 
 target_compile_definitions(ui PRIVATE
@@ -64,6 +69,10 @@ add_executable(vmtstudio WIN32
     src/qt/connection_dialog.cpp
     src/qt/about_dialog.h
     src/qt/about_dialog.cpp
+    src/qt/app_updater.h
+    src/qt/app_updater.cpp
+    src/qt/update_dialog.h
+    src/qt/update_dialog.cpp
     src/qt/notification_popup.h
     src/qt/notification_popup.cpp
     src/qt/model_browser_dialog.h
@@ -107,6 +116,7 @@ target_link_libraries(vmtstudio PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+    Qt6::Network
     vmtstudio_warnings
     user32
     shell32
@@ -137,7 +147,7 @@ add_custom_command(TARGET vmtstudio POST_BUILD
 find_program(WINDEPLOYQT_EXE NAMES windeployqt HINTS "C:/Qt/6.8.2/msvc2022_64/bin")
 if(WINDEPLOYQT_EXE)
     add_custom_command(TARGET vmtstudio POST_BUILD
-        COMMAND "${WINDEPLOYQT_EXE}" --release --no-translations "$<TARGET_FILE:vmtstudio>"
+        COMMAND "${WINDEPLOYQT_EXE}" $<$<CONFIG:Debug>:--debug>$<$<NOT:$<CONFIG:Debug>>:--release> --no-translations "$<TARGET_FILE:vmtstudio>"
         COMMENT "Deploying Qt runtime libraries for vmtstudio"
         VERBATIM
     )

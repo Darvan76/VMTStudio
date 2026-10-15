@@ -23,6 +23,7 @@
 [CmdletBinding()]
 param(
     [string]$Version = "0.1.0",
+    [string]$Config = "Release",
     [string]$BuildDir = "build64",
     [string]$OutDir = "dist"
 )
@@ -31,6 +32,17 @@ $ErrorActionPreference = "Stop"
 
 # Repository root (one level above this script)
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
+# Auto-detect version from root CMakeLists.txt if default or not specified
+if (-not $PSBoundParameters.ContainsKey('Version')) {
+    $CMakePath = Join-Path $RepoRoot "CMakeLists.txt"
+    if (Test-Path $CMakePath) {
+        $CMakeContent = Get-Content $CMakePath -Raw
+        if ($CMakeContent -match '(?ms)project\s*\([^)]*VERSION\s+([0-9]+(?:\.[0-9]+)*)') {
+            $Version = $matches[1]
+        }
+    }
+}
 
 # Resolve BuildDir and OutDir against RepoRoot if relative
 if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
@@ -45,15 +57,17 @@ if (-not [System.IO.Path]::IsPathRooted($OutDir)) {
     $ResolvedOutDir = $OutDir
 }
 
-$StagingDirName = "vmt-studio-v$Version-windows-x64"
+$ConfigSuffix = if ($Config -ieq "Debug") { "-Debug" } elseif ($Config -ine "Release") { "-$Config" } else { "" }
+$StagingDirName = "vmtstudio-v$Version-win64$ConfigSuffix"
 $StagingDir = Join-Path $ResolvedOutDir $StagingDirName
 $ZipPath = Join-Path $ResolvedOutDir "$StagingDirName.zip"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host " Packaging VMT-Studio Release v$Version" -ForegroundColor Cyan
+Write-Host " Packaging VMT-Studio $Config v$Version" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host "Repository Root: $RepoRoot"
 Write-Host "Build Directory: $ResolvedBuildDir"
+Write-Host "Configuration:   $Config"
 Write-Host "Output Directory: $ResolvedOutDir"
 Write-Host "Staging Directory: $StagingDir"
 Write-Host "Target Archive:    $ZipPath"
@@ -75,7 +89,9 @@ New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
 # 1. Copy vmtstudio.exe
 # -----------------------------------------------------------------------------
 $VmtStudioCandidates = @(
+    (Join-Path $ResolvedBuildDir "bin/$Config/vmtstudio.exe"),
     (Join-Path $ResolvedBuildDir "bin/Release/vmtstudio.exe"),
+    (Join-Path $ResolvedBuildDir "bin/Debug/vmtstudio.exe"),
     (Join-Path $ResolvedBuildDir "bin/vmtstudio.exe")
 )
 $VmtStudioExe = $null
@@ -86,7 +102,7 @@ foreach ($cand in $VmtStudioCandidates) {
     }
 }
 if (-not $VmtStudioExe) {
-    throw "Could not find vmtstudio.exe in '$ResolvedBuildDir/bin/Release' or '$ResolvedBuildDir/bin'."
+    throw "Could not find vmtstudio.exe in '$ResolvedBuildDir/bin/$Config' or '$ResolvedBuildDir/bin'."
 }
 
 Write-Host "Copying vmtstudio.exe from $VmtStudioExe..."
@@ -96,8 +112,12 @@ Copy-Item -Path $VmtStudioExe -Destination (Join-Path $StagingDir "vmtstudio.exe
 # 2. Copy hlmv_backend.exe
 # -----------------------------------------------------------------------------
 $HlmvCandidates = @(
+    (Join-Path $RepoRoot "build/bin/$Config/hlmv_backend.exe"),
+    (Join-Path $ResolvedBuildDir "bin/$Config/hlmv_backend.exe"),
     (Join-Path $RepoRoot "build/bin/Release/hlmv_backend.exe"),
     (Join-Path $ResolvedBuildDir "bin/Release/hlmv_backend.exe"),
+    (Join-Path $RepoRoot "build/bin/Debug/hlmv_backend.exe"),
+    (Join-Path $ResolvedBuildDir "bin/Debug/hlmv_backend.exe"),
     (Join-Path $RepoRoot "build/bin/hlmv_backend.exe"),
     (Join-Path $ResolvedBuildDir "bin/hlmv_backend.exe")
 )
@@ -109,7 +129,7 @@ foreach ($cand in $HlmvCandidates) {
     }
 }
 if (-not $HlmvBackendExe) {
-    throw "Could not find hlmv_backend.exe in 'build/bin/Release' or '$ResolvedBuildDir/bin/Release'."
+    throw "Could not find hlmv_backend.exe in 'build/bin/$Config' or 'build/bin/Release'."
 }
 
 Write-Host "Copying hlmv_backend.exe from $HlmvBackendExe..."
@@ -120,8 +140,18 @@ Copy-Item -Path $HlmvBackendExe -Destination (Join-Path $StagingDir "hlmv_backen
 # -----------------------------------------------------------------------------
 # 64-bit VTFLib next to vmtstudio.exe
 $Vtf64Candidates = @(
+    (Join-Path $ResolvedBuildDir "bin/$Config/VTFLib++_d.dll"),
+    (Join-Path $ResolvedBuildDir "bin/$Config/VTFLib++.dll"),
+    (Join-Path $ResolvedBuildDir "bin/$Config/VTFLib.dll"),
     (Join-Path $ResolvedBuildDir "bin/Release/VTFLib++.dll"),
     (Join-Path $ResolvedBuildDir "bin/Release/VTFLib.dll"),
+    (Join-Path $ResolvedBuildDir "bin/Debug/VTFLib++_d.dll"),
+    (Join-Path $ResolvedBuildDir "bin/Debug/VTFLib++.dll"),
+    (Join-Path $ResolvedBuildDir "bin/Debug/VTFLib.dll"),
+    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib64/bin/$Config/VTFLib++_d.dll"),
+    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib64/bin/$Config/VTFLib++.dll"),
+    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib64/bin/$Config/VTFLib.dll"),
+    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib64/bin/VTFLib++_d.dll"),
     (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib64/bin/VTFLib++.dll"),
     (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib64/bin/VTFLib.dll")
 )
@@ -143,11 +173,24 @@ Copy-Item -Path $Vtf64Dll -Destination (Join-Path $StagingDir $Vtf64BaseName) -F
 if ($Vtf64BaseName -ne "VTFLib.dll") {
     Copy-Item -Path $Vtf64Dll -Destination (Join-Path $StagingDir "VTFLib.dll") -Force
 }
+if ($Vtf64BaseName -ne "VTFLib++.dll" -and $Vtf64BaseName -ne "VTFLib++_d.dll") {
+    Copy-Item -Path $Vtf64Dll -Destination (Join-Path $StagingDir "VTFLib++.dll") -Force
+}
 
 # 32-bit VTFLib (if present in build/ or thirdparty)
 $Vtf32Candidates = @(
+    (Join-Path $RepoRoot "build/bin/$Config/VTFLib++_d.dll"),
+    (Join-Path $RepoRoot "build/bin/$Config/VTFLib++.dll"),
+    (Join-Path $RepoRoot "build/bin/$Config/VTFLib.dll"),
     (Join-Path $RepoRoot "build/bin/Release/VTFLib++.dll"),
     (Join-Path $RepoRoot "build/bin/Release/VTFLib.dll"),
+    (Join-Path $RepoRoot "build/bin/Debug/VTFLib++_d.dll"),
+    (Join-Path $RepoRoot "build/bin/Debug/VTFLib++.dll"),
+    (Join-Path $RepoRoot "build/bin/Debug/VTFLib.dll"),
+    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/$Config/VTFLib++_d.dll"),
+    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/$Config/VTFLib++.dll"),
+    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/$Config/VTFLib.dll"),
+    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/VTFLib++_d.dll"),
     (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/VTFLib++.dll"),
     (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/VTFLib.dll")
 )
@@ -168,6 +211,62 @@ if ($Vtf32Dll) {
     Copy-Item -Path $Vtf32Dll -Destination (Join-Path $X86Dir $Vtf32BaseName) -Force
     if ($Vtf32BaseName -ne "VTFLib.dll") {
         Copy-Item -Path $Vtf32Dll -Destination (Join-Path $X86Dir "VTFLib.dll") -Force
+    }
+    if ($Vtf32BaseName -ne "VTFLib++.dll" -and $Vtf32BaseName -ne "VTFLib++_d.dll") {
+        Copy-Item -Path $Vtf32Dll -Destination (Join-Path $X86Dir "VTFLib++.dll") -Force
+    }
+}
+
+# -----------------------------------------------------------------------------
+# 3b. Copy Debug Symbols (*.pdb) for Debug configuration
+# -----------------------------------------------------------------------------
+if ($Config -ieq "Debug") {
+    Write-Host "Copying debug symbols (*.pdb)..."
+
+    # 64-bit vmtstudio.pdb
+    $VmtStudioPdbCandidates = @(
+        [System.IO.Path]::ChangeExtension($VmtStudioExe, ".pdb"),
+        (Join-Path $ResolvedBuildDir "bin/$Config/vmtstudio.pdb"),
+        (Join-Path $ResolvedBuildDir "bin/Debug/vmtstudio.pdb")
+    )
+    foreach ($cand in $VmtStudioPdbCandidates) {
+        if ($cand -and (Test-Path $cand)) {
+            Write-Host "  Copying $(Split-Path -Leaf $cand)..."
+            Copy-Item -Path $cand -Destination (Join-Path $StagingDir "vmtstudio.pdb") -Force
+            break
+        }
+    }
+
+    # 32-bit hlmv_backend.pdb
+    $HlmvPdbCandidates = @(
+        [System.IO.Path]::ChangeExtension($HlmvBackendExe, ".pdb"),
+        (Join-Path $RepoRoot "build/bin/$Config/hlmv_backend.pdb"),
+        (Join-Path $RepoRoot "build/bin/Debug/hlmv_backend.pdb"),
+        (Join-Path $ResolvedBuildDir "bin/$Config/hlmv_backend.pdb")
+    )
+    foreach ($cand in $HlmvPdbCandidates) {
+        if ($cand -and (Test-Path $cand)) {
+            Write-Host "  Copying $(Split-Path -Leaf $cand)..."
+            Copy-Item -Path $cand -Destination (Join-Path $StagingDir "hlmv_backend.pdb") -Force
+            break
+        }
+    }
+
+    # VTFLib PDBs if present
+    if ($Vtf64Dll) {
+        $Vtf64Pdb = [System.IO.Path]::ChangeExtension($Vtf64Dll, ".pdb")
+        if (Test-Path $Vtf64Pdb) {
+            Write-Host "  Copying $(Split-Path -Leaf $Vtf64Pdb)..."
+            Copy-Item -Path $Vtf64Pdb -Destination (Join-Path $StagingDir (Split-Path -Leaf $Vtf64Pdb)) -Force
+        }
+    }
+    if ($Vtf32Dll) {
+        $Vtf32Pdb = [System.IO.Path]::ChangeExtension($Vtf32Dll, ".pdb")
+        if (Test-Path $Vtf32Pdb) {
+            Write-Host "  Copying 32-bit $(Split-Path -Leaf $Vtf32Pdb)..."
+            $X86Dir = Join-Path $StagingDir "x86"
+            Copy-Item -Path $Vtf32Pdb -Destination (Join-Path $X86Dir (Split-Path -Leaf $Vtf32Pdb)) -Force
+        }
     }
 }
 
@@ -191,8 +290,9 @@ if (-not $Windeployqt) {
 }
 
 if ($Windeployqt) {
-    Write-Host "Running windeployqt ($Windeployqt)..."
-    & $Windeployqt --release --no-translations (Join-Path $StagingDir "vmtstudio.exe")
+    $DeployMode = if ($Config -eq "Debug") { "--debug" } else { "--release" }
+    Write-Host "Running windeployqt ($Windeployqt) with $DeployMode..."
+    & $Windeployqt $DeployMode --no-translations (Join-Path $StagingDir "vmtstudio.exe")
 } else {
     Write-Host "windeployqt not found; relying on pre-deployed Qt files from build folder."
 }
@@ -208,6 +308,10 @@ $AdditionalDllPatterns = @(
 )
 foreach ($pattern in $AdditionalDllPatterns) {
     Get-ChildItem -Path $ReleaseBinDir -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
+        # If Release mode, skip Qt debug libraries (*d.dll)
+        if ($Config -ieq "Release" -and $_.Name -match "^Qt6.*d\.dll$") {
+            return
+        }
         $dest = Join-Path $StagingDir $_.Name
         if (-not (Test-Path $dest)) {
             Copy-Item -Path $_.FullName -Destination $dest -Force
@@ -288,6 +392,18 @@ foreach ($doc in $DocFiles) {
     if (Test-Path $srcDoc) {
         Copy-Item -Path $srcDoc -Destination (Join-Path $StagingDir $doc) -Force
     }
+}
+
+# -----------------------------------------------------------------------------
+# 6b. Staging directory hygiene cleanup
+# -----------------------------------------------------------------------------
+Write-Host "Sanitizing staging directory..."
+$JunkFilters = @("*.ilk", "*.exp", "*.obj", "*.iobj", "*.ipdb", "*.tmp", "*.temp", "*.log", "*.dmp", "*.mdmp", "*.stackdump", "*.core")
+if ($Config -ine "Debug") {
+    $JunkFilters += "*.pdb"
+}
+foreach ($junkFilter in $JunkFilters) {
+    Get-ChildItem -Path $StagingDir -Recurse -Filter $junkFilter -File -ErrorAction SilentlyContinue | Remove-Item -Force
 }
 
 # -----------------------------------------------------------------------------
