@@ -2,6 +2,8 @@
 
 #include "internal.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -9,6 +11,51 @@
 #include <vector>
 
 namespace vmt {
+
+class LineTable {
+public:
+    explicit LineTable(std::string_view s) {
+        line_starts_.reserve(s.size() / 32 + 4);
+        line_starts_.push_back(0);
+        for (std::size_t i = 0; i < s.size(); ++i) {
+            if (s[i] == '\n') {
+                line_starts_.push_back(static_cast<std::uint32_t>(i + 1));
+            }
+        }
+    }
+
+    SourceLocation loc_of(std::size_t off, std::size_t buffer_size) const noexcept {
+        const std::uint32_t clamped = static_cast<std::uint32_t>(off < buffer_size ? off : buffer_size);
+        auto it = std::upper_bound(line_starts_.begin(), line_starts_.end(), clamped);
+        --it;
+        const auto line = static_cast<std::uint32_t>(std::distance(line_starts_.begin(), it) + 1);
+        const auto col = clamped - *it + 1;
+        return { line, col };
+    }
+
+private:
+    std::vector<std::uint32_t> line_starts_;
+};
+
+namespace {
+
+constexpr auto make_bare_delimiter_table() {
+    std::array<std::uint8_t, 256> table{};
+    table[' '] = 1;
+    table['\t'] = 1;
+    table['\v'] = 1;
+    table['\f'] = 1;
+    table['\r'] = 1;
+    table['\n'] = 1;
+    table['"'] = 1;
+    table['{'] = 1;
+    table['}'] = 1;
+    table['/'] = 2;
+    return table;
+}
+alignas(64) constexpr auto kBareDelimiters = make_bare_delimiter_table();
+
+} // namespace
 
 struct Token {
     enum class Kind { LBrace, RBrace, String, Bare, Comment, Newline, End };
@@ -90,9 +137,12 @@ Token TokenStream::scan() {
         {
             const std::size_t start = i_;
             while (i_ < n) {
-                const char d = s_[i_];
-                if (detail::is_hspace(d) || d == '\r' || d == '\n' || d == '{' || d == '}' || d == '"') break;
-                if (d == '/' && i_ + 1 < n && (s_[i_ + 1] == '/' || s_[i_ + 1] == '*')) break;
+                const std::uint8_t type = kBareDelimiters[static_cast<unsigned char>(s_[i_])];
+                if (type == 1) break;
+                if (type == 2 && i_ + 1 < n) {
+                    const char next = s_[i_ + 1];
+                    if (next == '/' || next == '*') break;
+                }
                 ++i_;
             }
             if (i_ == start) { ++i_; }
@@ -146,20 +196,17 @@ std::string leading_indent(const std::string& s, std::size_t off) {
 bool uses_crlf(const std::string& s) { return s.find("\r\n") != std::string::npos; }
 bool uses_tabs(const std::string& s) { return s.find('\t') != std::string::npos; }
 
-std::string escape(std::string_view v) {
-    std::string o;
-    o.reserve(v.size() + 2);
+void append_escaped(std::string& o, std::string_view v) {
     for (const char c : v) {
         if (c == '\\' || c == '"') o.push_back('\\');
         o.push_back(c);
     }
-    return o;
 }
 
-bool value_needs_quoting(std::string_view v) {
+bool value_needs_quoting(std::string_view v) noexcept {
     if (v.empty()) return true;
     for (const char c : v) {
-        if (detail::is_hspace(c) || c == '\r' || c == '\n' || c == '"' || c == '{' || c == '}' || c == '/') {
+        if (kBareDelimiters[static_cast<unsigned char>(c)] != 0) {
             return true;
         }
     }
@@ -168,11 +215,23 @@ bool value_needs_quoting(std::string_view v) {
 
 std::string format_key(std::string_view name, bool quoted) {
     if (!quoted) return std::string(name);
-    return "\"" + escape(name) + "\"";
+    std::string o;
+    o.reserve(name.size() + 4);
+    o.push_back('"');
+    append_escaped(o, name);
+    o.push_back('"');
+    return o;
 }
 
 std::string format_value_token(std::string_view value_text, bool quoted) {
-    if (quoted || value_needs_quoting(value_text)) return "\"" + escape(value_text) + "\"";
+    if (quoted || value_needs_quoting(value_text)) {
+        std::string o;
+        o.reserve(value_text.size() + 4);
+        o.push_back('"');
+        append_escaped(o, value_text);
+        o.push_back('"');
+        return o;
+    }
     return std::string(value_text);
 }
 
@@ -182,13 +241,15 @@ BlockKind classify_block(std::string_view key, bool parent_is_proxies) {
         if (c0 == '>' || c0 == '<' || c0 == '=' || c0 == '!') return BlockKind::Conditional;
         if (c0 == '$') {
             bool has_upper = false;
-            bool has_lower = false;
             for (std::size_t i = 1; i < key.size(); ++i) {
                 const char c = key[i];
-                if (c >= 'a' && c <= 'z') has_lower = true;
+                if (c >= 'a' && c <= 'z') {
+                    has_upper = false;
+                    break;
+                }
                 if (c >= 'A' && c <= 'Z') has_upper = true;
             }
-            if (has_upper && !has_lower) return BlockKind::Conditional;
+            if (has_upper) return BlockKind::Conditional;
         }
     }
     if (detail::iequals(key, "proxies")) return BlockKind::Proxies;
@@ -215,6 +276,14 @@ void Document::rebuild() {
     shader_span_ = TextSpan{};
     shader_location_ = SourceLocation{};
     body_close_brace_ = TextSpan{};
+
+    LineTable line_table(buffer_);
+    line_table_ = &line_table;
+
+    struct ScopedReset {
+        const LineTable*& ptr;
+        ~ScopedReset() { ptr = nullptr; }
+    } reset_lt{ line_table_ };
 
     std::size_t start = 0;
     if (buffer_.size() >= 3 &&
@@ -244,7 +313,7 @@ void Document::rebuild() {
         shader_span_ = name_tok.span;
         shader_ = decode_token(buffer_, name_tok);
         shader_quoted_ = token_quoted(buffer_, name_tok);
-        shader_location_ = detail::loc_of(buffer_, name_tok.span.offset);
+        shader_location_ = line_table_->loc_of(name_tok.span.offset, buffer_.size());
         if (name_tok.kind == Token::Kind::String && !name_tok.string_terminated) {
             add_diag(ErrorCode::UnterminatedString, "unterminated shader name string", name_tok.span);
         }
@@ -276,12 +345,15 @@ void Document::add_diag(ErrorCode code, std::string message, TextSpan span) {
     d.code = code;
     d.message = std::move(message);
     d.span = span;
-    d.location = detail::loc_of(buffer_, span.offset);
+    d.location = line_table_ != nullptr
+        ? line_table_->loc_of(span.offset, buffer_.size())
+        : detail::loc_of(buffer_, span.offset);
     diagnostics_.push_back(std::move(d));
 }
 
 std::vector<Node> Document::parse_body(TokenStream& ts, bool parent_is_proxies, Token& out_close, int depth) {
     std::vector<Node> out;
+    out.reserve(depth == 0 ? std::min<std::size_t>(64, std::max<std::size_t>(16, buffer_.size() / 40)) : 8);
 
     if (depth > 1024) {
         add_diag(ErrorCode::ParseError, "block nesting too deep", ts.peek().span);
@@ -314,7 +386,9 @@ std::vector<Node> Document::parse_body(TokenStream& ts, bool parent_is_proxies, 
                 Node n;
                 n.kind_ = NodeKind::BlankLine;
                 n.span_ = { start_off, end_off - start_off };
-                const auto loc = detail::loc_of(buffer_, start_off);
+                const auto loc = line_table_ != nullptr
+                    ? line_table_->loc_of(start_off, buffer_.size())
+                    : detail::loc_of(buffer_, start_off);
                 n.line_ = loc.line;
                 n.column_ = loc.column;
                 out.push_back(std::move(n));
@@ -327,7 +401,9 @@ std::vector<Node> Document::parse_body(TokenStream& ts, bool parent_is_proxies, 
             n.kind_ = NodeKind::Comment;
             n.span_ = c.span;
             n.value_ = std::string(token_raw(buffer_, c));
-            const auto loc = detail::loc_of(buffer_, c.span.offset);
+            const auto loc = line_table_ != nullptr
+                ? line_table_->loc_of(c.span.offset, buffer_.size())
+                : detail::loc_of(buffer_, c.span.offset);
             n.line_ = loc.line;
             n.column_ = loc.column;
             if (!c.block_comment_terminated) {
@@ -347,7 +423,9 @@ std::vector<Node> Document::parse_body(TokenStream& ts, bool parent_is_proxies, 
             n.close_brace_span_ = close.span;
             n.children_ = std::move(children);
             n.span_ = { brace.span.offset, close.span.end() - brace.span.offset };
-            const auto loc = detail::loc_of(buffer_, brace.span.offset);
+            const auto loc = line_table_ != nullptr
+                ? line_table_->loc_of(brace.span.offset, buffer_.size())
+                : detail::loc_of(buffer_, brace.span.offset);
             n.line_ = loc.line;
             n.column_ = loc.column;
             out.push_back(std::move(n));
@@ -358,7 +436,9 @@ std::vector<Node> Document::parse_body(TokenStream& ts, bool parent_is_proxies, 
         Node n;
         n.key_span_ = key.span;
         n.key_ = decode_token(buffer_, key);
-        const auto kloc = detail::loc_of(buffer_, key.span.offset);
+        const auto kloc = line_table_ != nullptr
+            ? line_table_->loc_of(key.span.offset, buffer_.size())
+            : detail::loc_of(buffer_, key.span.offset);
         n.line_ = kloc.line;
         n.column_ = kloc.column;
         if (key.kind == Token::Kind::String && !key.string_terminated) {
@@ -433,6 +513,7 @@ const Node* Document::find_block(std::string_view name) const noexcept {
 
 std::vector<const Node*> Document::parameters() const {
     std::vector<const Node*> out;
+    out.reserve(nodes_.size());
     for (const auto& n : nodes_) {
         if (n.kind_ == NodeKind::Parameter) out.push_back(&n);
     }
@@ -445,7 +526,11 @@ Result<void> Document::replace_value(const Node& node, std::string_view value_te
     if (node.value_span_.length > 0) {
         buffer_.replace(node.value_span_.offset, node.value_span_.length, token);
     } else {
-        buffer_.insert(node.key_span_.end(), " " + token);
+        std::string ins;
+        ins.reserve(1 + token.size());
+        ins.push_back(' ');
+        ins.append(token);
+        buffer_.insert(node.key_span_.end(), ins);
     }
     reparse();
     return Ok();
@@ -481,7 +566,15 @@ Result<void> Document::insert_parameter(std::string_view name, std::string_view 
 
     const std::string eol = uses_crlf(buffer_) ? "\r\n" : "\n";
     const std::size_t at = line_start_of(buffer_, close);
-    const std::string line = indent + format_key(name, quoted) + sep + format_value_token(value_text, quoted) + eol;
+    const std::string key_tok = format_key(name, quoted);
+    const std::string val_tok = format_value_token(value_text, quoted);
+    std::string line;
+    line.reserve(indent.size() + key_tok.size() + sep.size() + val_tok.size() + eol.size());
+    line.append(indent);
+    line.append(key_tok);
+    line.append(sep);
+    line.append(val_tok);
+    line.append(eol);
     buffer_.insert(at, line);
     reparse();
     return Ok();

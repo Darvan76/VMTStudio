@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -44,10 +45,20 @@ Result<float> parse_float(std::string_view text) {
     if (t.empty()) {
         return Result<float>(make_error(ErrorCode::InvalidArgument, "not a valid float: ''"));
     }
-    const std::string tmp(t); // NUL-terminated for strtof (accepts ".5", "0.5", "1e3", ...)
+    char buf[64];
+    const char* str = nullptr;
+    std::string fallback;
+    if (t.size() < sizeof(buf)) {
+        std::memcpy(buf, t.data(), t.size());
+        buf[t.size()] = '\0';
+        str = buf;
+    } else {
+        fallback.assign(t.data(), t.size());
+        str = fallback.c_str();
+    }
     char* end = nullptr;
-    const float v = std::strtof(tmp.c_str(), &end);
-    if (end != tmp.c_str() + tmp.size()) {
+    const float v = std::strtof(str, &end);
+    if (end != str + t.size()) {
         return Result<float>(make_error(ErrorCode::InvalidArgument, invalid_msg("not a valid float", text)));
     }
     return Ok(v);
@@ -55,13 +66,26 @@ Result<float> parse_float(std::string_view text) {
 
 Result<bool> parse_bool(std::string_view text) {
     const std::string_view t = detail::trim(text);
-    if (detail::iequals(t, "1") || detail::iequals(t, "true") ||
-        detail::iequals(t, "yes") || detail::iequals(t, "on")) {
-        return Ok(true);
-    }
-    if (detail::iequals(t, "0") || detail::iequals(t, "false") ||
-        detail::iequals(t, "no") || detail::iequals(t, "off")) {
-        return Ok(false);
+    switch (t.size()) {
+        case 1:
+            if (t[0] == '1') return Ok(true);
+            if (t[0] == '0') return Ok(false);
+            break;
+        case 2:
+            if (detail::iequals(t, "on")) return Ok(true);
+            if (detail::iequals(t, "no")) return Ok(false);
+            break;
+        case 3:
+            if (detail::iequals(t, "yes")) return Ok(true);
+            break;
+        case 4:
+            if (detail::iequals(t, "true")) return Ok(true);
+            break;
+        case 5:
+            if (detail::iequals(t, "false")) return Ok(false);
+            break;
+        default:
+            break;
     }
     return Result<bool>(make_error(ErrorCode::InvalidArgument, invalid_msg("not a valid bool", text)));
 }

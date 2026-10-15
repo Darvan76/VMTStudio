@@ -3,7 +3,7 @@
 namespace vmt {
 
 const char* vmt_core_version_string() noexcept {
-    return "vmt_core 0.2.0";
+    return "vmt_core 0.1.0";
 }
 
 } // namespace vmt

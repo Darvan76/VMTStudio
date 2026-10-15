@@ -94,7 +94,7 @@ std::vector<std::string> quoted_tokens(const std::string& line) {
     return tokens;
 }
 
-bool is_numeric_key(const std::string& token) {
+bool is_numeric_key(std::string_view token) noexcept {
     if (token.empty()) {
         return false;
     }
@@ -106,9 +106,9 @@ bool is_numeric_key(const std::string& token) {
     return true;
 }
 
-bool is_comment_line(const std::string& line) {
+bool is_comment_line(std::string_view line) noexcept {
     const std::size_t first = line.find_first_not_of(" \t");
-    return first != std::string::npos &&
+    return first != std::string_view::npos &&
            line.compare(first, 2, "//") == 0;
 }
 
@@ -295,7 +295,7 @@ std::vector<GameProfile> SteamDetector::discover_all_in(
                     continue;
                 }
                 seen.push_back(key);
-                merged.push_back(profile);
+                merged.push_back(std::move(profile));
             }
         }
 

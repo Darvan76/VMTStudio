@@ -17,10 +17,6 @@ target_link_libraries(engine_bridge
 
 # ---- Phase 3 engine spike ---------------------------------------------------
 
-# Build-time location of the Source SDK 2013 public headers. Override with
-# -DSOURCE_SDK_PUBLIC=... if your SDK lives elsewhere.
-set(SOURCE_SDK_PUBLIC "C:/Users/Dario/Documents/source-sdk-2013/source-sdk-2013/src/public"
-    CACHE PATH "Source SDK 2013 src/public directory")
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     # The SDK-dependent translation units, isolated so the Valve headers (which are

@@ -49,7 +49,7 @@ public:
 
     // Persist the last used profile id (simple in-memory helper; callers can
     // layer real settings on top).
-    void set_last_used(std::string_view id) noexcept { last_used_ = std::string(id); }
+    void set_last_used(std::string_view id) { last_used_ = id; }
     const std::string& last_used() const noexcept { return last_used_; }
 
     // --- filesystem detection helpers (single source of truth; the UI layer

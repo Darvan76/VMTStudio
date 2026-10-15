@@ -39,10 +39,15 @@ struct Diagnostic {
 // private parse helpers can be declared here.
 struct Token;
 class TokenStream;
+class LineTable;
 
 class Node {
 public:
     Node() = default;
+    Node(const Node&) = default;
+    Node(Node&&) noexcept = default;
+    Node& operator=(const Node&) = default;
+    Node& operator=(Node&&) noexcept = default;
 
     NodeKind  kind() const noexcept { return kind_; }
     BlockKind block_kind() const noexcept { return block_kind_; }
@@ -153,6 +158,7 @@ private:
     std::vector<Node> nodes_;
     std::vector<Diagnostic> diagnostics_;
     bool edited_ = false;
+    const LineTable* line_table_ = nullptr;
 };
 
 } // namespace vmt

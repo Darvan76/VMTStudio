@@ -14,8 +14,8 @@ enum class PeArch {
 
 // Reads the DOS + PE headers of a file and reports its architecture.
 // Returns PeArch::Unknown if the file cannot be read or is not a valid PE.
-PeArch read_pe_arch(const std::filesystem::path& path);
+PeArch read_pe_arch(const std::filesystem::path& path) noexcept;
 
-const char* to_string(PeArch arch);
+const char* to_string(PeArch arch) noexcept;
 
 } // namespace bridge

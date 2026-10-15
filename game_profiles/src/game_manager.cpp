@@ -28,6 +28,15 @@ std::string lowercase(std::string value) {
     return value;
 }
 
+bool iless(std::string_view lhs, std::string_view rhs) noexcept {
+    return std::lexicographical_compare(
+        lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
+        [](char a, char b) noexcept {
+            return static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(a))) <
+                   static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(b)));
+        });
+}
+
 } // namespace
 
 bool GameManager::looks_like_bin_dir(const std::filesystem::path& path) noexcept {
@@ -75,10 +84,11 @@ std::filesystem::path GameManager::detect_bin_dir(
                 if (!entry.is_directory(entry_ec)) {
                     continue;
                 }
-                if (looks_like_bin_dir(entry.path())) {
-                    matches.push_back(entry.path());
-                } else if (looks_like_bin_dir(entry.path() / "bin")) {
-                    matches.push_back(entry.path() / "bin");
+                const std::filesystem::path& entry_path = entry.path();
+                if (looks_like_bin_dir(entry_path)) {
+                    matches.push_back(entry_path);
+                } else if (looks_like_bin_dir(entry_path / "bin")) {
+                    matches.push_back(entry_path / "bin");
                 }
             }
         }
@@ -113,9 +123,10 @@ std::filesystem::path GameManager::detect_game_dir(
     }
     for (const std::filesystem::directory_entry& entry : iterator) {
         std::error_code entry_ec;
+        const std::filesystem::path& entry_path = entry.path();
         if (entry.is_directory(entry_ec) &&
-            std::filesystem::is_regular_file(entry.path() / "gameinfo.txt", entry_ec)) {
-            candidates.push_back(entry.path());
+            std::filesystem::is_regular_file(entry_path / "gameinfo.txt", entry_ec)) {
+            candidates.push_back(entry_path);
         }
     }
     std::sort(candidates.begin(), candidates.end());
@@ -124,16 +135,20 @@ std::filesystem::path GameManager::detect_game_dir(
 
 std::string GameManager::read_game_name(
     const std::filesystem::path& gameinfo_path) noexcept {
-    std::ifstream input(gameinfo_path, std::ios::in | std::ios::binary);
-    if (!input) {
+    try {
+        std::ifstream input(gameinfo_path, std::ios::in | std::ios::binary);
+        if (!input) {
+            return {};
+        }
+        const std::string content((std::istreambuf_iterator<char>(input)),
+                                  std::istreambuf_iterator<char>());
+        const std::regex re("\"game\"\\s+\"([^\"]*)\"", std::regex::icase);
+        std::smatch match;
+        if (std::regex_search(content, match, re) && match.size() >= 2) {
+            return match.str(1);
+        }
+    } catch (...) {
         return {};
-    }
-    const std::string content((std::istreambuf_iterator<char>(input)),
-                              std::istreambuf_iterator<char>());
-    std::regex re("\"game\"\\s+\"([^\"]*)\"", std::regex::icase);
-    std::smatch match;
-    if (std::regex_search(content, match, re) && match.size() >= 2) {
-        return match.str(1);
     }
     return {};
 }
@@ -141,31 +156,35 @@ std::string GameManager::read_game_name(
 std::string GameManager::detect_engine_branch(
     const std::filesystem::path& game_root,
     const std::filesystem::path& bin_dir) noexcept {
-    std::ifstream input(game_root / "gameinfo.txt", std::ios::in | std::ios::binary);
-    std::string content;
-    if (input) {
-        content.assign((std::istreambuf_iterator<char>(input)),
-                       std::istreambuf_iterator<char>());
-    }
+    try {
+        std::ifstream input(game_root / "gameinfo.txt", std::ios::in | std::ios::binary);
+        std::string content;
+        if (input) {
+            content.assign((std::istreambuf_iterator<char>(input)),
+                           std::istreambuf_iterator<char>());
+        }
 
-    const std::string lower_name = lowercase(read_game_name(game_root / "gameinfo.txt"));
-    if (lower_name.find("garry") != std::string::npos ||
-        lower_name.find("gmod") != std::string::npos) {
-        return "gmod";
-    }
-
-    std::regex appid_re("SteamAppId\\s+(\\d+)", std::regex::icase);
-    std::smatch match;
-    if (std::regex_search(content, match, appid_re) && match.size() >= 2) {
-        const std::string appid = match.str(1);
-        // Garry's Mod uses Steam app id 4000.
-        if (appid == "4000" || appid == "4001") {
+        const std::string lower_name = lowercase(read_game_name(game_root / "gameinfo.txt"));
+        if (lower_name.find("garry") != std::string::npos ||
+            lower_name.find("gmod") != std::string::npos) {
             return "gmod";
         }
-    }
 
-    if (!bin_dir.empty() && regular_file_exists(bin_dir / "tier0.dll")) {
-        return "source_2013";
+        const std::regex appid_re("SteamAppId\\s+(\\d+)", std::regex::icase);
+        std::smatch match;
+        if (std::regex_search(content, match, appid_re) && match.size() >= 2) {
+            const std::string appid = match.str(1);
+            // Garry's Mod uses Steam app id 4000.
+            if (appid == "4000" || appid == "4001") {
+                return "gmod";
+            }
+        }
+
+        if (!bin_dir.empty() && regular_file_exists(bin_dir / "tier0.dll")) {
+            return "source_2013";
+        }
+    } catch (...) {
+        return "unknown";
     }
     return "unknown";
 }
@@ -178,8 +197,8 @@ void GameManager::discover(const std::filesystem::path& root, int max_depth) {
     scan(root, max_depth);
 
     std::sort(profiles_.begin(), profiles_.end(),
-              [](const GameProfile& left, const GameProfile& right) {
-                  return lowercase(left.name) < lowercase(right.name);
+              [](const GameProfile& left, const GameProfile& right) noexcept {
+                  return iless(left.name, right.name);
               });
 }
 
@@ -189,21 +208,19 @@ void GameManager::clear() noexcept {
 }
 
 GameProfile* GameManager::find(std::string_view id) noexcept {
-    for (GameProfile& profile : profiles_) {
-        if (profile.id == id) {
-            return &profile;
-        }
-    }
-    return nullptr;
+    const auto it = std::find_if(profiles_.begin(), profiles_.end(),
+                                 [id](const GameProfile& profile) noexcept {
+                                     return profile.id == id;
+                                 });
+    return it != profiles_.end() ? &(*it) : nullptr;
 }
 
 const GameProfile* GameManager::find(std::string_view id) const noexcept {
-    for (const GameProfile& profile : profiles_) {
-        if (profile.id == id) {
-            return &profile;
-        }
-    }
-    return nullptr;
+    const auto it = std::find_if(profiles_.begin(), profiles_.end(),
+                                 [id](const GameProfile& profile) noexcept {
+                                     return profile.id == id;
+                                 });
+    return it != profiles_.end() ? &(*it) : nullptr;
 }
 
 void GameManager::scan(const std::filesystem::path& root, int depth) {
@@ -216,13 +233,11 @@ void GameManager::scan(const std::filesystem::path& root, int depth) {
     }
 
     if (regular_file_exists(root / "gameinfo.txt")) {
-        bool duplicate = false;
-        for (const GameProfile& existing : profiles_) {
-            if (existing.game_dir == root) {
-                duplicate = true;
-                break;
-            }
-        }
+        const bool duplicate = std::any_of(
+            profiles_.begin(), profiles_.end(),
+            [&root](const GameProfile& existing) noexcept {
+                return existing.game_dir == root;
+            });
         if (!duplicate) {
             GameProfile profile;
             profile.game_dir = root;
@@ -235,7 +250,7 @@ void GameManager::scan(const std::filesystem::path& root, int depth) {
             // not usable (empty folder, missing DLLs, wrong arch, ...).
             profile.install = check_install(profile);
             profile.is_valid = profile.install.usable;
-            profiles_.push_back(profile);
+            profiles_.push_back(std::move(profile));
         }
     }
 

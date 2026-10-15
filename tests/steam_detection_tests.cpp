@@ -1,4 +1,5 @@
 #include "ut.h"
+#include "pe_stub.h"
 
 #include "profiles/game_manager.h"
 #include "profiles/steam_library.h"
@@ -59,13 +60,16 @@ void write_libraryfolders(const fs::path& steam_root, const std::string& body) {
 }
 
 // Creates the minimal marker set of a Source Engine game: gameinfo.txt plus a
-// bin folder carrying tier0.dll / vstdlib.dll.
+// bin folder carrying valid 32-bit engine DLL stubs.
 void make_source_game(const fs::path& game_dir, const char* game_name) {
     write_text_file(game_dir / "gameinfo.txt",
                     std::string("\"GameInfo\"\n{\n\t\"game\"\t\t\"") +
                         game_name + "\"\n}\n");
-    write_text_file(game_dir / "bin" / "tier0.dll", "");
-    write_text_file(game_dir / "bin" / "vstdlib.dll", "");
+    pe_stub::write_dll(game_dir / "bin" / "tier0.dll", pe_stub::kMachineI386, {"CommandLine_Tier0"});
+    pe_stub::write_dll(game_dir / "bin" / "vstdlib.dll", pe_stub::kMachineI386, {"CreateInterface"});
+    pe_stub::write_dll(game_dir / "bin" / "filesystem_stdio.dll", pe_stub::kMachineI386, {"CreateInterface"});
+    pe_stub::write_dll(game_dir / "bin" / "materialsystem.dll", pe_stub::kMachineI386, {"CreateInterface"});
+    pe_stub::write_dll(game_dir / "bin" / "shaderapidx9.dll", pe_stub::kMachineI386, {"CreateInterface"});
 }
 
 std::string lower_ascii_copy(std::string text) {
