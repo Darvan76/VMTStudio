@@ -93,6 +93,27 @@ std::filesystem::path app_data_dir() {
     return std::filesystem::path(buffer) / L"VMTStudio";
 }
 
+void deploy_preview_models(const std::filesystem::path& preview_root, bridge::EngineView* engine) {
+    if (!engine) return;
+    std::error_code ec;
+    std::filesystem::path models_src;
+
+    std::filesystem::path app_dir = QCoreApplication::applicationDirPath().toStdString();
+    if (std::filesystem::exists(app_dir / "models", ec)) {
+        models_src = app_dir / "models";
+    } else if (std::filesystem::exists("models", ec)) {
+        models_src = "models";
+    }
+
+    if (!models_src.empty()) {
+        std::filesystem::path dst_models = preview_root / "models";
+        std::filesystem::create_directories(dst_models, ec);
+        std::filesystem::copy(models_src, dst_models,
+            std::filesystem::copy_options::overwrite_existing | std::filesystem::copy_options::recursive, ec);
+        (void)engine->mount_directory(models_src.parent_path(), false);
+    }
+}
+
 // <preview root>/materials/<game-relative material name>.vmt: the loose override
 // the engine resolves first for a model material. Empty when the name cannot be
 // used as a relative path (absolute segments, "..", drive letters).
@@ -683,6 +704,7 @@ bool MainWindow::ensureEngine(QString& error) {
     std::error_code ec;
     std::filesystem::create_directories(m_previewRoot / "materials", ec);
     (void)m_engine->mount_directory(m_previewRoot, true);
+    deploy_preview_models(m_previewRoot, m_engine.get());
 
     // Mount current material root so the engine can resolve textures (.vtf)
     if (!m_session.material_root().empty()) {
@@ -761,6 +783,7 @@ void MainWindow::ensureEngineAsync() {
         std::error_code ec;
         std::filesystem::create_directories(previewRoot / "materials", ec);
         (void)engine->mount_directory(previewRoot, true);
+        deploy_preview_models(previewRoot, engine.get());
 
         // Mount material root if available
         if (!materialRoot.empty()) {

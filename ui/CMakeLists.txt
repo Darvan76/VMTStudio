@@ -124,6 +124,15 @@ add_custom_command(TARGET vmtstudio POST_BUILD
     VERBATIM
 )
 
+# Copy models directory beside vmtstudio
+add_custom_command(TARGET vmtstudio POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${CMAKE_SOURCE_DIR}/models"
+            "$<TARGET_FILE_DIR:vmtstudio>/models"
+    COMMENT "Copying models directory next to vmtstudio"
+    VERBATIM
+)
+
 # Deploy Qt runtime using windeployqt
 find_program(WINDEPLOYQT_EXE NAMES windeployqt HINTS "C:/Qt/6.8.2/msvc2022_64/bin")
 if(WINDEPLOYQT_EXE)

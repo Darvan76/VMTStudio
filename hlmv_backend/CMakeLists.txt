@@ -113,3 +113,11 @@ set_target_properties(hlmv_backend PROPERTIES
     OUTPUT_NAME "hlmv_backend"
     LINK_FLAGS "/ENTRY:mainCRTStartup /SUBSYSTEM:WINDOWS"
 )
+
+add_custom_command(TARGET hlmv_backend POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${CMAKE_SOURCE_DIR}/models"
+            "$<TARGET_FILE_DIR:hlmv_backend>/models"
+    COMMENT "Copying models directory next to hlmv_backend"
+    VERBATIM
+)

@@ -324,21 +324,53 @@ bool Backend_SetShape(const std::string& shape)
     }
 
     std::string modelPath;
-    if (shape == "sphere") modelPath = "models/preview/preview_sphere.mdl";
-    else if (shape == "cube") modelPath = "models/preview/preview_cube.mdl";
-    else if (shape == "cylinder") modelPath = "models/preview/preview_cylinder.mdl";
-    else if (shape == "plane") modelPath = "models/preview/preview_plane.mdl";
-    else modelPath = shape;
+    if (shape == "sphere")
+    {
+        if (g_pFileSystem && g_pFileSystem->FileExists("models/shpere_model.mdl", "GAME"))
+            modelPath = "models/shpere_model.mdl";
+        else if (g_pFileSystem && g_pFileSystem->FileExists("models/sphere_model.mdl", "GAME"))
+            modelPath = "models/sphere_model.mdl";
+        else if (g_pFileSystem && g_pFileSystem->FileExists("models/preview/preview_sphere.mdl", "GAME"))
+            modelPath = "models/preview/preview_sphere.mdl";
+        else if (g_pFileSystem && g_pFileSystem->FileExists("models/props_junk/watermelon01.mdl", "GAME"))
+            modelPath = "models/props_junk/watermelon01.mdl";
+        else
+            modelPath = "models/shpere_model.mdl";
+    }
+    else if (shape == "cube")
+    {
+        if (g_pFileSystem && g_pFileSystem->FileExists("models/cube_model.mdl", "GAME"))
+            modelPath = "models/cube_model.mdl";
+        else if (g_pFileSystem && g_pFileSystem->FileExists("models/preview/preview_cube.mdl", "GAME"))
+            modelPath = "models/preview/preview_cube.mdl";
+        else if (g_pFileSystem && g_pFileSystem->FileExists("models/props_junk/wood_crate001a.mdl", "GAME"))
+            modelPath = "models/props_junk/wood_crate001a.mdl";
+        else
+            modelPath = "models/cube_model.mdl";
+    }
+    else if (shape == "cylinder")
+    {
+        if (g_pFileSystem && g_pFileSystem->FileExists("models/cylinder_model.mdl", "GAME"))
+            modelPath = "models/cylinder_model.mdl";
+        else if (g_pFileSystem && g_pFileSystem->FileExists("models/preview/preview_cylinder.mdl", "GAME"))
+            modelPath = "models/preview/preview_cylinder.mdl";
+        else if (g_pFileSystem && g_pFileSystem->FileExists("models/props_c17/oildrum001.mdl", "GAME"))
+            modelPath = "models/props_c17/oildrum001.mdl";
+        else
+            modelPath = "models/cylinder_model.mdl";
+    }
+    else if (shape == "plane")
+    {
+        modelPath = "models/preview/preview_plane.mdl";
+    }
+    else
+    {
+        modelPath = shape;
+    }
 
     if (g_pFileSystem && !g_pFileSystem->FileExists(modelPath.c_str(), "GAME"))
     {
-        if (shape == "sphere" && g_pFileSystem->FileExists("models/props_junk/watermelon01.mdl", "GAME"))
-            modelPath = "models/props_junk/watermelon01.mdl";
-        else if (shape == "cylinder" && g_pFileSystem->FileExists("models/props_c17/oildrum001.mdl", "GAME"))
-            modelPath = "models/props_c17/oildrum001.mdl";
-        else if (shape == "cube" && g_pFileSystem->FileExists("models/props_junk/wood_crate001a.mdl", "GAME"))
-            modelPath = "models/props_junk/wood_crate001a.mdl";
-        else if (g_pFileSystem->FileExists("models/error.mdl", "GAME"))
+        if (g_pFileSystem->FileExists("models/error.mdl", "GAME"))
             modelPath = "models/error.mdl";
     }
 

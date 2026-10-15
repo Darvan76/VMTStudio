@@ -264,6 +264,21 @@ if (Test-Path $SchemaSrc) {
 }
 
 # -----------------------------------------------------------------------------
+# 5b. Copy models directory
+# -----------------------------------------------------------------------------
+$ModelsSrc = Join-Path $RepoRoot "models"
+if (Test-Path $ModelsSrc) {
+    Write-Host "Copying preview models..."
+    $ModelsDst = Join-Path $StagingDir "models"
+    if (-not (Test-Path $ModelsDst)) {
+        New-Item -ItemType Directory -Path $ModelsDst -Force | Out-Null
+    }
+    Copy-Item -Path (Join-Path $ModelsSrc "*") -Destination $ModelsDst -Recurse -Force
+} else {
+    Write-Warning "Models directory not found at '$ModelsSrc'."
+}
+
+# -----------------------------------------------------------------------------
 # 6. Copy LICENSE and README files
 # -----------------------------------------------------------------------------
 Write-Host "Copying documentation and license..."
