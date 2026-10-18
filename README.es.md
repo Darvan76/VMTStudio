@@ -189,8 +189,11 @@ El puente del motor soporta conexión automática con cualquier rama derivada de
 | **Counter-Strike: Source** | |
 | **Team Fortress 2** | |
 | **Source SDK Base 2013** (SP / MP) | |
-| **Garry's Mod** | Exploración de VPK mediante shim de vtable |
-| **Mods personalizados de Source** | Requieren `gameinfo.txt` + carpeta `/bin` |
+| **Garry's Mod** | Actualmente no funciona (modificaciones autoritarias en el motor; soporte en desarrollo) |
+| **Mods personalizados de Source** | Requieren `gameinfo.txt` + carpeta `/bin` (mods con modificaciones autoritarias no funcionan en este momento) |
+
+> [!WARNING]
+> **Los juegos con modificaciones autoritarias no están funcionando en este momento:** Aquellos juegos o mods con modificaciones autoritarias o personalizaciones profundas del motor Source (como *Garry's Mod* o ramas con tablas virtuales alteradas en el sistema de archivos y materialsystem) no son compatibles actualmente para la previsualización de materiales. El soporte para este tipo de motores se encuentra en desarrollo activo.
 
 ---
 

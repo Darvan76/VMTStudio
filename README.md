@@ -189,8 +189,11 @@ The engine bridge supports automatic connection to any Source Engine branch base
 | **Counter-Strike: Source** | |
 | **Team Fortress 2** | |
 | **Source SDK Base 2013** (SP / MP) | |
-| **Garry's Mod** | VPK browsing via runtime vtable shim |
-| **Custom Source Mods** | Requires valid `gameinfo.txt` + `/bin` folder |
+| **Garry's Mod** | Currently not working (authoritative engine modifications; support in development) |
+| **Custom Source Mods** | Requires valid `gameinfo.txt` + `/bin` folder (mods with authoritative engine modifications are not working at this time) |
+
+> [!WARNING]
+> **Games with authoritative modifications are currently not working:** Games and mods with heavily modified or authoritative engine builds (such as *Garry's Mod* or custom branches with altered filesystem and materialsystem vtables) are not functional at this time. Dedicated compatibility shims for these engines are currently under active development.
 
 ---
 
