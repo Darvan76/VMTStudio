@@ -143,3 +143,6 @@ $RECYCLE.BIN/
 
 # Linux
 .directory
+
+tools/portable_launcher/payload.zip
+VMT-Studio-*.exe
