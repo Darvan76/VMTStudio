@@ -119,5 +119,5 @@ mxWindow::setTimer (int milliSeconds)
 void
 mxWindow::setMenuBar (mxMenuBar *menuBar)
 {
-	SetMenu ((HWND) getHandle (), (HMENU) ((mxWidget *) menuBar)->getHandle ());
+	SetMenu ((HWND) getHandle (), menuBar ? (HMENU) ((mxWidget *) menuBar)->getHandle () : NULL);
 }

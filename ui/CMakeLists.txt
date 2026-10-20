@@ -20,6 +20,9 @@ add_library(ui STATIC
     src/preview_sync.cpp
     src/preview_options.cpp
     src/material_browser.cpp
+    src/asset_index.cpp
+    src/asset_cache.cpp
+    src/asset_pack.cpp
     src/texture_thumbnail.cpp
     src/material_info.cpp
     src/shader_catalog.cpp
@@ -61,8 +64,6 @@ add_executable(vmtstudio WIN32
     src/qt/vmt_highlighter.cpp
     src/qt/inspector_widget.h
     src/qt/inspector_widget.cpp
-    src/qt/material_browser_dialog.h
-    src/qt/material_browser_dialog.cpp
     src/qt/preview_options_dialog.h
     src/qt/preview_options_dialog.cpp
     src/qt/connection_dialog.h
@@ -75,8 +76,14 @@ add_executable(vmtstudio WIN32
     src/qt/update_dialog.cpp
     src/qt/notification_popup.h
     src/qt/notification_popup.cpp
-    src/qt/model_browser_dialog.h
-    src/qt/model_browser_dialog.cpp
+    src/qt/asset_browser_dialog.h
+    src/qt/asset_browser_dialog.cpp
+    src/qt/asset_list_model.h
+    src/qt/asset_list_model.cpp
+    src/qt/asset_thumbnail_service.h
+    src/qt/asset_thumbnail_service.cpp
+    src/qt/asset_preview_panel.h
+    src/qt/asset_preview_panel.cpp
     src/qt/model_materials_dock.h
     src/qt/model_materials_dock.cpp
     src/qt/animation_dock.h
@@ -127,9 +134,14 @@ vtf_deploy_vtflib_runtime(vmtstudio)
 
 # Copy hlmv_backend.exe beside vmtstudio if available from 32-bit build
 add_custom_command(TARGET vmtstudio POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/build/bin/Release/hlmv_backend.exe"
-            "$<TARGET_FILE_DIR:vmtstudio>"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DCONFIG=$<CONFIG>"
+            "-DSRC_REL=${CMAKE_SOURCE_DIR}/build/bin/Release/hlmv_backend.exe"
+            "-DSRC_DBG=${CMAKE_SOURCE_DIR}/build/bin/Debug/hlmv_backend.exe"
+            "-DDST=$<TARGET_FILE_DIR:vmtstudio>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_hlmv_backend.cmake"
+
+
     COMMENT "Copying 32-bit hlmv_backend.exe next to vmtstudio"
     VERBATIM
 )
@@ -144,7 +156,7 @@ add_custom_command(TARGET vmtstudio POST_BUILD
 )
 
 # Deploy Qt runtime using windeployqt
-find_program(WINDEPLOYQT_EXE NAMES windeployqt HINTS "C:/Qt/6.8.2/msvc2022_64/bin")
+find_program(WINDEPLOYQT_EXE NAMES windeployqt HINTS "$ENV{QT_ROOT_DIR}/bin" "C:/Qt/6.8.2/msvc2022_64/bin")
 if(WINDEPLOYQT_EXE)
     add_custom_command(TARGET vmtstudio POST_BUILD
         COMMAND "${WINDEPLOYQT_EXE}" $<$<CONFIG:Debug>:--debug>$<$<NOT:$<CONFIG:Debug>>:--release> --no-translations "$<TARGET_FILE:vmtstudio>"

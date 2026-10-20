@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>
 #include <mx/mx.h>
 #include <mx/mxTga.h>
 #include <mx/mxEvent.h>
@@ -44,6 +45,7 @@
 #include "vstdlib/cvar.h"
 #include "istudiorender.h"
 #include "materialsystem/imaterialsystem.h"
+#include "bitmap/imageformat.h"
 #include "vphysics_interface.h"
 #include "Datacache/imdlcache.h"
 #include "datacache/idatacache.h"
@@ -54,6 +56,8 @@
 #include "tier1/tier1.h"
 #include "tier2/tier2.h"
 #include "camera.h"
+#include "hlmv_compat.h"
+#include "backend_ipc.h"
 
 bool g_bOldFileDialogs = false;
 void HLMV_Log(const char* fmt, ...);
@@ -63,6 +67,7 @@ char g_appTitle[] = "Half-Life Model Viewer v1.22 - Tweaked";
 static char recentFiles[8][256] = { "", "", "", "", "", "", "", "" };
 extern int g_dxlevel;
 bool g_bInError = false;
+static int g_thumbExitCode = -1;
 
 
 //-----------------------------------------------------------------------------
@@ -117,18 +122,8 @@ void UnloadFileSystemDialogModule()
 void
 MDLViewer::initRecentFiles ()
 {
-	for (int i = 0; i < 8; i++)
-	{
-		if (strlen (recentFiles[i]))
-		{
-			mb->modify (IDC_FILE_RECENTMODELS1 + i, IDC_FILE_RECENTMODELS1 + i, recentFiles[i]);
-		}
-		else
-		{
-			mb->modify (IDC_FILE_RECENTMODELS1 + i, IDC_FILE_RECENTMODELS1 + i, "(empty)");
-			mb->setEnabled (IDC_FILE_RECENTMODELS1 + i, false);
-		}
-	}
+	// In VMT-Studio backend, Win32 menus are unused and updating them causes crashes.
+	return;
 }
 
 
@@ -172,6 +167,181 @@ struct AccelTableEntry_t
 	unsigned char  flags;
 };
 
+namespace
+{
+
+// A 256 px snapshot is rendered at 512 px and box-filtered down: the D3D9
+// backend has a quirk where a 256 px window only paints the top half, and the
+// extra resolution also gives a cleaner preview. Larger requests are capped.
+int ThumbRenderSize( int outputSize )
+{
+	if ( outputSize < 64 )
+		outputSize = 64;
+	if ( outputSize > 1024 )
+		outputSize = 1024;
+	int render = ( outputSize <= 512 ) ? outputSize * 2 : outputSize;
+	if ( render > 1024 )
+		render = 1024;
+	return render;
+}
+
+// Reads the client area of a rendered window into top-down BGRA. The fast path
+// is BitBlt + GetDIBits; some D3D9 drivers return a black bitmap for a window
+// DC, so it falls back to the GetPixel route that dumpViewport() already uses.
+bool CaptureClientBgra( HWND hwnd, int width, int height, std::vector<unsigned char> &out )
+{
+	if ( !hwnd || !IsWindow( hwnd ) || width <= 0 || height <= 0 || width > 4096 || height > 4096 )
+		return false;
+
+	out.assign( (size_t)width * height * 4, 0 );
+
+	bool ok = false;
+	HDC src = GetDC( hwnd );
+	if ( !src )
+		return false;
+
+	HDC mem = CreateCompatibleDC( src );
+	HBITMAP bmp = mem ? CreateCompatibleBitmap( src, width, height ) : NULL;
+	if ( mem && bmp )
+	{
+		HGDIOBJ old = SelectObject( mem, bmp );
+		const BOOL blt = BitBlt( mem, 0, 0, width, height, src, 0, 0, SRCCOPY );
+		SelectObject( mem, old );
+		if ( blt )
+		{
+			BITMAPINFO bi{};
+			bi.bmiHeader.biSize = sizeof( BITMAPINFOHEADER );
+			bi.bmiHeader.biWidth = width;
+			bi.bmiHeader.biHeight = -height; // top-down rows
+			bi.bmiHeader.biPlanes = 1;
+			bi.bmiHeader.biBitCount = 32;
+			bi.bmiHeader.biCompression = BI_RGB;
+			const int got = GetDIBits( mem, bmp, 0, height, out.data(), &bi, DIB_RGB_COLORS );
+			ok = ( got == height );
+		}
+	}
+	if ( bmp )
+		DeleteObject( bmp );
+	if ( mem )
+		DeleteDC( mem );
+	ReleaseDC( hwnd, src );
+
+	if ( ok )
+	{
+		// A black capture means BitBlt did not see the D3D surface.
+		bool nonBlack = false;
+		for ( size_t i = 0; i + 3 < out.size(); i += 4 )
+		{
+			if ( out[i] || out[i + 1] || out[i + 2] )
+			{
+				nonBlack = true;
+				break;
+			}
+		}
+		ok = nonBlack;
+	}
+
+	if ( !ok )
+	{
+		HDC hdc = GetDC( hwnd );
+		if ( !hdc )
+			return false;
+		const size_t rowBytes = (size_t)width * 4;
+		for ( int y = 0; y < height; ++y )
+		{
+			unsigned char *row = out.data() + (size_t)y * rowBytes;
+			for ( int x = 0; x < width; ++x )
+			{
+				const COLORREF c = GetPixel( hdc, x, y );
+				unsigned char *p = row + (size_t)x * 4;
+				p[0] = GetBValue( c );
+				p[1] = GetGValue( c );
+				p[2] = GetRValue( c );
+				p[3] = 255;
+			}
+		}
+		ReleaseDC( hwnd, hdc );
+		ok = true;
+	}
+
+	return ok;
+}
+
+void DownscaleBgra( const std::vector<unsigned char> &src, int srcSize, int dstSize,
+	std::vector<unsigned char> &dst )
+{
+	if ( dstSize <= 0 || srcSize <= 0 || dstSize > 4096 || srcSize > 4096 )
+	{
+		dst.clear();
+		return;
+	}
+	if ( src.size() < (size_t)srcSize * srcSize * 4 )
+	{
+		dst.clear();
+		return;
+	}
+
+	dst.resize( (size_t)dstSize * dstSize * 4 );
+	if ( srcSize == dstSize )
+	{
+		dst = src;
+		return;
+	}
+
+	const int factor = ( dstSize > 0 ) ? srcSize / dstSize : 0;
+	if ( factor > 0 && srcSize % dstSize == 0 )
+	{
+		const int samples = factor * factor;
+		for ( int y = 0; y < dstSize; ++y )
+		{
+			for ( int x = 0; x < dstSize; ++x )
+			{
+				unsigned sum[4] = { 0, 0, 0, 0 };
+				for ( int dy = 0; dy < factor; ++dy )
+				{
+					const unsigned char *row =
+						src.data() + (size_t)( y * factor + dy ) * srcSize * 4;
+					for ( int dx = 0; dx < factor; ++dx )
+					{
+						const unsigned char *p = row + (size_t)( x * factor + dx ) * 4;
+						sum[0] += p[0];
+						sum[1] += p[1];
+						sum[2] += p[2];
+						sum[3] += p[3];
+					}
+				}
+				unsigned char *q = dst.data() + ( (size_t)y * dstSize + x ) * 4;
+				q[0] = (unsigned char)( sum[0] / samples );
+				q[1] = (unsigned char)( sum[1] / samples );
+				q[2] = (unsigned char)( sum[2] / samples );
+				q[3] = 255;
+			}
+		}
+		return;
+	}
+
+	for ( int y = 0; y < dstSize; ++y )
+	{
+		int sy = y * srcSize / dstSize;
+		if ( sy >= srcSize ) sy = srcSize - 1;
+		if ( sy < 0 ) sy = 0;
+		for ( int x = 0; x < dstSize; ++x )
+		{
+			int sx = x * srcSize / dstSize;
+			if ( sx >= srcSize ) sx = srcSize - 1;
+			if ( sx < 0 ) sx = 0;
+			const unsigned char *p = src.data() + ( (size_t)sy * srcSize + sx ) * 4;
+			unsigned char *q = dst.data() + ( (size_t)y * dstSize + x ) * 4;
+			q[0] = p[0];
+			q[1] = p[1];
+			q[2] = p[2];
+			q[3] = 255;
+		}
+	}
+}
+
+} // namespace
+
 #define NUM_ACCELERATORS 21
 AccelTableEntry_t accelTable[NUM_ACCELERATORS] = {	{VK_F5, IDC_FILE_REFRESH,		mx::ACCEL_VIRTKEY},
 													{'w', IDC_ACCEL_WIREFRAME,		mx::ACCEL_CONTROL | mx::ACCEL_VIRTKEY},
@@ -199,6 +369,7 @@ AccelTableEntry_t accelTable[NUM_ACCELERATORS] = {	{VK_F5, IDC_FILE_REFRESH,		mx
 MDLViewer::MDLViewer ()
 : mxWindow (0, 0, 0, 0, 0, g_appTitle, mxWindow::Normal)
 {
+	HLMV_Log("[HLMV] MDLViewer constructor start\n");
 	d_MatSysWindow = 0;
 	d_cpl = 0;
 	m_controlPanelHidden = false;
@@ -292,20 +463,37 @@ MDLViewer::MDLViewer ()
 #endif
 	menuHelp->add ("About...", IDC_HELP_ABOUT);
 
-
+	HLMV_Log("[HLMV] creating MatSysWindow...\n");
 	d_MatSysWindow = new MatSysWindow (this, 0, 0, 100, 100, "", mxWindow::Normal);
+	HLMV_Log("[HLMV] MatSysWindow created: %p\n", d_MatSysWindow);
 #ifdef WIN32
 	// SetWindowLong ((HWND) d_MatSysWindow->getHandle (), GWL_EXSTYLE, WS_EX_CLIENTEDGE);
 #endif
 
+	HLMV_Log("[HLMV] creating ControlPanel...\n");
 	d_cpl = new ControlPanel (this);
+	HLMV_Log("[HLMV] ControlPanel created: %p\n", d_cpl);
 	d_cpl->setMatSysWindow (d_MatSysWindow);
 	g_MatSysWindow = d_MatSysWindow;
 
+	HLMV_Log("[HLMV] creating FileAssociation...\n");
 	g_FileAssociation = new FileAssociation ();
 
+	HLMV_Log("[HLMV] loadRecentFiles...\n");
 	loadRecentFiles ();
+	HLMV_Log("[HLMV] initRecentFiles...\n");
 	initRecentFiles ();
+	HLMV_Log("[HLMV] checking -embed...\n");
+
+	// Hidden model thumbnail mode (Asset Browser). The window is never seen:
+	// it is a fully transparent layered window that exists only to own the
+	// back buffer for one frame.
+	const bool thumbMode = CommandLine()->FindParm( "-thumb" ) != 0;
+	int thumbSize = ThumbRenderSize( CommandLine()->ParmValue( "-size", 256 ) );
+	if ( thumbSize < 64 )
+		thumbSize = 64;
+	if ( thumbSize > 1024 )
+		thumbSize = 1024;
 
 	const char *pEmbedStr = CommandLine()->ParmValue( "-embed", (const char*)0 );
 	if ( pEmbedStr )
@@ -344,12 +532,45 @@ MDLViewer::MDLViewer ()
 			setBounds (20, 20, 640, 700);
 		}
 	}
+	else if ( thumbMode )
+	{
+		m_controlPanelHidden = true;
+		mb->setVisible( false );
+		d_cpl->setVisible( false );
+
+		// Borderless + tool window: the client area is exactly the capture
+		// size, and even if Windows ever shows it there is no taskbar entry.
+		HWND myHwnd = (HWND)getHandle();
+		SetMenu( myHwnd, NULL );
+		LONG style = GetWindowLong( myHwnd, GWL_STYLE );
+		style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
+		SetWindowLong( myHwnd, GWL_STYLE, style );
+		LONG exStyle = GetWindowLong( myHwnd, GWL_EXSTYLE );
+		exStyle &= ~(WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_WINDOWEDGE);
+		exStyle |= WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT;
+		SetWindowLong( myHwnd, GWL_EXSTYLE, exStyle );
+		// The window must be mapped for the D3D9 swap chain to be presented,
+		// but the user must never see it: a fully transparent layered window is
+		// still rendered and composited, and its client DC keeps the frame that
+		// CaptureModelThumbnail() reads with GDI.
+		SetLayeredWindowAttributes( myHwnd, 0, 0, LWA_ALPHA );
+		SetWindowPos( myHwnd, NULL, 0, 0, thumbSize, thumbSize,
+			SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW );
+		setBounds( 0, 0, thumbSize, thumbSize );
+		if ( d_MatSysWindow )
+		{
+			d_MatSysWindow->setBounds( 0, 0, thumbSize, thumbSize );
+		}
+	}
 	else
 	{
 		int w = 640;
 		setBounds (20, 20, w, 700);
 	}
-	setVisible (true);
+	if ( !thumbMode )
+		setVisible (true);
+	else
+		setVisible (true); // transparent layered window; the user sees nothing
 
 	CUtlVector< mx::Accel_t > accelerators;
 	mx::Accel_t accel;
@@ -504,6 +725,125 @@ void MDLViewer::SaveScreenShot( const char *pszFile )
 	// Shut down.
 	mx::quit();
 	return;
+}
+
+
+//-----------------------------------------------------------------------------
+// Purpose: One hidden size x size model snapshot for the Asset Browser. The
+//          process was created with -thumb, so the window is a transparent
+//          layered window the user never sees; this function loads the model,
+//          renders one frame, captures it and writes a top-down BMP.
+//-----------------------------------------------------------------------------
+bool MDLViewer::CaptureModelThumbnail( const char *outPath, int size, const char *modelPath )
+{
+	if ( !outPath || !outPath[0] || !modelPath || !modelPath[0] || !d_cpl || !d_MatSysWindow )
+	{
+		return false;
+	}
+	if ( size < 64 || size > 1024 )
+	{
+		return false;
+	}
+
+	// Render at twice the output size: the D3D9 backend only paints the top
+	// half of a 256 px window, and supersampling gives a cleaner thumbnail.
+	const int renderSize = ThumbRenderSize( size );
+
+	// The window was sized by the constructor; make sure a viewer setting has
+	// not changed the viewport in the meantime.
+	d_MatSysWindow->setBounds( 0, 0, renderSize, renderSize );
+
+	LoadModelResult_t eLoaded = d_cpl->loadModel( modelPath );
+	if ( eLoaded != LoadModel_Success )
+	{
+		HLMV_Log("[THUMB] load failed for '%s' code %d\n", modelPath, eLoaded);
+		return false;
+	}
+
+	// loadModel() may restore saved viewer settings; apply the thumbnail look
+	// afterwards so the snapshot is deterministic.
+	g_viewerSettings.showBackground = false;
+	g_viewerSettings.showGround = false;
+	g_viewerSettings.showShadow = false;
+	g_viewerSettings.showHitBoxes = false;
+	g_viewerSettings.showBones = false;
+	g_viewerSettings.showAttachments = false;
+	g_viewerSettings.showNormals = false;
+	g_viewerSettings.showTangentFrame = false;
+	g_viewerSettings.bgColor[0] = 24.0f / 255.0f;
+	g_viewerSettings.bgColor[1] = 26.0f / 255.0f;
+	g_viewerSettings.bgColor[2] = 31.0f / 255.0f;
+	g_viewerSettings.pause = true;
+
+	// A stable front view at frame 0.
+	if ( !g_pStudioModel->HasModel() )
+	{
+		HLMV_Log("[THUMB] model has no geometry after load\n");
+		return false;
+	}
+	g_pStudioModel->SetSequence( 0 );
+	g_pStudioModel->SetFrame( 0 );
+
+	Vector bmin, bmax;
+	g_pStudioModel->ExtractBbox( bmin, bmax );
+	HLMV_Log("[THUMB] bbox=(%.2f %.2f %.2f)-(%.2f %.2f %.2f) renderMode=%d transparent=%d\n",
+		bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z,
+		(int)g_viewerSettings.renderMode, (int)g_pStudioModel->m_bIsTransparent );
+
+	// Let Windows map and paint the window before the first GL frame; the
+	// process has not entered mx::run() yet, so nobody pumps messages for it.
+	HWND earlyHwnd = (HWND)d_MatSysWindow->getHandle();
+	UpdateWindow( earlyHwnd );
+	for ( int i = 0; i < 20; ++i )
+	{
+		MSG msg;
+		while ( PeekMessage( &msg, NULL, 0, 0, PM_REMOVE ) )
+		{
+			TranslateMessage( &msg );
+			DispatchMessage( &msg );
+		}
+		Sleep( 10 );
+	}
+
+	// centerView() itself calls redraw(); the window is off-screen, so letting
+	// it present the frame is harmless.
+	g_bSkipSwap = false;
+	g_bSkipEndFrame = false;
+	d_cpl->centerView();
+
+	d_MatSysWindow->draw();
+	Sleep( 50 );
+
+	// ReadPixels() is unreliable in this fixed-function path (it returns the
+	// cleared material-system target), so capture the client area with GDI,
+	// the same route as MatSysWindow::dumpViewport().
+	HWND hwnd = (HWND)d_MatSysWindow->getHandle();
+	RECT rc{};
+	GetClientRect( hwnd, &rc );
+	const int w = rc.right - rc.left;
+	const int h = rc.bottom - rc.top;
+	HLMV_Log("[THUMB] draw done, render=%d client=%dx%d output=%d polycount=%d\n",
+		renderSize, w, h, size, (int)g_pStudioModel->GetDrawMetrics().PolyCount );
+	if ( w < renderSize || h < renderSize )
+	{
+		HLMV_Log("[THUMB] viewport smaller than requested render size\n");
+		return false;
+	}
+
+	std::vector<unsigned char> captured;
+	if ( !CaptureClientBgra( hwnd, renderSize, renderSize, captured ) )
+	{
+		HLMV_Log("[THUMB] client capture failed\n");
+		return false;
+	}
+
+	std::vector<unsigned char> topDown;
+	DownscaleBgra( captured, renderSize, size, topDown );
+
+	const bool ok = Backend_WriteBmp32( outPath, size, size, topDown.data() );
+	HLMV_Log("[THUMB] %s -> %s (%dx%d from %dx%d)\n", ok ? "wrote" : "failed",
+		outPath, size, size, renderSize, renderSize);
+	return ok;
 }
 
 
@@ -959,6 +1299,24 @@ public:
 private:
 	// Sets up the search paths
 	bool SetupSearchPaths();
+
+	virtual CSysModule *LoadModuleDLL( const char *pDLLName ) override
+	{
+		HLMV_Log("[HLMV] CHLModelViewerApp::LoadModuleDLL: %s\n", pDLLName);
+		HMODULE hMod = LoadLibraryA( pDLLName );
+		if (!hMod)
+		{
+			const char* pBinDir = CommandLine()->ParmValue("-bin", (const char*)0);
+			if (pBinDir && pBinDir[0])
+			{
+				char fullPath[MAX_PATH];
+				V_snprintf(fullPath, sizeof(fullPath), "%s\\%s", pBinDir, pDLLName);
+				hMod = LoadLibraryA(fullPath);
+			}
+		}
+		HLMV_Log("[HLMV] CHLModelViewerApp::LoadModuleDLL: %s -> %p\n", pDLLName, hMod);
+		return (CSysModule*)hMod;
+	}
 };
 
 
@@ -1012,29 +1370,45 @@ bool CHLModelViewerApp::Create()
 	}
 	HLMV_Log("[HLMV] Core systems added successfully\n");
 
-	// Optional sound systems
-	AppModule_t soundEmitterMod = LoadModule( "soundemittersystem.dll" );
-	if ( soundEmitterMod != APP_MODULE_INVALID )
+	// Optional sound systems (disabled on GMod to avoid sound scripting dependencies)
+	if ( !IsGModEngine() )
 	{
-		AddSystem( soundEmitterMod, SOUNDEMITTERSYSTEM_INTERFACE_VERSION );
-	}
-	AppModule_t soundSystemMod = LoadModule( "soundsystem.dll" );
-	if ( soundSystemMod != APP_MODULE_INVALID )
-	{
-		AddSystem( soundSystemMod, SOUNDSYSTEM_INTERFACE_VERSION );
+		AppModule_t soundEmitterMod = LoadModule( "soundemittersystem.dll" );
+		if ( soundEmitterMod != APP_MODULE_INVALID )
+		{
+			AddSystem( soundEmitterMod, SOUNDEMITTERSYSTEM_INTERFACE_VERSION );
+		}
+		AppModule_t soundSystemMod = LoadModule( "soundsystem.dll" );
+		if ( soundSystemMod != APP_MODULE_INVALID )
+		{
+			AddSystem( soundSystemMod, SOUNDSYSTEM_INTERFACE_VERSION );
+		}
 	}
 
 	g_Factory = GetFactory();
+
+	if ( IsGModEngine() )
+	{
+		s_pOriginalFactory = g_Factory;
+		g_Factory = (CreateInterfaceFn)HLMV_GModFactoryWrapper;
+	}
 
 	ConnectTier1Libraries(&g_Factory, 1);
 	ConnectTier2Libraries(&g_Factory, 1);
 
 	// Add in the cvar factory
 	AppModule_t cvarModule = LoadModule(VStdLib_GetICVarFactory());
-	AddSystem(cvarModule, CVAR_INTERFACE_VERSION);
+	if ( !AddSystem(cvarModule, CVAR_INTERFACE_VERSION) )
+	{
+		AddSystem(cvarModule, "VEngineCvar007");
+	}
 
 
 	g_pFileSystem = (IFileSystem*)FindSystem( FILESYSTEM_INTERFACE_VERSION );
+	if ( IsGModEngine() && g_pFileSystem )
+	{
+		g_pFileSystem = (IFileSystem*)WrapGModAppSystem( g_pFileSystem );
+	}
 	g_pMaterialSystem = (IMaterialSystem*)FindSystem( s_pMatSysVer );
 	g_pStudioRender = (IStudioRender*)FindSystem( STUDIO_RENDER_INTERFACE_VERSION );
 	g_pDataCache = (IDataCache*)FindSystem( DATACACHE_INTERFACE_VERSION );
@@ -1054,20 +1428,70 @@ bool CHLModelViewerApp::Create()
 		Error("Unable to load required library interface!\n");
 	}
 
+	if ( IsGModEngine() )
+	{
+		HLMV_Log("[HLMV] Installing GMod MaterialSystem Proxy...\n");
+		g_pMaterialSystem = (IMaterialSystem*)WrapGModMaterialSystem( g_pMaterialSystem );
+		HLMV_Log("[HLMV] Installing GMod MDLCache Proxy...\n");
+		g_pMDLCache = (IMDLCache*)WrapGModMDLCache( g_pMDLCache );
+		HLMV_Log("[HLMV] Installing GMod StudioRender Proxy...\n");
+		g_pStudioRender = (IStudioRender*)WrapGModAppSystem( g_pStudioRender );
+		HLMV_Log("[HLMV] Installing GMod DataCache Proxy...\n");
+		g_pDataCache = (IDataCache*)WrapGModAppSystem( g_pDataCache );
+		HLMV_Log("[HLMV] Installing GMod StudioDataCache Proxy...\n");
+		g_pStudioDataCache = (IStudioDataCache*)WrapGModAppSystem( g_pStudioDataCache );
+	}
+
 	const char *pShaderDLL = CommandLine()->ParmValue("-shaderdll");
 	if(!pShaderDLL)
 	{
 		pShaderDLL = "shaderapidx9.dll";
 	}
+	char fullShaderPath[MAX_PATH];
+	const char *pBinDir = CommandLine()->ParmValue("-bin", (const char*)0);
+	if ( IsGModEngine() && pBinDir && pBinDir[0] )
+	{
+		V_snprintf(fullShaderPath, sizeof(fullShaderPath), "%s\\%s", pBinDir, pShaderDLL);
+		pShaderDLL = fullShaderPath;
+	}
 	HLMV_Log("[HLMV] SetShaderAPI(%s)...\n", pShaderDLL);
-
+	void* esp_before = nullptr;
+	void* esp_after = nullptr;
+	__asm { mov esp_before, esp }
 	g_pMaterialSystem->SetShaderAPI(pShaderDLL);
-	HLMV_Log("[HLMV] MaterialSystem Connect...\n");
-	g_pMaterialSystem->Connect(g_Factory);
-	HLMV_Log("[HLMV] MaterialSystem Connect ok\n");
+	__asm { mov esp_after, esp }
+	HLMV_Log("[HLMV] SetShaderAPI ok (esp before=%p, after=%p)\n", esp_before, esp_after);
+	if ( !IsGModEngine() )
+	{
+		HLMV_Log("[HLMV] MaterialSystem Connect...\n");
+		g_pMaterialSystem->Connect(g_Factory);
+		HLMV_Log("[HLMV] MaterialSystem Connect ok\n");
+	}
 
-	
 	g_pMaterialSystemHardwareConfig = (IMaterialSystemHardwareConfig*)FindSystem(MATERIALSYSTEM_HARDWARECONFIG_INTERFACE_VERSION);
+	if ( !g_pMaterialSystemHardwareConfig )
+	{
+		g_pMaterialSystemHardwareConfig = (IMaterialSystemHardwareConfig*)FindSystem("MaterialSystemHardwareConfig012");
+	}
+	if ( !g_pMaterialSystemHardwareConfig && g_Factory )
+	{
+		g_pMaterialSystemHardwareConfig = (IMaterialSystemHardwareConfig*)g_Factory(MATERIALSYSTEM_HARDWARECONFIG_INTERFACE_VERSION, NULL);
+		if ( !g_pMaterialSystemHardwareConfig )
+		{
+			g_pMaterialSystemHardwareConfig = (IMaterialSystemHardwareConfig*)g_Factory("MaterialSystemHardwareConfig012", NULL);
+		}
+	}
+	HLMV_Log("[HLMV] CHLModelViewerApp::Create done, g_pMaterialSystemHardwareConfig=%p\n", g_pMaterialSystemHardwareConfig);
+
+	int sysCount = *(int*)((uintptr_t)this + 0x24);
+	IAppSystem** sysArr = *(IAppSystem***)((uintptr_t)this + 0x18);
+	HLMV_Log("[HLMV] Total systems in m_Systems: %d, arr=%p\n", sysCount, sysArr);
+	for (int i = 0; i < sysCount; ++i)
+	{
+		IAppSystem* sys = sysArr[i];
+		void** vt = sys ? *(void***)sys : nullptr;
+		HLMV_Log("[HLMV]   m_Systems[%d] = %p (vt=%p, slot0=%p)\n", i, sys, vt, vt ? vt[0] : nullptr);
+	}
 
 	return true;
 }
@@ -1094,29 +1518,45 @@ void CHLModelViewerApp::Destroy()
 //-----------------------------------------------------------------------------
 bool CHLModelViewerApp::SetupSearchPaths()
 {
+	HLMV_Log("[HLMV] SetupSearchPaths start\n");
 	CFSSteamSetupInfo steamInfo;
 	steamInfo.m_pDirectoryName = NULL;
 	steamInfo.m_bOnlyUseDirectoryName = false;
 	steamInfo.m_bToolsMode = true;
 	steamInfo.m_bSetSteamDLLPath = true;
 	steamInfo.m_bSteam = g_pFileSystem->IsSteam();
+	HLMV_Log("[HLMV] FileSystem_SetupSteamEnvironment...\n");
 	if ( FileSystem_SetupSteamEnvironment( steamInfo ) != FS_OK )
+	{
+		HLMV_Log("[HLMV] FileSystem_SetupSteamEnvironment failed!\n");
 		return false;
+	}
+	HLMV_Log("[HLMV] FileSystem_SetupSteamEnvironment ok, GameInfoPath=%s\n", steamInfo.m_GameInfoPath);
 
 	CFSMountContentInfo fsInfo;
 	fsInfo.m_pFileSystem = g_pFileSystem;
 	fsInfo.m_bToolsMode = true;
 	fsInfo.m_pDirectoryName = steamInfo.m_GameInfoPath;
 
+	HLMV_Log("[HLMV] FileSystem_MountContent...\n");
 	if ( FileSystem_MountContent( fsInfo ) != FS_OK )
+	{
+		HLMV_Log("[HLMV] FileSystem_MountContent failed!\n");
 		return false;
+	}
+	HLMV_Log("[HLMV] FileSystem_MountContent ok\n");
 
 	// Finally, load the search paths for the "GAME" path.
 	CFSSearchPathsInit searchPathsInit;
 	searchPathsInit.m_pDirectoryName = steamInfo.m_GameInfoPath;
 	searchPathsInit.m_pFileSystem = fsInfo.m_pFileSystem;
+	HLMV_Log("[HLMV] FileSystem_LoadSearchPaths...\n");
 	if ( FileSystem_LoadSearchPaths( searchPathsInit ) != FS_OK )
+	{
+		HLMV_Log("[HLMV] FileSystem_LoadSearchPaths failed!\n");
 		return false;
+	}
+	HLMV_Log("[HLMV] FileSystem_LoadSearchPaths ok\n");
 
 	char platform[MAX_PATH];
 	Q_strncpy( platform, steamInfo.m_GameInfoPath, MAX_PATH );
@@ -1124,6 +1564,7 @@ bool CHLModelViewerApp::SetupSearchPaths()
 	Q_strncat( platform, "/../platform", MAX_PATH, MAX_PATH );
 
 	fsInfo.m_pFileSystem->AddSearchPath( platform, "PLATFORM" );
+	HLMV_Log("[HLMV] SetupSearchPaths complete\n");
 
 	return true;
 }
@@ -1134,16 +1575,16 @@ bool CHLModelViewerApp::SetupSearchPaths()
 //-----------------------------------------------------------------------------
 bool CHLModelViewerApp::PreInit( )
 {
-	printf("[HLMV] PreInit start\n"); fflush(stdout);
+	HLMV_Log("[HLMV] CHLModelViewerApp::PreInit start\n");
 	MathLib_Init( 2.2f, 2.2f, 0.0f, 2.0f, false, false, false, false );
 
 	// Add paths...
 	if ( !SetupSearchPaths() )
 	{
-		printf("[HLMV] SetupSearchPaths failed!\n"); fflush(stdout);
+		HLMV_Log("[HLMV] SetupSearchPaths failed!\n");
 		return false;
 	}
-	printf("[HLMV] SetupSearchPaths ok\n"); fflush(stdout);
+	HLMV_Log("[HLMV] SetupSearchPaths ok\n");
 
 	// Get the adapter from the command line....
 	const char *pAdapterString;
@@ -1160,13 +1601,13 @@ bool CHLModelViewerApp::PreInit( )
 	}
 
 	g_pMaterialSystem->SetAdapter( nAdapter, nAdapterFlags );
-	printf("[HLMV] SetAdapter ok\n"); fflush(stdout);
+	HLMV_Log("[HLMV] SetAdapter ok\n");
 
 	if ( !g_pFileSystem->IsSteam() || CommandLine()->FindParm( "-OldDialogs" ) )
 		g_bOldFileDialogs = true;
 	
 	LoadFileSystemDialogModule();
-	printf("[HLMV] PreInit finished\n"); fflush(stdout);
+	HLMV_Log("[HLMV] PreInit finished\n");
 
 	return true; 
 }
@@ -1196,14 +1637,15 @@ int CHLModelViewerApp::Main()
 	HLMV_Log("[HLMV] creating MDLViewer...\n");
 	g_MDLViewer = new MDLViewer ();
 	HLMV_Log("[HLMV] MDLViewer created, handle=%p\n", g_MDLViewer->getHandle());
-	if ( !CommandLine()->FindParm("-embed") )
-	{
-		g_MDLViewer->setMenuBar (g_MDLViewer->getMenuBar ());
-	}
+	// Do not call setMenuBar; the menu bar is unnecessary in backend mode.
 
 	extern void BackendIPC_Init(HWND hWndMain);
-	BackendIPC_Init((HWND)g_MDLViewer->getHandle());
-	HLMV_Log("[HLMV] BackendIPC_Init done\n");
+	const bool thumbMode = CommandLine()->FindParm( "-thumb" ) != 0;
+	if ( !thumbMode )
+	{
+		BackendIPC_Init((HWND)g_MDLViewer->getHandle());
+		HLMV_Log("[HLMV] BackendIPC_Init done\n");
+	}
 
 	g_pStudioModel->Init();
 	g_pStudioModel->ModelInit();
@@ -1218,7 +1660,24 @@ int CHLModelViewerApp::Main()
 		pMdlName = CommandLine()->GetParm( nParmCount - 1 );
 	}
 
-	if ( pMdlName && Q_stristr( pMdlName, ".mdl" ) )
+	if ( thumbMode )
+	{
+		const char *thumbOut = CommandLine()->ParmValue( "-thumb", (const char*)0 );
+		const char *thumbModel = CommandLine()->ParmValue( "-model", (const char*)0 );
+		if ( (!thumbModel || !thumbModel[0]) && pMdlName && Q_stristr( pMdlName, ".mdl" ) )
+		{
+			thumbModel = pMdlName;
+		}
+		const int thumbSize = CommandLine()->ParmValue( "-size", 256 );
+		const bool ok = thumbOut && thumbOut[0] &&
+			g_MDLViewer->CaptureModelThumbnail( thumbOut, thumbSize, thumbModel );
+		g_thumbExitCode = ok ? 0 : 2;
+		// The normal shutdown path corrupts the heap with TF2's material
+		// proxies (0xC0000374). This is a one-shot helper process whose only
+		// output is the BMP, so terminate it cleanly right after writing it.
+		TerminateProcess( GetCurrentProcess(), (UINT)g_thumbExitCode );
+	}
+	else if ( pMdlName && Q_stristr( pMdlName, ".mdl" ) )
 	{
 		char absPath[MAX_PATH];
 		Q_MakeAbsolutePath( absPath, sizeof( absPath ), pMdlName );
@@ -1244,7 +1703,7 @@ int CHLModelViewerApp::Main()
 	g_pStudioModel->Shutdown();
 	g_pMaterialSystem->ModShutdown();
 
-	return nRetVal;
+	return g_thumbExitCode >= 0 ? g_thumbExitCode : nRetVal;
 }
 
 
@@ -1252,9 +1711,47 @@ int CHLModelViewerApp::Main()
 static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* pEx)
 {
 	if (pEx && pEx->ExceptionRecord) {
-		HLMV_Log("[CRASH] Exception 0x%08X at address %p\n",
+		void* addr = pEx->ExceptionRecord->ExceptionAddress;
+		HMODULE hMod = NULL;
+		char modName[MAX_PATH] = "<unknown>";
+		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCSTR)addr, &hMod) && hMod) {
+			GetModuleFileNameA(hMod, modName, sizeof(modName));
+			char* slash = strrchr(modName, '\\');
+			if (slash) memmove(modName, slash + 1, strlen(slash));
+		}
+		HLMV_Log("[CRASH] Exception 0x%08X at %s+%p (abs: %p)\n",
 			pEx->ExceptionRecord->ExceptionCode,
-			pEx->ExceptionRecord->ExceptionAddress);
+			modName, (void*)((uintptr_t)addr - (uintptr_t)hMod), addr);
+
+		if (pEx->ExceptionRecord->NumberParameters >= 2) {
+			HLMV_Log("[CRASH] Access violation %s address %p\n",
+				pEx->ExceptionRecord->ExceptionInformation[0] == 1 ? "writing to" :
+				pEx->ExceptionRecord->ExceptionInformation[0] == 8 ? "executing" : "reading",
+				(void*)pEx->ExceptionRecord->ExceptionInformation[1]);
+		}
+
+		if (pEx->ContextRecord) {
+			HLMV_Log("[CRASH] Registers: EAX=%08X EBX=%08X ECX=%08X EDX=%08X ESI=%08X EDI=%08X ESP=%08X EBP=%08X EIP=%08X\n",
+				pEx->ContextRecord->Eax, pEx->ContextRecord->Ebx, pEx->ContextRecord->Ecx, pEx->ContextRecord->Edx,
+				pEx->ContextRecord->Esi, pEx->ContextRecord->Edi, pEx->ContextRecord->Esp, pEx->ContextRecord->Ebp,
+				pEx->ContextRecord->Eip);
+		}
+
+		// Log stack frames
+		if (pEx->ContextRecord) {
+			uintptr_t* esp = (uintptr_t*)pEx->ContextRecord->Esp;
+			for (int i = 0; i < 32; i++) {
+				if (IsBadReadPtr(&esp[i], sizeof(uintptr_t))) break;
+				uintptr_t ptr = esp[i];
+				HMODULE hFrameMod = NULL;
+				if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCSTR)ptr, &hFrameMod) && hFrameMod) {
+					char frameMod[MAX_PATH] = "";
+					GetModuleFileNameA(hFrameMod, frameMod, sizeof(frameMod));
+					char* sl = strrchr(frameMod, '\\');
+					HLMV_Log("[CRASH]   stack[%d] = %s+0x%X\n", i, sl ? sl + 1 : frameMod, ptr - (uintptr_t)hFrameMod);
+				}
+			}
+		}
 	}
 	return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -1267,6 +1764,14 @@ int main (int argc, char *argv[])
 	remove("hlmv_debug.log");
 	SetUnhandledExceptionFilter(CrashFilter);
 	HLMV_Log("[HLMV] main() started, argc=%d\n", argc);
+
+	for (int i = 1; i < argc; ++i) {
+		if (strcmp(argv[i], "-bin") == 0 && i + 1 < argc) {
+			SetDllDirectoryA(argv[i + 1]);
+			HLMV_Log("[HLMV] Early SetDllDirectoryA: %s\n", argv[i + 1]);
+			break;
+		}
+	}
 
 	CommandLine()->CreateCmdLine( argc, argv );
 
@@ -1288,9 +1793,44 @@ int main (int argc, char *argv[])
 	strcpy( szName, mx::getApplicationPath() );
 	// mx_setcwd (szName);
 
+class CSteamApplicationGMod : public CSteamApplication
+{
+public:
+	CSteamApplicationGMod( CSteamAppSystemGroup *pAppSystemGroup ) : CSteamApplication( pAppSystemGroup ) {}
+
+	virtual bool Create() override
+	{
+		HLMV_Log("[HLMV] CSteamApplication::Create start\n");
+		bool ok = CSteamApplication::Create();
+		HLMV_Log("[HLMV] CSteamApplication::Create returned %d (m_pFileSystem=%p)\n", ok, m_pFileSystem);
+		if ( ok && m_pFileSystem && IsGModEngine() )
+		{
+			m_pFileSystem = (IFileSystem*)WrapGModAppSystem( m_pFileSystem );
+		}
+		return ok;
+	}
+
+	virtual bool PreInit() override
+	{
+		HLMV_Log("[HLMV] CSteamApplication::PreInit start\n");
+		bool ok = CSteamApplication::PreInit();
+		HLMV_Log("[HLMV] CSteamApplication::PreInit returned %d\n", ok);
+		return ok;
+	}
+
+	virtual int Main() override
+	{
+		HLMV_Log("[HLMV] CSteamApplication::Main start\n");
+		int ret = CSteamApplication::Main();
+		HLMV_Log("[HLMV] CSteamApplication::Main returned %d\n", ret);
+		return ret;
+	}
+};
+
 	HLMV_Log("[HLMV] running CSteamApplication\n");
 	CHLModelViewerApp hlmodelviewerApp;
-	CSteamApplication steamApplication( &hlmodelviewerApp );
+	CSteamApplicationGMod steamApplication( &hlmodelviewerApp );
+	HLMV_Log("[HLMV] &hlmodelviewerApp=%p, &steamApplication=%p\n", &hlmodelviewerApp, &steamApplication);
 	int ret = steamApplication.Run();
 	HLMV_Log("[HLMV] steamApplication.Run returned %d\n", ret);
 	return ret;

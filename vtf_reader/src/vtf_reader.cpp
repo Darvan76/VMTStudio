@@ -302,6 +302,13 @@ vmt::Error vtflib_not_ready_error() {
 
 bool allocate_rgba(std::uint32_t width, std::uint32_t height,
                    std::vector<std::uint8_t>& out, vmt::Error& error) {
+    if (width == 0 || height == 0 || width > 16384 || height > 16384) {
+        error = vmt::make_error(vmt::ErrorCode::VtfInvalidHeader,
+                                "invalid image dimensions for RGBA allocation (" +
+                                    std::to_string(width) + "x" + std::to_string(height) + ")",
+                                "The image dimensions are invalid");
+        return false;
+    }
     const std::uint64_t byte_count = static_cast<std::uint64_t>(width) * height * 4u;
     if (byte_count > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
         error = vmt::make_error(vmt::ErrorCode::OutOfMemory,
@@ -425,6 +432,13 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
 
     const std::uint32_t width = static_cast<std::uint32_t>(vlImageGetWidth());
     const std::uint32_t height = static_cast<std::uint32_t>(vlImageGetHeight());
+    if (width == 0 || height == 0 || width > 16384 || height > 16384) {
+        return vmt::Err<RgbaImage>(vmt::make_error(
+            vmt::ErrorCode::VtfInvalidHeader,
+            "invalid texture dimensions: " + std::to_string(width) + "x" + std::to_string(height),
+            "The VTF file has corrupted image dimensions",
+            origin.string()));
+    }
     vlByte* source = vlImageGetData(frame, 0, 0, 0);
     if (source == nullptr) {
         return vmt::Err<RgbaImage>(vmt::make_error(

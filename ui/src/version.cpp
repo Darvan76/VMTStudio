@@ -4,7 +4,7 @@
 #include <sstream>
 
 #ifndef VMTSTUDIO_VERSION_STRING
-#define VMTSTUDIO_VERSION_STRING "0.1.0"
+#define VMTSTUDIO_VERSION_STRING "0.2.0"
 #endif
 
 namespace ui {

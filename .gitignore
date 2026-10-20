@@ -110,6 +110,7 @@ hlmv_debug.log
 *.core
 crashpad/
 dist/
+vmtstudio-*/
 *.zip
 *.7z
 *.tar.gz
@@ -122,6 +123,8 @@ vmtviewer_vtf_tests/
 
 # Volcados de texturas / capturas temporales de pruebas de HLMV
 *.tga
+scratch/
+screenshot*.png
 
 # ------------------------------------------------------------------------------
 # Archivos del sistema operativo

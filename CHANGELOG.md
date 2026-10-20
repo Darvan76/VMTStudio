@@ -7,9 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-20
+
 ### Added
+- **Unified Asset Browser (`F3` / `F4`)**:
+  - One modeless browser for `.vmt`, `.vtf` and `.mdl` assets reachable through the engine virtual file system (loose folders and mounted `.vpk` archives) plus user-added folders, with token search, type/source filters, list/grid views, per-type previews and drag & drop onto the viewport.
+  - Opens instantly from a per-game on-disk index cache; **Refresh (`Ctrl+R`)** rescans the game and user folders and rewrites the cache. Opening the browser never triggers a scan by itself.
+  - **`F3` / Tools > Asset Browser...** opens it; **`F4` / Model > Open Model...** opens it filtered to models.
+  - The inspector's texture picker now uses the browser in *pick* mode filtered to textures, so textures inside VPKs can be selected (the native file dialog could not see them).
+  - Grid thumbnails are decoded off the UI thread and cached per game.
+  - Browser filters, source, view mode, sort order, user folders and window geometry persist in the settings store (`asset_*` keys). The old Material and Model browser dialogs were removed.
 - **Model Viewer (Studio `.mdl` inspection)**:
-  - Model browser (**Model > Open Model... (`F4`)**) that delegates the scan to the engine file system (loose folders and mounted `.vpk` archives) with search, source filters and inline loading, so the window never blocks.
+  - Model loading (**Model > Open Model... / `F4`**) through the unified Asset Browser filtered to models, with search, source filters and inline loading. The scan runs in the backend, so the window never blocks.
   - Model loading via drag & drop of a `.mdl` onto the viewport, the **Model > Recent Models** menu, or the command line: `vmtstudio --model <path>` (a positional `.mdl` path is accepted too).
   - **Materials dock**: every material of the loaded model grouped by bodypart, with search and previous/next walk-through (`Alt+Left` / `Alt+Right`).
   - **Animation dock**: sequence list with activity filters, timeline scrubbing fed by the live engine tick, playback speed, blending, overlay layers, pose parameters, bodygroups and skins.
@@ -18,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Export Model Materials... (`Ctrl+Shift+E`)**: exports every material of the loaded model as `.vmt` files, flat or mirroring `materials/`.
   - **Isolate (experimental)**: transparent substitute overrides hide every other material of the model; every written substitute is tracked and removed when isolation is turned off, a model is closed/replaced, the connection changes or the app exits.
 - **Persistent model state**: `last_model` and repeated `recent_models` entries in the settings store (additive keys; existing settings files remain compatible).
+- **Application Updater (`Ayuda > Buscar actualizaciones...`)**:
+  - Checks GitHub Releases via GitHub REST API, compares versions with SemVer 2.0.0 logic (`AppVersion`), and displays release notes in an update dialog.
+  - Non-blocking background download with progress bar and speed tracking.
+  - Automatic extraction and atomic in-place updating via `apply_update.cmd` script and robocopy.
+  - Automatic restart of the updated application with graceful process handover.
+- **Security Hardening & Path Traversal Prevention**:
+  - Full path validation and sanitization for all file loading operations (CLI, drag & drop, file dialogs, IPC).
+  - Strict relative-path boundary checks preventing directory traversal (`..`) in game materials, model scenes, and asset resolution.
+  - Zip Slip vulnerability protection during updater extraction.
+- **CI/CD & Packaging**:
+  - Multi-configuration GitHub Actions workflow supporting both `Release` and `Debug` builds.
+  - Automated release packaging script (`package_release.ps1`) bundling x64 frontend, 32-bit HLMV backend, VTFLib DLLs, Qt 6 runtimes, schemas, and preview models.
 
 ## [0.1.0] - 2026-10-15
 

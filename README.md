@@ -6,7 +6,7 @@
 
 **A native, modern material studio powered by Valve's Source Engine renderer — pixel-perfect fidelity, right on your desktop.**
 
-![Release](https://img.shields.io/badge/release-v0.1.0-blue.svg)
+![Release](https://img.shields.io/badge/release-v0.2.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![C++](https://img.shields.io/badge/standard-C%2B%2B17-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)
@@ -67,10 +67,13 @@ Unlike generic material viewers that try to replicate Source shaders through cus
 - **Instant Sync** — changes in either editor update the 3D viewport in real time (250 ms debounce).
 - **Full Undo / Redo** — unified stack across both editors (`Ctrl+Z` / `Ctrl+Y`).
 
-### 📂 Material Browser (`F3`)
+### 📂 Asset Browser (`F3` / `F4`)
 
-- Deep-scans loose game folders and mounted `.vpk` archives without unpacking.
-- Real-time thumbnail generation using the native engine, with automatic disk caching (`%LOCALAPPDATA%\VMTStudio\thumbnails\`).
+- One modeless window for materials, textures and models (`.vmt`, `.vtf`, `.mdl`) across loose game folders, mounted `.vpk` archives and user-added folders, without unpacking.
+- Token search, type/source filters, list and grid views, per-type previews and drag & drop onto the viewport.
+- Opens instantly from a per-game index cache (`%LOCALAPPDATA%\VMTStudio\cache\<game-key>\assets-v1.tsv`); **Refresh** (`Ctrl+R`) rescans and rewrites it.
+- Thumbnails are decoded off the UI thread and cached per game (`%LOCALAPPDATA%\VMTStudio\thumbnails\<game-key>\`).
+- `F4` opens the same window filtered to models; the inspector's texture picker uses it in *pick* mode, so VPK textures are selectable.
 
 ### 🔍 Schema Validation & Diagnostics (`F7`)
 
@@ -201,7 +204,7 @@ The engine bridge supports automatic connection to any Source Engine branch base
 
 Don't want to build from source? A precompiled portable package is ready to use:
 
-1. **Download** — grab `vmt-studio-v0.1.0-windows-x64.zip` from the [Releases](https://github.com/your-username/VMT-Studio/releases) page.
+1. **Download** — grab `vmtstudio-v0.2.0-win64.zip` from the [Releases](https://github.com/your-username/VMT-Studio/releases) page.
 2. **Extract** — unzip anywhere (e.g. `C:\Tools\VMT-Studio`). No installation or admin rights required.
 3. **Run** — launch `vmtstudio.exe`.
 4. **Connect to Source Engine**:
@@ -209,7 +212,7 @@ Don't want to build from source? A precompiled portable package is ready to use:
    - Select your game from the **Known games** dropdown, or click **Discover...** to auto-scan your Steam libraries.
    - Alternatively, specify the game directory (folder with `gameinfo.txt`) and engine `/bin` directory manually.
    - Click **Test Connection** to validate the installation.
-5. **Start Editing** — open any `.vmt` via **File > Open** or the **Material Browser (`F3`)**.
+5. **Start Editing** — open any `.vmt` via **File > Open** or the **Asset Browser (`F3`)**.
 
 > [!NOTE]
 > The portable ZIP bundles `vmtstudio.exe` (64-bit Qt 6 frontend), `hlmv_backend.exe` (32-bit renderer), `VTFLib.dll`, and all Qt 6 runtime dependencies. **No proprietary Valve assets are distributed** — engine DLLs are loaded dynamically from your local game installation.
@@ -294,7 +297,7 @@ build64/bin/Release/vmtstudio.exe
    - Select a game from the **Known games** dropdown, or click **Discover...** to scan Steam libraries.
    - Or manually set the **Game Directory** (containing `gameinfo.txt`) and **Bin Directory**.
    - Click **Test Connection** to validate the installation.
-3. Open any `.vmt` via **File > Open** or the **Material Browser (`F3`)**.
+3. Open any `.vmt` via **File > Open** or the **Asset Browser (`F3`)**.
 4. The 3D viewport will automatically spawn the embedded HLMV backend and render the material with full Source Engine fidelity.
 
 ---
@@ -303,7 +306,7 @@ build64/bin/Release/vmtstudio.exe
 
 VMT-Studio can load and inspect Source Engine studio models (`.mdl`) with the same native renderer used for materials:
 
-- **Open a model** — via **Model > Open Model... (`F4`)** (browser with search and VPK/loose filters), by **dragging & dropping** a `.mdl` onto the viewport, from **Model > Recent Models**, or from the command line: `vmtstudio --model models/props_c17/oildrum001.mdl`.
+- **Open a model** — via **Model > Open Model... (`F4`)** (Asset Browser filtered to models), by **dragging & dropping** a `.mdl` onto the viewport, from **Model > Recent Models**, or from the command line: `vmtstudio --model models/props_c17/oildrum001.mdl`.
 - **Materials dock** — every material grouped by bodypart, with search and previous/next navigation.
 - **Animation dock** — sequence list with activity filters, timeline scrubbing, playback speed, blending, overlay layers, pose parameters, bodygroups, and skins.
 - **Edit materials in place** — selecting a model material opens its VMT in the editor; edits are saved as a loose override at the material's game-relative path. The engine re-resolves only that slot, keeping the rest of the model intact. **Ctrl+S** saves atomically.
@@ -314,7 +317,8 @@ VMT-Studio can load and inspect Source Engine studio models (`.mdl`) with the sa
 
 | Shortcut | Action |
 | --- | --- |
-| `F4` | Open the model browser |
+| `F3` | Open the Asset Browser |
+| `F4` | Open the Asset Browser filtered to models |
 | `Space` | Play / pause animation |
 | `[` / `]` | Halve / double playback speed |
 | `Alt+Left` / `Alt+Right` | Select previous / next material |

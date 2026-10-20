@@ -56,6 +56,19 @@ struct MaterialName {
     std::string name;
 };
 
+// One file found by list_assets(). Paths keep their extension and use forward
+// slashes, matching how the engine file system addresses both loose files and
+// VPK entries ("materials/brick/brick001.vmt").
+struct AssetRecord {
+    std::string path;
+    bool loose = false;  // false when the file lives inside a VPK
+};
+
+struct AssetList {
+    std::vector<AssetRecord> entries;
+    bool truncated = false;  // the backend stopped after its safety cap or time budget
+};
+
 // Pixels read back from an engine render target: BGRA, row 0 is the top row
 // (already flipped vertically if `flip_vertical` was requested).
 struct Thumbnail {
@@ -214,10 +227,20 @@ public:
     // VPKs. Used by validation for texture lookups.
     virtual vmt::Result<bool> file_exists(const std::string& game_path) = 0;
 
-    // Enumerates every .vmt in the mounted search paths (game folders + VPKs).
-    // Names are game-relative without extension. Best-effort; the engine file
-    // system must be initialized.
+    // Enumerates every .vmt in the mounted search paths (game folders + VPKs)
+    // through the engine file system while the backend runs, with a disk-only
+    // fallback when it does not. Names are game-relative without extension.
     virtual vmt::Result<std::vector<std::string>> list_materials() = 0;
+
+    // Enumerates every file under `roots` whose extension is one of
+    // `extensions`, through the engine file system (loose files and VPKs).
+    // Roots are game-relative with forward slashes ("materials",
+    // "models/props_c17"); the extensions include the dot (".vmt") and are
+    // case-insensitive. The
+    // backend dedups paths case-insensitively. Same blocking contract as
+    // list_models(), and only available while the backend runs.
+    virtual vmt::Result<AssetList> list_assets(const std::vector<std::string>& roots,
+                                               const std::vector<std::string>& extensions) = 0;
 
     // Reads a text file (a VMT, for example) through the engine file system,
     // so materials that live inside VPKs can be opened for editing.

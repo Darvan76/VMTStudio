@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -344,6 +345,21 @@ bool AppUpdater::applyUpdate(const QString& zipFilePath, QString& errorMessage) 
     if (!extracted) {
         errorMessage = tr("No se pudo descomprimir el archivo de actualización.");
         return false;
+    }
+
+    // Zip Slip defense: ensure all extracted files stay strictly inside extractedDir
+    const QString canonicalExtracted = QFileInfo(extractedDir).canonicalFilePath();
+    if (!canonicalExtracted.isEmpty()) {
+        QDirIterator it(extractedDir, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            it.next();
+            const QString canonicalItem = it.fileInfo().canonicalFilePath();
+            if (!canonicalItem.isEmpty() && !canonicalItem.startsWith(canonicalExtracted, Qt::CaseInsensitive)) {
+                QDir(extractedDir).removeRecursively();
+                errorMessage = tr("Error de seguridad: el archivo de actualización contiene rutas no seguras (Zip Slip).");
+                return false;
+            }
+        }
     }
 
     // Locate directory containing vmtstudio.exe

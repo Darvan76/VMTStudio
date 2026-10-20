@@ -32,7 +32,7 @@ int main(int argc, char* argv[]) {
 #ifdef VMTSTUDIO_VERSION_STRING
     app.setApplicationVersion(VMTSTUDIO_VERSION_STRING);
 #else
-    app.setApplicationVersion("0.1.0");
+    app.setApplicationVersion("0.2.0");
 #endif
     app.setOrganizationName("VMT-Studio");
     app.setWindowIcon(QIcon(":/icons/app.png"));

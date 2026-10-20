@@ -187,32 +187,48 @@ struct RowReader {
     // The row must have exactly `count` TAB separated fields.
     bool expect(std::size_t count) const {
         if (fields.size() == count) return true;
-        error = row_error(dump_kind, line, fields[0],
+        error = row_error(dump_kind, line, fields.empty() ? "" : fields[0],
                           "expected " + std::to_string(count) + " fields, got " +
                               std::to_string(fields.size()));
         return false;
     }
 
     bool as_int(std::size_t index, const char* name, int& out) const {
+        if (index >= fields.size()) {
+            error = bad_value(index, name, "in-bounds index");
+            return false;
+        }
         if (parse_int(fields[index], out)) return true;
         error = bad_value(index, name, "an integer");
         return false;
     }
 
     bool as_float(std::size_t index, const char* name, float& out) const {
+        if (index >= fields.size()) {
+            error = bad_value(index, name, "in-bounds index");
+            return false;
+        }
         if (parse_float(fields[index], out)) return true;
         error = bad_value(index, name, "a number");
         return false;
     }
 
     bool as_flag(std::size_t index, const char* name, bool& out) const {
+        if (index >= fields.size()) {
+            error = bad_value(index, name, "in-bounds index");
+            return false;
+        }
         if (parse_flag(fields[index], out)) return true;
         error = bad_value(index, name, "0 or 1");
         return false;
     }
 
-    // "loose" / "vpk" of a `model` row.
+    // "loose" / "vpk" of a `model` or `asset` row.
     bool as_source(std::size_t index, bool& loose) const {
+        if (index >= fields.size()) {
+            error = bad_value(index, "source", "in-bounds index");
+            return false;
+        }
         if (fields[index] == "loose") {
             loose = true;
             return true;
@@ -227,8 +243,10 @@ struct RowReader {
 
 private:
     vmt::Error bad_value(std::size_t index, const char* name, const char* expected) const {
-        return row_error(dump_kind, line, fields[0], std::string("field \"") + name + "\" is not " +
-                                                      expected + ": \"" + fields[index] + "\"");
+        const std::string val = (index < fields.size()) ? fields[index] : "<out of bounds>";
+        const std::string row_tag = fields.empty() ? "" : fields[0];
+        return row_error(dump_kind, line, row_tag, std::string("field \"") + name + "\" is not " +
+                                                       expected + ": \"" + val + "\"");
     }
 
     const char* dump_kind;
@@ -259,6 +277,7 @@ vmt::Result<ModelList> parse_models_dump(const std::string& text) {
     ModelList models;
     for (const DumpRow& row : rows.value()) {
         const std::vector<std::string> fields = split_tabs(row.text);
+        if (fields.empty()) continue;
         if (fields[0] == "note") {
             // The backend ends a capped scan with "note\ttruncated"; unknown
             // note rows are ignored like any other unknown row.
@@ -281,6 +300,42 @@ vmt::Result<ModelList> parse_models_dump(const std::string& text) {
     return vmt::Ok(std::move(models));
 }
 
+vmt::Result<AssetList> parse_assets_dump(const std::string& text) {
+    vmt::Result<std::vector<DumpRow>> rows = dump_rows("assets", text);
+    if (!rows.ok()) {
+        return vmt::Err<AssetList>(rows.error());
+    }
+
+    AssetList assets;
+    for (const DumpRow& row : rows.value()) {
+        const std::vector<std::string> fields = split_tabs(row.text);
+        if (fields.empty()) continue;
+        if (fields[0] == "note") {
+            // The backend ends a capped scan with "note\ttruncated"; unknown
+            // note rows are ignored like any other unknown row.
+            if (fields.size() >= 2 && fields[1] == "truncated") {
+                assets.truncated = true;
+            }
+            continue;
+        }
+        if (fields[0] != "asset") continue;  // forward compatible: ignore unknown rows
+
+        vmt::Error error;
+        const RowReader reader("assets", row.line, fields, error);
+        AssetRecord record;
+        if (!reader.expect(3) || !reader.as_source(2, record.loose)) {
+            return vmt::Err<AssetList>(std::move(error));
+        }
+        if (fields[1].empty()) {
+            return vmt::Err<AssetList>(
+                row_error("assets", row.line, fields[0], "field \"path\" is empty"));
+        }
+        record.path = fields[1];
+        assets.entries.push_back(std::move(record));
+    }
+    return vmt::Ok(std::move(assets));
+}
+
 vmt::Result<ModelScene> parse_model_scene_dump(const std::string& text) {
     vmt::Result<std::vector<DumpRow>> rows = dump_rows("model_scene", text);
     if (!rows.ok()) {
@@ -290,6 +345,7 @@ vmt::Result<ModelScene> parse_model_scene_dump(const std::string& text) {
     ModelScene scene;
     for (const DumpRow& row : rows.value()) {
         const std::vector<std::string> fields = split_tabs(row.text);
+        if (fields.empty()) continue;
         const std::string& kind = fields[0];
         vmt::Error error;
         const RowReader reader("model_scene", row.line, fields, error);
@@ -409,6 +465,7 @@ vmt::Result<AnimState> parse_anim_state_dump(const std::string& text) {
     AnimState state;  // defaults: frame 0, paused
     for (const DumpRow& row : rows.value()) {
         const std::vector<std::string> fields = split_tabs(row.text);
+        if (fields.empty()) continue;
         if (fields[0] != "state") continue;
 
         vmt::Error error;

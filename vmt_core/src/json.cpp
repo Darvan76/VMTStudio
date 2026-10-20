@@ -3,6 +3,7 @@
 #include "internal.h"
 
 #include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -439,7 +440,7 @@ private:
         const char* const begin = token.data();
         const char* const end = token.data() + token.size();
         const std::from_chars_result conversion = std::from_chars(begin, end, number);
-        if (conversion.ec != std::errc() || conversion.ptr != end) {
+        if (conversion.ec != std::errc() || conversion.ptr != end || !std::isfinite(number)) {
             return Result<JsonValue>(error_at(start, "invalid number"));
         }
         JsonValue value;

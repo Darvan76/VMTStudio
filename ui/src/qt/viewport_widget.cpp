@@ -4,14 +4,80 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QResizeEvent>
+#include <QDataStream>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QMimeData>
 #include <QUrl>
 #include <QFileInfo>
+#include <QDir>
 
 namespace ui {
 namespace qt {
+
+namespace {
+
+// Must match AssetListModel::mimeType() (the browser is the only producer).
+constexpr const char* kAssetMimeType = "application/x-vmtstudio-asset";
+constexpr quint32 kAssetPayloadVersion = 1;
+
+bool has_asset_payload(const QMimeData* mime) {
+    return mime != nullptr && mime->hasFormat(QString::fromLatin1(kAssetMimeType));
+}
+
+// Reads the QDataStream written by AssetListModel::mimeData(): version, kind,
+// virtual path, disk path. A malformed payload is ignored so the standard
+// text/uri-list fallback can still open a loose file.
+bool decode_asset_payload(const QMimeData* mime, QString& virtualPath, int& kind,
+                          QString& diskPath) {
+    if (!has_asset_payload(mime)) {
+        return false;
+    }
+    const QByteArray payload = mime->data(QString::fromLatin1(kAssetMimeType));
+    if (payload.isEmpty()) {
+        return false;
+    }
+
+    QDataStream stream(payload);
+    stream.setVersion(QDataStream::Qt_6_0);
+    quint32 version = 0;
+    qint32 rawKind = -1;
+    QString rawVirtualPath;
+    QString rawDiskPath;
+    stream >> version >> rawKind >> rawVirtualPath >> rawDiskPath;
+    if (stream.status() != QDataStream::Ok || version != kAssetPayloadVersion ||
+        rawVirtualPath.isEmpty()) {
+        return false;
+    }
+
+    // Validate against path traversal and null bytes
+    if (rawVirtualPath.contains(QChar('\0'))) {
+        return false;
+    }
+    const QString cleanVirtual = QDir::cleanPath(rawVirtualPath);
+    if (cleanVirtual.startsWith("..") || cleanVirtual.contains("/../") || cleanVirtual.contains("\\..\\")) {
+        return false;
+    }
+
+    if (!rawDiskPath.isEmpty()) {
+        if (rawDiskPath.contains(QChar('\0'))) {
+            return false;
+        }
+        const QString cleanDisk = QDir::cleanPath(rawDiskPath);
+        if (!QFileInfo(cleanDisk).isAbsolute() &&
+            (cleanDisk.startsWith("..") || cleanDisk.contains("/../") || cleanDisk.contains("\\..\\"))) {
+            return false;
+        }
+        rawDiskPath = cleanDisk;
+    }
+
+    virtualPath = cleanVirtual;
+    kind = rawKind;
+    diskPath = rawDiskPath;
+    return true;
+}
+
+} // namespace
 
 ViewportWidget::ViewportWidget(QWidget* parent)
     : QWidget(parent) {
@@ -121,15 +187,24 @@ void ViewportWidget::paintEvent(QPaintEvent* event) {
     painter.setFont(font);
     painter.setPen(QColor(110, 110, 115));
     QRect subRect = textRect.adjusted(0, 40, 0, 0);
-    painter.drawText(subRect, Qt::AlignCenter, tr("Drop a .vmt or .mdl file here, or use File > Open"));
+    painter.drawText(subRect, Qt::AlignCenter,
+                     tr("Drop a .vmt or .mdl file here, or drag an asset from the browser (F3)"));
 }
 
 void ViewportWidget::dragEnterEvent(QDragEnterEvent* event) {
+    if (has_asset_payload(event->mimeData())) {
+        event->acceptProposedAction();
+        return;
+    }
     if (event->mimeData()->hasUrls()) {
         for (const QUrl& url : event->mimeData()->urls()) {
             const QString path = url.toLocalFile();
-            if (path.endsWith(".vmt", Qt::CaseInsensitive) ||
-                path.endsWith(".mdl", Qt::CaseInsensitive)) {
+            if (path.isEmpty() || path.contains(QChar('\0'))) {
+                continue;
+            }
+            const QString clean = QDir::cleanPath(path);
+            if (clean.endsWith(".vmt", Qt::CaseInsensitive) ||
+                clean.endsWith(".mdl", Qt::CaseInsensitive)) {
                 event->acceptProposedAction();
                 return;
             }
@@ -139,19 +214,31 @@ void ViewportWidget::dragEnterEvent(QDragEnterEvent* event) {
 }
 
 void ViewportWidget::dropEvent(QDropEvent* event) {
+    // The custom format wins over text/uri-list: a loose asset carries both,
+    // and the custom payload also knows the game-relative path and its kind.
+    QString virtualPath;
+    QString diskPath;
+    int kind = -1;
+    if (decode_asset_payload(event->mimeData(), virtualPath, kind, diskPath)) {
+        emit assetDropped(virtualPath, kind, diskPath);
+        event->acceptProposedAction();
+        return;
+    }
+
     if (event->mimeData()->hasUrls()) {
         for (const QUrl& url : event->mimeData()->urls()) {
             const QString path = url.toLocalFile();
-            if (path.isEmpty()) {
+            if (path.isEmpty() || path.contains(QChar('\0'))) {
                 continue;
             }
-            if (path.endsWith(".vmt", Qt::CaseInsensitive)) {
-                emit fileDropped(path);
+            const QString clean = QDir::cleanPath(path);
+            if (clean.endsWith(".vmt", Qt::CaseInsensitive)) {
+                emit fileDropped(clean);
                 event->acceptProposedAction();
                 return;
             }
-            if (path.endsWith(".mdl", Qt::CaseInsensitive)) {
-                emit modelDropped(path);
+            if (clean.endsWith(".mdl", Qt::CaseInsensitive)) {
+                emit modelDropped(clean);
                 event->acceptProposedAction();
                 return;
             }

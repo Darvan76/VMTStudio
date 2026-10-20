@@ -32,7 +32,7 @@ class ViewportWidget;
 class InspectorWidget;
 class VmtHighlighter;
 class NotificationPopup;
-class ModelBrowserDialog;
+class AssetBrowserDialog;
 class ModelMaterialsDock;
 class AnimationDock;
 class AppUpdater;
@@ -94,7 +94,6 @@ private slots:
     void onOpenModel();
     void onCloseModel();
     void onRecentModelTriggered();
-    void onModelSelected(const QString& gameRelative, bool loose);
 
     // Model materials dock
     void onModelMaterialSelected(const QString& gameName);
@@ -108,7 +107,10 @@ private slots:
     void onPlayheadTick(int frame, qintptr cycle_x10000);
 
     // Tools & Game
-    void onOpenMaterialBrowser();
+    void onOpenAssetBrowser();
+    void onAssetActivated(const QString& virtualPath, int kind);
+    void onAssetPicked(const QString& virtualPath, int kind);
+    void onAssetFoldersChanged(const QStringList& folders);
     void onValidateMaterial();
     void onToggleDebugConsole();
     void onOpenGameConnection();
@@ -126,6 +128,7 @@ private slots:
     void onBrowseTextureRequested(const QString& paramName, const QString& currentValue);
     void onViewportResized(int width, int height);
     void onMaterialDropped(const QString& filePath);
+    void onAssetDropped(const QString& virtualPath, int kind, const QString& diskPath);
 
     // Sync timers
     void onPreviewSyncTimeout();
@@ -153,6 +156,12 @@ private:
     void syncPreview();
     void refreshMaterialRoots();
 
+    // One modeless Asset Browser per window. It stays alive while hidden so the
+    // loaded index, filters and thumbnails survive between F3/F4 and pick
+    // sessions; MainWindow owns it (no WA_DeleteOnClose).
+    AssetBrowserDialog* ensureAssetBrowser();
+    void showAssetBrowser(int kind);
+
     // --- Model viewer -------------------------------------------------------
     void loadModelNow(const QString& modelPath);
     void queryModelSceneAsync();
@@ -165,6 +174,9 @@ private:
     // Game-relative path of a disk file below the configured game folder; empty
     // when the game folder is unknown or the file lives outside of it.
     QString gameRelativePath(const QString& diskPath) const;
+    // Disk copy of an asset virtual path (game folder first, then the user
+    // folders). Empty for VPK-only assets.
+    QString resolveAssetDiskPath(const QString& virtualPath) const;
     bool containsModelMaterial(const QString& gameName) const;
 
     // In-place editing of a material that belongs to the loaded model: opens it
@@ -251,6 +263,10 @@ private:
 
     AppUpdater* m_updater = nullptr;
     QPointer<UpdateDialog> m_updateDialog;
+
+    // Asset Browser (F3/F4) and its texture-picker state.
+    QPointer<AssetBrowserDialog> m_assetBrowser;
+    QString m_pendingTextureParam;
 };
 
 } // namespace qt

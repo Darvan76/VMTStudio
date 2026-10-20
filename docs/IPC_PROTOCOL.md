@@ -73,7 +73,7 @@ keeps the message handler fast (the `WM_COPYDATA` round trip has a 1 s timeout)
 and lets the UI wait without blocking its own message loop.
 
 ```
-DUMP <kind> <token> [args]      # kind: models | model_scene | anim_state
+DUMP <kind> <token> [args]      # kind: models | assets | model_scene | anim_state
 RAW <token> <game-relative path>  # binary payload (VPK-aware)
 ```
 
@@ -88,11 +88,36 @@ RAW <token> <game-relative path>  # binary payload (VPK-aware)
     its presence as "result complete".
   * `<token>.err` - UTF-8 error message; mutually exclusive with `.done`.
 * The backend deletes stale `<token>.*` files before starting a job.
-* The UI gives up after 10 s (timeout) and reports an error.
+* The UI gives up after 10 s (timeout) and reports an error. `assets` is the
+  exception: a whole-game index legitimately takes longer, so the UI waits 60 s
+  for it.
 
 `DUMP models [prefix]`: every `*.mdl` reachable through the engine file system
 (loose folders and VPKs), including VPK-packed content. `prefix` is a
 game-relative path prefix such as `models/props_c17/`.
+
+`DUMP assets <roots> <extensions>`: every file reachable through the engine
+file system whose extension is one of `extensions`, under any of `roots`:
+
+```
+DUMP assets <token> materials;models .vmt;.vtf;.mdl
+```
+
+* `roots` and `extensions` are `;`-separated lists; the first space in the
+  argument separates the two lists.
+* Roots are game-relative, with forward slashes and no trailing slash
+  (`materials`, `models/props_c17`).
+* Extensions include the dot and are folded to lower case by the backend
+  (`.vmt;.vtf;.mdl`); a missing leading dot is accepted.
+* Empty elements are ignored. Missing roots or extensions fail the job through
+  `<token>.err`.
+* Paths are deduplicated case-insensitively; the first spelling seen is the one
+  reported. Every row is resolved to `loose` or `vpk` with the engine file
+  system, so a loose copy and a VPK entry for the same path produce one row.
+* The scan stops after `150000` unique rows, `1200000` visited entries, or a
+  clock budget of about 20 s per root (with a global scan cap that keeps the
+  answer inside the 60 s query timeout). A cut scan is marked with
+  `note\ttruncated`; the rows already collected remain valid.
 
 `DUMP model_scene` (no arguments): everything the UI needs about the loaded
 model in one round trip.
@@ -122,6 +147,20 @@ note\ttruncated
 
 * `note\ttruncated` is only written when the scan hit its safety cap; a parser
   should surface it as "refine the search" (the list is incomplete).
+
+`kind=assets`:
+
+```
+asset\t<game-relative path, extension included>\t<loose|vpk>
+note\ttruncated
+```
+
+* One row per unique path (case-insensitive dedup in the backend), sorted by
+  the lower-case path.
+* `note\ttruncated` is written when the asset scan hit the row cap, the entry
+  cap or the clock budget; the rows before it are still valid.
+* The dump carries no size: loose sizes come from `std::filesystem` in the UI
+  and VPK sizes are only known when the file is read through `RAW`.
 
 `kind=model_scene`:
 

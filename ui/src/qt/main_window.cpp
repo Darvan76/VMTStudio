@@ -3,8 +3,7 @@
 #include "inspector_widget.h"
 #include "vmt_highlighter.h"
 #include "preview_options_dialog.h"
-#include "material_browser_dialog.h"
-#include "model_browser_dialog.h"
+#include "asset_browser_dialog.h"
 #include "model_materials_dock.h"
 #include "animation_dock.h"
 #include "export_materials_dialog.h"
@@ -14,6 +13,7 @@
 #include "app_updater.h"
 #include "update_dialog.h"
 #include "ui/version.h"
+#include "ui/asset_index.h"
 #include "app_log.h"
 #include "ui/animation_model.h"
 #include "ui/shader_catalog.h"
@@ -31,6 +31,7 @@
 #include <QSplitter>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QDir>
 #include <QMessageBox>
 #include <QCloseEvent>
 #include <QHeaderView>
@@ -170,6 +171,23 @@ bool material_name_equal(const std::string& a, const std::string& b) {
     });
 }
 
+// Asset paths are game-relative and include the root and extension
+// ("materials/brick/brick05.vmt"), while openGameMaterial() and the inspector's
+// $basetexture values use the bare name ("brick/brick05"). This is the same
+// convention the old QFileDialog-based texture picker produced.
+QString asset_name_without(const QString& virtualPath, const QString& extension) {
+    QString name = virtualPath;
+    name.replace('\\', '/');
+    const QString materialsPrefix = QStringLiteral("materials/");
+    if (name.startsWith(materialsPrefix, Qt::CaseInsensitive)) {
+        name.remove(0, materialsPrefix.size());
+    }
+    if (name.endsWith(extension, Qt::CaseInsensitive)) {
+        name.chop(extension.size());
+    }
+    return name;
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -250,6 +268,14 @@ MainWindow::~MainWindow() {
     }
     // Remove the experimental isolate substitutes from the preview root.
     cleanupIsolation(false);
+    // The browser holds the engine pointer: detach it before the unique_ptr
+    // goes away. It has no WA_DeleteOnClose, so it is still alive here even if
+    // the user closed its window.
+    if (m_assetBrowser) {
+        m_assetBrowser->setEngine(nullptr);
+        delete m_assetBrowser.data();
+        m_assetBrowser = nullptr;
+    }
     if (m_engine) {
         m_engine->shutdown();
         m_engine.reset();
@@ -304,6 +330,8 @@ void MainWindow::setupUi() {
             this, &MainWindow::onMaterialDropped);
     connect(m_viewport, &ViewportWidget::modelDropped,
             this, &MainWindow::onModelDropped);
+    connect(m_viewport, &ViewportWidget::assetDropped,
+            this, &MainWindow::onAssetDropped);
     connect(m_viewport, &ViewportWidget::playheadTick,
             this, &MainWindow::onPlayheadTick);
 
@@ -428,7 +456,7 @@ void MainWindow::setupMenus() {
 
     // --- Tools Menu ---
     auto* toolsMenu = menuBar()->addMenu(tr("&Tools"));
-    toolsMenu->addAction(tr("Material &Browser..."), QKeySequence(Qt::Key_F3), this, &MainWindow::onOpenMaterialBrowser);
+    toolsMenu->addAction(tr("Asset &Browser..."), QKeySequence(Qt::Key_F3), this, &MainWindow::onOpenAssetBrowser);
     toolsMenu->addAction(tr("&Validate Material"), QKeySequence(Qt::Key_F7), this, &MainWindow::onValidateMaterial);
     toolsMenu->addSeparator();
     m_exportMaterialsAction = toolsMenu->addAction(tr("&Export Model Materials..."), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E), this, &MainWindow::onExportModelMaterials);
@@ -456,7 +484,7 @@ void MainWindow::setupToolBar() {
     toolBar->addSeparator();
 
     toolBar->addAction(tr("Validate"), this, &MainWindow::onValidateMaterial);
-    toolBar->addAction(tr("Browser (F3)"), this, &MainWindow::onOpenMaterialBrowser);
+    toolBar->addAction(tr("Browser (F3)"), this, &MainWindow::onOpenAssetBrowser);
     toolBar->addAction(tr("Options"), this, &MainWindow::onOpenPreviewOptions);
     toolBar->addSeparator();
 
@@ -548,6 +576,22 @@ void MainWindow::loadSettings() {
 
 void MainWindow::saveSettings() {
     m_settings.show_advanced = m_showAdvanced;
+    if (m_assetBrowser) {
+        // Filter/view/geometry live in the dialog; the settings store owns the
+        // persistence. Saving from state() (instead of tracking every widget)
+        // also captures changes made between two explicit saves.
+        const AssetBrowserState state = m_assetBrowser->state();
+        m_settings.asset_kind = state.kind;
+        m_settings.asset_source = state.source;
+        m_settings.asset_grid = state.grid;
+        m_settings.asset_sort =
+            std::to_string(state.sortColumn) + (state.sortAsc ? ",asc" : ",desc");
+        m_settings.asset_folders.clear();
+        for (const QString& folder : state.folders) {
+            m_settings.asset_folders.push_back(folder.toStdString());
+        }
+        m_settings.asset_geometry = state.geometryBase64.toStdString();
+    }
     saveLayoutState();
     ui::options_to_settings(m_previewOptions, m_settings);
     (void)m_settings.save(m_settingsPath);
@@ -731,6 +775,10 @@ bool MainWindow::ensureEngine(QString& error) {
     if (m_animationDock) {
         m_animationDock->setEngine(m_engine.get());
     }
+    if (m_assetBrowser) {
+        m_assetBrowser->setEngine(m_engine.get());
+        m_assetBrowser->setGame(std::filesystem::path(m_settings.last_game_dir));
+    }
     (void)m_engine->resize(0, 0);
     updateStatus();
     return true;
@@ -825,6 +873,10 @@ void MainWindow::ensureEngineAsync() {
             if (m_animationDock) {
                 m_animationDock->setEngine(m_engine.get());
             }
+            if (m_assetBrowser) {
+                m_assetBrowser->setEngine(m_engine.get());
+                m_assetBrowser->setGame(std::filesystem::path(m_settings.last_game_dir));
+            }
             (void)m_engine->resize(0, 0);
             updateStatus();
 
@@ -897,9 +949,7 @@ void MainWindow::checkBrushMaterial(bool forcePopup) {
         if (!ui::is_brush_shape(m_previewOptions.shape) || shouldNotify) {
             m_previewOptions.shape = ui::PreviewShape::BrushWall;
             if (m_shapeCombo) {
-                m_shapeCombo->blockSignals(true);
                 m_shapeCombo->setCurrentIndex(static_cast<int>(ui::PreviewShape::BrushWall));
-                m_shapeCombo->blockSignals(false);
             }
             if (m_engine && m_engine->initialized()) {
                 (void)m_engine->set_preview_shape(to_bridge_shape(ui::PreviewShape::BrushWall));
@@ -1047,14 +1097,23 @@ void MainWindow::onNewFile() {
 bool MainWindow::openFile(const QString& filePath) {
     if (!maybeSave()) return false;
 
-    std::filesystem::path path(filePath.toStdWString());
+    const QString trimmed = filePath.trimmed();
+    if (trimmed.isEmpty() || trimmed.contains(QChar('\0'))) {
+        return false;
+    }
+
+    const QString clean = QDir::cleanPath(trimmed);
+    QFileInfo fi(clean);
+    const QString resolvedPath = fi.exists() ? fi.canonicalFilePath() : clean;
+
+    std::filesystem::path path(resolvedPath.toStdWString());
     auto res = m_session.open_file(path);
     if (!res) {
         QMessageBox::warning(this, tr("Open Failed"), QString::fromStdString(res.error().message));
         return false;
     }
 
-    addRecentFile(filePath);
+    addRecentFile(resolvedPath);
     refreshMaterialRoots();
     m_currentModelMaterial.clear();
 
@@ -1080,13 +1139,24 @@ bool MainWindow::openFile(const QString& filePath) {
 bool MainWindow::openGameMaterial(const QString& materialName) {
     if (!maybeSave()) return false;
 
+    const QString cleanName = QDir::cleanPath(materialName.trimmed());
+    if (cleanName.isEmpty() || cleanName.contains(QChar('\0')) ||
+        cleanName.startsWith("..") || cleanName.contains("/../") || cleanName.contains("\\..\\") ||
+        cleanName.contains(':') || cleanName.contains('*') || cleanName.contains('?') ||
+        cleanName.contains('"') || cleanName.contains('<') || cleanName.contains('>') ||
+        cleanName.contains('|')) {
+        QMessageBox::warning(this, tr("Open Failed"),
+                             tr("Invalid material name: traversal or illegal characters detected."));
+        return false;
+    }
+
     QString err;
     if (!ensureEngine(err)) {
         QMessageBox::warning(this, tr("Engine Error"), err);
         return false;
     }
 
-    std::string path = "materials/" + materialName.toStdString();
+    std::string path = "materials/" + cleanName.toStdString();
     if (path.rfind(".vmt") == std::string::npos) {
         path += ".vmt";
     }
@@ -1097,9 +1167,9 @@ bool MainWindow::openGameMaterial(const QString& materialName) {
         return false;
     }
 
-    (void)m_session.open_text(readRes.value(), materialName.toStdString() + ".vmt");
+    (void)m_session.open_text(readRes.value(), cleanName.toStdString() + ".vmt");
     // Materials of the loaded model keep the in-place override path on save.
-    m_currentModelMaterial = containsModelMaterial(materialName) ? materialName.toStdString() : std::string();
+    m_currentModelMaterial = containsModelMaterial(cleanName) ? cleanName.toStdString() : std::string();
 
     m_suppressSync = true;
     m_codeEditor->setPlainText(QString::fromStdString(m_session.text()));
@@ -1252,9 +1322,7 @@ void MainWindow::onShapeSelected(int index) {
     ui::PreviewShape newShape = static_cast<ui::PreviewShape>(index);
     if (isCurrentMaterialBrushOnly() && !ui::is_brush_shape(newShape)) {
         if (m_shapeCombo && m_shapeCombo->currentIndex() != static_cast<int>(m_previewOptions.shape)) {
-            m_shapeCombo->blockSignals(true);
             m_shapeCombo->setCurrentIndex(static_cast<int>(m_previewOptions.shape));
-            m_shapeCombo->blockSignals(false);
         }
 
         QString mat = getMaterialDisplayName();
@@ -1277,9 +1345,7 @@ void MainWindow::onShapeSelected(int index) {
 
     m_previewOptions.shape = newShape;
     if (m_shapeCombo && m_shapeCombo->currentIndex() != index) {
-        m_shapeCombo->blockSignals(true);
         m_shapeCombo->setCurrentIndex(index);
-        m_shapeCombo->blockSignals(false);
     }
     if (m_engine && m_engine->initialized()) {
         (void)m_engine->set_preview_shape(to_bridge_shape(m_previewOptions.shape));
@@ -1291,9 +1357,7 @@ void MainWindow::onRenderModeSelected(int index) {
     if (index >= 0 && index < 4) {
         m_currentRenderMode = modes[index];
         if (m_renderModeCombo && m_renderModeCombo->currentIndex() != index) {
-            m_renderModeCombo->blockSignals(true);
             m_renderModeCombo->setCurrentIndex(index);
-            m_renderModeCombo->blockSignals(false);
         }
         if (m_engine && m_engine->initialized()) {
             (void)m_engine->set_render_mode(m_currentRenderMode);
@@ -1317,9 +1381,7 @@ void MainWindow::onOpenPreviewOptions() {
     connect(&dlg, &PreviewOptionsDialog::optionsChanged, this, [this](const ui::PreviewOptions& opts) {
         m_previewOptions = opts;
         if (m_shapeCombo) {
-            m_shapeCombo->blockSignals(true);
             m_shapeCombo->setCurrentIndex(static_cast<int>(m_previewOptions.shape));
-            m_shapeCombo->blockSignals(false);
         }
         if (m_engine && m_engine->initialized()) {
             (void)m_engine->set_preview_shape(to_bridge_shape(m_previewOptions.shape));
@@ -1330,9 +1392,7 @@ void MainWindow::onOpenPreviewOptions() {
     if (dlg.exec() == QDialog::Accepted) {
         m_previewOptions = dlg.options();
         if (m_shapeCombo) {
-            m_shapeCombo->blockSignals(true);
             m_shapeCombo->setCurrentIndex(static_cast<int>(m_previewOptions.shape));
-            m_shapeCombo->blockSignals(false);
         }
         saveSettings();
     }
@@ -1374,19 +1434,14 @@ void MainWindow::onOpenModel() {
         QString err;
         if (!ensureEngine(err)) {
             statusBar()->showMessage(
-                tr("The model browser needs a connected engine: %1").arg(err), 6000);
+                tr("The Asset Browser needs a connected engine to load models: %1").arg(err), 6000);
             return;
         }
     }
 
-    ModelBrowserDialog dlg(m_engine.get(), this);
-    connect(&dlg, &ModelBrowserDialog::modelSelected, this, &MainWindow::onModelSelected);
-    dlg.exec();
-}
-
-void MainWindow::onModelSelected(const QString& gameRelative, bool loose) {
-    Q_UNUSED(loose); // vpk and loose models load through the same engine path
-    openModel(gameRelative);
+    // F4 keeps the old behaviour of requiring an engine: loading an MDL needs
+    // it, while F3 can still browse the cache and user folders without one.
+    showAssetBrowser(static_cast<int>(ui::AssetKind::Model));
 }
 
 void MainWindow::onCloseModel() {
@@ -1490,8 +1545,29 @@ void MainWindow::loadModelNow(const QString& modelPath) {
     }
 
     QString target = modelPath.trimmed();
-    if (target.isEmpty()) {
+    if (target.isEmpty() || target.contains(QChar('\0'))) {
         return;
+    }
+
+    // Protect against path traversal in relative model paths
+    if (!QFileInfo(target).isAbsolute()) {
+        const QString clean = QDir::cleanPath(target);
+        if (clean.startsWith("..") || clean.contains("/../") || clean.contains("\\..\\") ||
+            clean.contains(':') || clean.contains('*') || clean.contains('?') ||
+            clean.contains('"') || clean.contains('<') || clean.contains('>') || clean.contains('|')) {
+            statusBar()->showMessage(tr("Invalid model path: path traversal detected."), 6000);
+            return;
+        }
+        target = clean;
+    } else {
+        target = QDir::cleanPath(target);
+        QFileInfo fi(target);
+        if (fi.exists()) {
+            const QString canonical = fi.canonicalFilePath();
+            if (!canonical.isEmpty()) {
+                target = canonical;
+            }
+        }
     }
 
     // Absolute disk paths below the game folder are addressed by their
@@ -1649,6 +1725,54 @@ QString MainWindow::gameRelativePath(const QString& diskPath) const {
         return QString(); // outside the game folder (or not resolvable)
     }
     return QString::fromStdWString(relative.generic_wstring());
+}
+
+QString MainWindow::resolveAssetDiskPath(const QString& virtualPath) const {
+    const QString path = virtualPath.trimmed();
+    if (path.isEmpty() || path.contains(QChar('\0'))) {
+        return {};
+    }
+    const QString clean = QDir::cleanPath(path);
+    if (clean.startsWith("..") || clean.contains("/../") || clean.contains("\\..\\")) {
+        return {};
+    }
+    const std::filesystem::path relative(clean.toStdWString());
+    if (relative.is_absolute()) {
+        QFileInfo fi(clean);
+        return fi.exists() ? fi.canonicalFilePath() : QString();
+    }
+
+    const auto probe = [&relative](const std::filesystem::path& root) -> QString {
+        if (root.empty()) {
+            return {};
+        }
+        std::error_code ec;
+        const std::filesystem::path candidate = (root / relative).lexically_normal();
+        const std::filesystem::path relCheck = std::filesystem::relative(candidate, root, ec);
+        if (ec || relCheck.empty() || *relCheck.begin() == L"..") {
+            return {};
+        }
+        if (std::filesystem::is_regular_file(candidate, ec)) {
+            return QString::fromStdWString(candidate.wstring());
+        }
+        return {};
+    };
+
+    // Engine precedence first (a loose game file beats a user folder), then the
+    // folders added in the browser. VPK-only assets have no disk copy.
+    if (!m_settings.last_game_dir.empty()) {
+        const QString gameHit = probe(std::filesystem::path(m_settings.last_game_dir));
+        if (!gameHit.isEmpty()) {
+            return gameHit;
+        }
+    }
+    for (const std::string& folder : m_settings.asset_folders) {
+        const QString hit = probe(std::filesystem::path(folder));
+        if (!hit.isEmpty()) {
+            return hit;
+        }
+    }
+    return {};
 }
 
 bool MainWindow::containsModelMaterial(const QString& gameName) const {
@@ -1946,18 +2070,138 @@ void MainWindow::onAnimationSpeedUp() {
     setAnimationSpeedScale(m_animSpeedScale * 2.0f);
 }
 
-void MainWindow::onOpenMaterialBrowser() {
-    refreshMaterialRoots();
-    MaterialBrowserDialog dlg(m_engine.get(), m_materialRoots, this);
-    connect(&dlg, &MaterialBrowserDialog::materialSelected,
-            this, [this](const QString& name, const QString& diskPath, bool fromEngine) {
+AssetBrowserDialog* MainWindow::ensureAssetBrowser() {
+    if (m_assetBrowser) {
+        return m_assetBrowser.data();
+    }
+
+    m_assetBrowser = new AssetBrowserDialog(m_engine.get(), app_data_dir(), this);
+    // No WA_DeleteOnClose on purpose: hiding the window must keep the index,
+    // thumbnails and user folders alive for the next F3/F4 or pick session.
+    connect(m_assetBrowser.data(), &AssetBrowserDialog::assetActivated,
+            this, &MainWindow::onAssetActivated);
+    connect(m_assetBrowser.data(), &AssetBrowserDialog::assetPicked,
+            this, &MainWindow::onAssetPicked);
+    connect(m_assetBrowser.data(), &AssetBrowserDialog::foldersChanged,
+            this, &MainWindow::onAssetFoldersChanged);
+
+    // Restore the persisted filters/view/geometry exactly once. Re-applying
+    // them on every show would throw away changes made during this session.
+    AssetBrowserState state;
+    state.kind = (m_settings.asset_kind >= -1 && m_settings.asset_kind <= 2)
+                     ? m_settings.asset_kind
+                     : -1;
+    state.source = std::clamp(m_settings.asset_source, 0, 3);
+    state.grid = m_settings.asset_grid;
+
+    const std::string& sort = m_settings.asset_sort;
+    const std::size_t comma = sort.find(',');
+    if (comma != std::string::npos) {
+        try {
+            state.sortColumn = std::stoi(sort.substr(0, comma));
+        } catch (...) {
+            state.sortColumn = 0;
+        }
+        // Anything but the explicit "desc" is treated as ascending, matching
+        // the default when the key is missing or malformed.
+        state.sortAsc = sort.substr(comma + 1) != "desc";
+    }
+    for (const std::string& folder : m_settings.asset_folders) {
+        state.folders.append(QString::fromStdString(folder));
+    }
+    state.geometryBase64 = QString::fromStdString(m_settings.asset_geometry);
+
+    m_assetBrowser->setGame(std::filesystem::path(m_settings.last_game_dir));
+    m_assetBrowser->setState(state);
+    return m_assetBrowser.data();
+}
+
+void MainWindow::showAssetBrowser(int kind) {
+    AssetBrowserDialog* dialog = ensureAssetBrowser();
+    dialog->setEngine(m_engine.get());
+    dialog->setGame(std::filesystem::path(m_settings.last_game_dir));
+
+    // A normal browse cancels a texture pick left open: otherwise a stale
+    // pending parameter could swallow a later activation.
+    const bool cancelledPick = dialog->pickMode();
+    if (cancelledPick) {
+        dialog->endPick();
+        m_pendingTextureParam.clear();
+    }
+    if (kind >= 0) {
+        dialog->showKind(kind);
+    } else if (cancelledPick || !dialog->isVisible()) {
+        // F3 opens on All, as specified. If the window is already on screen the
+        // shortcut only raises it, so it does not wipe the filter in use.
+        dialog->showAll();
+    }
+
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+}
+
+void MainWindow::onOpenAssetBrowser() {
+    // F3 works without an engine: the dialog loads the per-game cache and the
+    // user folders, and Refresh explains when it needs a connection.
+    showAssetBrowser(-1);
+}
+
+void MainWindow::onAssetActivated(const QString& virtualPath, int kind) {
+    if (kind == static_cast<int>(ui::AssetKind::Material)) {
+        // A loose copy (game or user folder) opens from disk, like the old
+        // browser did; VPK-only materials go through the engine.
+        const QString diskPath = resolveAssetDiskPath(virtualPath);
         if (!diskPath.isEmpty()) {
             openFile(diskPath);
-        } else if (fromEngine) {
-            openGameMaterial(name);
+        } else {
+            openGameMaterial(asset_name_without(virtualPath, QStringLiteral(".vmt")));
         }
-    });
-    dlg.exec();
+        return;
+    }
+    if (kind == static_cast<int>(ui::AssetKind::Model)) {
+        const QString diskPath = resolveAssetDiskPath(virtualPath);
+        openModel(diskPath.isEmpty() ? virtualPath : diskPath);
+        return;
+    }
+    if (kind == static_cast<int>(ui::AssetKind::Texture)) {
+        // Pick mode normally emits assetPicked; this keeps Enter/double-click
+        // harmless if a view bypasses that path.
+        if (m_assetBrowser && m_assetBrowser->pickMode() &&
+            !m_pendingTextureParam.isEmpty()) {
+            onAssetPicked(virtualPath, kind);
+            return;
+        }
+        statusBar()->showMessage(tr("Textura: %1").arg(virtualPath), 5000);
+    }
+}
+
+void MainWindow::onAssetPicked(const QString& virtualPath, int kind) {
+    if (kind != static_cast<int>(ui::AssetKind::Texture) ||
+        m_pendingTextureParam.isEmpty()) {
+        return;
+    }
+
+    const QString parameter = m_pendingTextureParam;
+    const QString value = asset_name_without(virtualPath, QStringLiteral(".vtf"));
+    m_pendingTextureParam.clear();
+    if (m_assetBrowser) {
+        m_assetBrowser->endPick();
+    }
+
+    onInspectorParameterChanged(parameter, value);
+    statusBar()->showMessage(
+        tr("Textura \"%1\" asignada a %2.").arg(value, parameter), 5000);
+}
+
+void MainWindow::onAssetFoldersChanged(const QStringList& folders) {
+    m_settings.asset_folders.clear();
+    for (const QString& folder : folders) {
+        m_settings.asset_folders.push_back(folder.toStdString());
+    }
+    // saveSettings() also snapshots the rest of the browser state, so the
+    // folder list and the filters it was changed with stay in sync.
+    saveSettings();
 }
 
 void MainWindow::onValidateMaterial() {
@@ -2029,6 +2273,16 @@ void MainWindow::onOpenGameConnection() {
         // dock must never keep a dangling engine pointer.
         if (m_animationDock) {
             m_animationDock->setEngine(nullptr);
+        }
+        if (m_assetBrowser) {
+            // The (possibly running) browser must stop using the engine before
+            // it is destroyed; ensureEngine/ensureEngineAsync reattach it once
+            // the new game is initialized.
+            m_assetBrowser->setEngine(nullptr);
+            if (m_assetBrowser->pickMode()) {
+                m_assetBrowser->endPick();
+                m_pendingTextureParam.clear();
+            }
         }
         cleanupIsolation(false);
         clearModelView();
@@ -2159,27 +2413,20 @@ void MainWindow::onInspectorShaderChanged(const QString& newShader) {
 
 void MainWindow::onBrowseTextureRequested(const QString& paramName, const QString& currentValue) {
     Q_UNUSED(currentValue);
-    QString file = QFileDialog::getOpenFileName(
-        this, tr("Select Texture (.vtf) for %1").arg(paramName),
-        QString(), tr("Valve Texture Files (*.vtf);;All Files (*.*)"));
-    if (!file.isEmpty()) {
-        // Compute game-relative path if possible
-        std::filesystem::path p(file.toStdWString());
-        std::string relPath = p.stem().string();
-        for (const auto& root : m_materialRoots) {
-            std::error_code ec;
-            auto rel = std::filesystem::relative(p, root, ec);
-            if (!ec && !rel.empty() && rel.native().rfind(L"..", 0) != 0) {
-                relPath = rel.parent_path().string() + "/" + p.stem().string();
-                std::replace(relPath.begin(), relPath.end(), '\\', '/');
-                if (relPath.rfind("materials/", 0) == 0) {
-                    relPath = relPath.substr(10);
-                }
-                break;
-            }
-        }
-        onInspectorParameterChanged(paramName, QString::fromStdString(relPath));
-    }
+    // The old native QFileDialog could not see VPK textures; the Asset Browser
+    // in pick mode uses the same index as the rest of the window.
+    m_pendingTextureParam = paramName;
+
+    AssetBrowserDialog* dialog = ensureAssetBrowser();
+    dialog->setEngine(m_engine.get());
+    dialog->setGame(std::filesystem::path(m_settings.last_game_dir));
+    dialog->beginPick(static_cast<int>(ui::AssetKind::Texture));
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+
+    statusBar()->showMessage(
+        tr("Selecciona una textura en el Asset Browser para %1…").arg(paramName), 8000);
 }
 
 void MainWindow::onViewportResized(int width, int height) {
@@ -2199,6 +2446,33 @@ void MainWindow::onModelDropped(const QString& filePath) {
     openModel(filePath);
 }
 
+void MainWindow::onAssetDropped(const QString& virtualPath, int kind,
+                                const QString& diskPath) {
+    if (kind == static_cast<int>(ui::AssetKind::Material)) {
+        // A loose copy opens from disk (keeps the user's working copy); a
+        // VPK-only material goes through the engine file system.
+        if (!diskPath.isEmpty() && QFileInfo(diskPath).isAbsolute()) {
+            openFile(diskPath);
+        } else {
+            openGameMaterial(asset_name_without(virtualPath, QStringLiteral(".vmt")));
+        }
+        return;
+    }
+    if (kind == static_cast<int>(ui::AssetKind::Model)) {
+        const QString target =
+            (!diskPath.isEmpty() && QFileInfo(diskPath).isAbsolute()) ? diskPath
+                                                                     : virtualPath;
+        openModel(target);
+        return;
+    }
+    if (kind == static_cast<int>(ui::AssetKind::Texture)) {
+        statusBar()->showMessage(
+            tr("\"%1\" es una textura: usa el selector del inspector para aplicarla.")
+                .arg(virtualPath),
+            6000);
+    }
+}
+
 void MainWindow::onPlayheadTick(int frame, qintptr cycle_x10000) {
     if (!m_animationDock || !m_animationDock->isVisible() || m_currentModelName.isEmpty()) {
         return; // nothing to scrub without a model in view
@@ -2211,6 +2485,9 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         if (m_notificationPopup) {
             m_notificationPopup->close();
         }
+        // Persist the Asset Browser state while the dialog is still alive:
+        // the destructor deletes it before the engine shuts down.
+        saveSettings();
         event->accept();
     } else {
         event->ignore();

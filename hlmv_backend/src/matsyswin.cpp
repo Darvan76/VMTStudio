@@ -84,6 +84,9 @@ CCamera g_cam;
 
 void UpdateSounds()
 {
+	if ( !g_pSoundSystem )
+		return;
+
 	static double prev = 0;
 	double curr = (double) mx::getTickCount () / 1000.0;
 	if ( prev != 0 )
@@ -152,6 +155,8 @@ void InitMaterialSystemConfig(MaterialSystem_Config_t *pConfig)
 }
 
 MatSysWindow *g_MatSysWindow = 0;
+bool g_bSkipSwap = false;
+bool g_bSkipEndFrame = false;
 
 Vector g_vright( 50, 50, 0 );		// needs to be set to viewer's right in order for chrome to work
 
@@ -233,7 +238,33 @@ MatSysWindow::~MatSysWindow ()
 	if (m_pCubemapTexture)
 	{
 		m_pCubemapTexture->DecrementReferenceCount();
+		m_pCubemapTexture = NULL;
 	}
+
+	auto ReleaseMat = [](IMaterial*& mat) {
+		if (mat)
+		{
+			mat->DecrementReferenceCount();
+			mat = NULL;
+		}
+	};
+	ReleaseMat(g_materialBackground);
+	ReleaseMat(g_materialWireframe);
+	ReleaseMat(g_materialFlatshaded);
+	ReleaseMat(g_materialSmoothshaded);
+	ReleaseMat(g_materialBones);
+	ReleaseMat(g_materialLines);
+	ReleaseMat(g_materialFloor);
+	ReleaseMat(g_materialVertexColor);
+	ReleaseMat(g_materialShadow);
+	ReleaseMat(g_materialHitbox);
+
+	if (g_pMaterialSystem)
+	{
+		g_pMaterialSystem->RemoveReleaseFunc( ReleaseMaterialSystemObjects );
+		g_pMaterialSystem->RemoveRestoreFunc( RestoreMaterialSystemObjects );
+	}
+
 	mx::setIdleWindow (0);
 }
 
@@ -647,6 +678,9 @@ void DrawMovementBoxes()
 
 char const *HLMV_TranslateSoundName( char const *soundname, StudioModel *model )
 {
+	if ( !g_pSoundEmitterBase )
+		return soundname;
+
 	if ( Q_stristr( soundname, ".wav" ) )
 		return PSkipSoundChars( soundname );
 
@@ -661,7 +695,7 @@ char const *HLMV_TranslateSoundName( char const *soundname, StudioModel *model )
 
 void PlaySound( const char *pSoundName, StudioModel *pStudioModel )
 {
-	if ( pSoundName == NULL || pSoundName[ 0 ] == '\0' )
+	if ( !g_pSoundSystem || pSoundName == NULL || pSoundName[ 0 ] == '\0' )
 		return;
 
 	const char *pSoundFileName = HLMV_TranslateSoundName( pSoundName, pStudioModel );
@@ -674,13 +708,13 @@ void PlaySound( const char *pSoundName, StudioModel *pStudioModel )
 
 	float volume = VOL_NORM;
 	gender_t gender = GENDER_NONE;
-	if ( pStudioModel )
+	if ( pStudioModel && g_pSoundEmitterBase )
 	{
 		gender = g_pSoundEmitterBase->GetActorGender( pStudioModel->GetFileName() );
 	}
 
 	CSoundParameters params;
-	if ( !Q_stristr( pSoundName, ".wav" ) &&
+	if ( g_pSoundEmitterBase && !Q_stristr( pSoundName, ".wav" ) &&
 		g_pSoundEmitterBase->GetParametersForSound( pSoundName, params, gender ) )
 	{
 		volume = params.volume;
@@ -705,7 +739,7 @@ void PlaySound( const char *pSoundName, StudioModel *pStudioModel )
 
 void PlaySounds( StudioModel *pStudioModel )
 {
-	if ( pStudioModel == NULL )
+	if ( !g_pSoundSystem || pStudioModel == NULL )
 		return;
 
 	int iLayer = g_ControlPanel->getFrameSelection();
@@ -801,9 +835,16 @@ void PlaySounds( StudioModel *pStudioModel )
 
 
 
+extern void HLMV_Log(const char* fmt, ...);
+
 void
 MatSysWindow::draw ()
 {
+	static bool s_bLoggedDraw = false;
+	if (!s_bLoggedDraw) {
+		HLMV_Log("[HLMV] draw() start, w=%d h=%d\n", w(), h());
+	}
+
 	MDLCACHE_CRITICAL_SECTION_( g_pMDLCache );
 
 	if ( g_bInError || !g_pStudioModel->GetStudioRender() )
@@ -827,9 +868,13 @@ MatSysWindow::draw ()
 	CMatRenderContextPtr ctx( g_pMaterialSystem );
 	ctx->ClearColor3ub(g_viewerSettings.bgColor[0] * 255, g_viewerSettings.bgColor[1] * 255, g_viewerSettings.bgColor[2] * 255);
 	// g_pMaterialSystem->ClearColor3ub(0, 0, 0 );
-	g_pMaterialSystem->ClearBuffers(true, true);
+	ctx->ClearBuffers(true, true);
 
 	ctx->Viewport( 0, 0, w(), h() );
+
+	if (!s_bLoggedDraw) {
+		HLMV_Log("[HLMV] draw() Viewport ok\n");
+	}
 
 	// Back Layer
 	ctx->MatrixMode(MATERIAL_MODEL);
@@ -840,6 +885,10 @@ MatSysWindow::draw ()
 	ctx->LoadIdentity();
 	DrawBackground();
 
+	if (!s_bLoggedDraw) {
+		HLMV_Log("[HLMV] draw() DrawBackground ok\n");
+	}
+
 	// 3D Stuff Layer
 	ctx->MatrixMode( MATERIAL_PROJECTION );
 	ctx->LoadMatrix( projMatrix );
@@ -849,6 +898,10 @@ MatSysWindow::draw ()
 	DrawGroundPlane();
 	DrawMovementBoxes();
 
+	if (!s_bLoggedDraw) {
+		HLMV_Log("[HLMV] draw() GroundPlane ok\n");
+		s_bLoggedDraw = true;
+	}
 
 	int polycount = 0;
 	if (!BrushRender_IsBrushShape() && g_pForcedPreviewMaterial)
@@ -937,9 +990,11 @@ MatSysWindow::draw ()
 	ctx->LoadIdentity();
 	DrawHelpers();
 
-    g_pMaterialSystem->SwapBuffers();
+    if (!g_bSkipSwap)
+        g_pMaterialSystem->SwapBuffers();
 	
-	g_pMaterialSystem->EndFrame();
+	if (!g_bSkipEndFrame)
+		g_pMaterialSystem->EndFrame();
 }
 
 

@@ -8,7 +8,7 @@
     into a distributable directory and ZIP archive.
 
 .PARAMETER Version
-    Release version string (default: 0.1.0).
+    Release version string (default: 0.2.0).
 
 .PARAMETER BuildDir
     Root build directory for 64-bit target (default: build64).
@@ -18,11 +18,11 @@
 
 .EXAMPLE
     .\scripts\package_release.ps1
-    .\scripts\package_release.ps1 -Version "0.1.0" -BuildDir "build64" -OutDir "dist"
+    .\scripts\package_release.ps1 -Version "0.2.0" -BuildDir "build64" -OutDir "dist"
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = "0.1.0",
+    [string]$Version = "0.2.0",
     [string]$Config = "Release",
     [string]$BuildDir = "build64",
     [string]$OutDir = "dist"
@@ -276,6 +276,7 @@ if ($Config -ieq "Debug") {
 $Windeployqt = Get-Command windeployqt.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
 if (-not $Windeployqt) {
     $CandidateQtPaths = @(
+        "$env:QT_ROOT_DIR\bin\windeployqt.exe",
         "C:\Qt\6.8.2\msvc2022_64\bin\windeployqt.exe",
         "C:\Qt\6.8.1\msvc2022_64\bin\windeployqt.exe",
         "C:\Qt\6.8.0\msvc2022_64\bin\windeployqt.exe",

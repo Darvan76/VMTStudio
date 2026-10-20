@@ -435,6 +435,11 @@ bool Backend_SetCamera(float pitch, float yaw, float dist, float tx, float ty, f
 
 static bool WriteTga32(const std::string& path, int width, int height, const unsigned char* bgra)
 {
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096 || !bgra)
+    {
+        return false;
+    }
+
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) return false;
 
@@ -465,13 +470,19 @@ static bool WriteTga32(const std::string& path, int width, int height, const uns
 
 static bool WriteBmp32(const std::string& path, int width, int height, const unsigned char* bgra)
 {
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096 || !bgra)
+    {
+        return false;
+    }
+
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) return false;
 
+    size_t pixelBytes = (size_t)width * height * 4;
     BITMAPFILEHEADER bfh = { 0 };
     bfh.bfType = 0x4D42; // "BM"
     bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-    bfh.bfSize = bfh.bfOffBits + width * height * 4;
+    bfh.bfSize = static_cast<DWORD>(bfh.bfOffBits + pixelBytes);
 
     BITMAPINFOHEADER bih = { 0 };
     bih.biSize = sizeof(BITMAPINFOHEADER);
@@ -481,11 +492,21 @@ static bool WriteBmp32(const std::string& path, int width, int height, const uns
     bih.biBitCount = 32;
     bih.biCompression = BI_RGB;
 
-    fwrite(&bfh, sizeof(bfh), 1, f);
-    fwrite(&bih, sizeof(bih), 1, f);
-    fwrite(bgra, 1, (size_t)width * height * 4, f);
+    if (fwrite(&bfh, sizeof(bfh), 1, f) != 1 ||
+        fwrite(&bih, sizeof(bih), 1, f) != 1 ||
+        fwrite(bgra, 1, pixelBytes, f) != pixelBytes)
+    {
+        fclose(f);
+        return false;
+    }
     fclose(f);
     return true;
+}
+
+// Used by the hidden -thumb mode in mdlviewer.cpp.
+bool Backend_WriteBmp32(const std::string& path, int width, int height, const unsigned char* bgra)
+{
+    return WriteBmp32(path, width, height, bgra);
 }
 
 static std::vector<std::string> TokenizeArgs(const std::string& str)
@@ -525,7 +546,7 @@ static std::vector<std::string> TokenizeArgs(const std::string& str)
 
 bool Backend_CaptureThumbnail(const std::string& material_name, int size, const std::string& out_path)
 {
-    if (size <= 0 || out_path.empty() || !g_pMaterialSystem || !g_MatSysWindow)
+    if (size <= 0 || size > 4096 || out_path.empty() || !g_pMaterialSystem || !g_MatSysWindow)
     {
         return false;
     }
@@ -541,12 +562,15 @@ bool Backend_CaptureThumbnail(const std::string& material_name, int size, const 
         }
     }
 
-    // Render the frame into the backbuffer
+    // Render the frame into the backbuffer without presenting it so the pixels
+    // below are the frame we just drew.
+    g_bSkipSwap = true;
     g_MatSysWindow->draw();
 
     CMatRenderContextPtr ctx(g_pMaterialSystem);
     if (!ctx)
     {
+        g_bSkipSwap = false;
         if (matChanged)
         {
             Backend_SetMaterial(savedMat);
@@ -556,8 +580,23 @@ bool Backend_CaptureThumbnail(const std::string& material_name, int size, const 
 
     ctx->Flush(true);
 
-    std::vector<unsigned char> pixels((size_t)size * size * 4);
+    std::vector<unsigned char> pixels;
+    try
+    {
+        pixels.resize((size_t)size * size * 4);
+    }
+    catch (...)
+    {
+        g_bSkipSwap = false;
+        if (matChanged)
+        {
+            Backend_SetMaterial(savedMat);
+        }
+        return false;
+    }
+
     ctx->ReadPixels(0, 0, size, size, pixels.data(), IMAGE_FORMAT_BGRA8888);
+    g_bSkipSwap = false;
 
     try
     {
@@ -1102,11 +1141,16 @@ bool BackendIPC_ExecuteCommand(const std::string& cmd)
     }
     else if (verb == "QUIT")
     {
+        if (g_pForcedPreviewMaterial)
+        {
+            g_pForcedPreviewMaterial->DecrementReferenceCount();
+            g_pForcedPreviewMaterial = nullptr;
+        }
         AnimControl_Shutdown();
         PostQuitMessage(0);
         return true;
     }
-
+ 
     return false;
 }
 
@@ -1115,7 +1159,7 @@ bool BackendIPC_HandleMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
     if (uMsg == WM_COPYDATA)
     {
         COPYDATASTRUCT* pcds = (COPYDATASTRUCT*)lParam;
-        if (pcds && pcds->lpData && pcds->cbData > 0)
+        if (pcds && pcds->lpData && pcds->cbData > 0 && pcds->cbData <= 65536)
         {
             std::string cmd((const char*)pcds->lpData, pcds->cbData);
             while (!cmd.empty() && (cmd.back() == '\0' || cmd.back() == '\r' || cmd.back() == '\n'))

@@ -117,6 +117,10 @@ public:
 	void Refresh( void );
 	void LoadModelFile( const char *pszFile, int slot = -1 );
 	void SaveScreenShot( const char *pszFile );
+	// Hidden mode used by the Asset Browser: loads the model in this process
+	// (which was created without showing its window), renders one frame and
+	// writes a top-down size x size BMP. Does not touch any other process.
+	bool CaptureModelThumbnail( const char *outPath, int size, const char *modelPath );
 	void DumpText( const char *pszFile );
 
 	// ACCESSORS

@@ -8,7 +8,9 @@
 
 #include <windows.h>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <iterator>
 #include <mutex>
@@ -29,6 +31,46 @@ vmt::Error engine_error(vmt::ErrorCode code, std::string message) {
 // the backend and get the longer deadline below (docs/IPC_PROTOCOL.md).
 constexpr unsigned kCommandTimeoutMs = 1000;
 constexpr unsigned kDumpTimeoutMs = 10000;
+
+// Indexing a whole game walks VPKs and loose folders, so the assets dump can
+// take far longer than the model dumps without meaning that the backend hung.
+constexpr unsigned kAssetDumpTimeoutMs = 60000;
+
+// ';'-separated argument list of DUMP assets; empty elements are dropped so an
+// empty vector never turns into a stray argument.
+std::string join_semicolons(const std::vector<std::string>& values) {
+    std::string joined;
+    for (const std::string& value : values) {
+        if (value.empty()) continue;
+        if (!joined.empty()) joined += ';';
+        joined += value;
+    }
+    return joined;
+}
+
+// list_materials() keeps the engine-side spike naming: no "materials/" prefix,
+// no ".vmt" extension and forward slashes.
+std::string material_name_from_asset_path(std::string path) {
+    for (char& c : path) {
+        if (c == '\\') c = '/';
+    }
+
+    constexpr char kPrefix[] = "materials/";
+    constexpr std::size_t kPrefixLength = sizeof(kPrefix) - 1;
+    if (path.size() > kPrefixLength &&
+        _strnicmp(path.c_str(), kPrefix, kPrefixLength) == 0) {
+        path.erase(0, kPrefixLength);
+    }
+
+    constexpr char kExtension[] = ".vmt";
+    constexpr std::size_t kExtensionLength = sizeof(kExtension) - 1;
+    if (path.size() > kExtensionLength &&
+        _strnicmp(path.c_str() + path.size() - kExtensionLength, kExtension,
+                  kExtensionLength) == 0) {
+        path.resize(path.size() - kExtensionLength);
+    }
+    return path;
+}
 
 // Response-file directory of the model viewer queries: %TEMP%\VMTStudio\ipc.
 // initialize() creates it and passes it to the backend with -ipc-dir.
@@ -163,6 +205,7 @@ public:
                    std::chrono::steady_clock::now() - start_time).count() < 6000) {
             DWORD exit_code = 0;
             if (GetExitCodeProcess(pi.hProcess, &exit_code) && exit_code != STILL_ACTIVE) {
+                terminate_backend();
                 return vmt::Err<void>(engine_error(
                     vmt::ErrorCode::EngineInitFailed,
                     "hlmv_backend exited prematurely with code " + std::to_string(exit_code)));
@@ -242,6 +285,20 @@ public:
     }
 
     vmt::Result<std::vector<std::string>> list_materials() override {
+        // The engine file system is the only view that includes VPK content;
+        // the in-process spike and the disk walk below cannot see it.
+        if (backend_running()) {
+            const vmt::Result<AssetList> assets = list_assets({ "materials" }, { ".vmt" });
+            if (!assets.ok()) {
+                return vmt::Err<std::vector<std::string>>(assets.error());
+            }
+            std::vector<std::string> names;
+            names.reserve(assets.value().entries.size());
+            for (const AssetRecord& entry : assets.value().entries) {
+                names.push_back(material_name_from_asset_path(entry.path));
+            }
+            return vmt::Ok(std::move(names));
+        }
 #if !defined(_WIN64)
         const spike::MaterialList result = spike::list_materials();
         if (result.ok) {
@@ -265,6 +322,30 @@ public:
             }
         }
         return vmt::Ok(names);
+    }
+
+    vmt::Result<AssetList> list_assets(const std::vector<std::string>& roots,
+                                       const std::vector<std::string>& extensions) override {
+        if (!backend_running()) {
+            return vmt::Err<AssetList>(engine_error(
+                vmt::ErrorCode::EngineInitFailed,
+                "hlmv_backend is not running: listing engine assets (VPKs included) needs it"));
+        }
+
+        const std::string roots_arg = join_semicolons(roots);
+        const std::string extensions_arg = join_semicolons(extensions);
+        if (roots_arg.empty() || extensions_arg.empty()) {
+            return vmt::Err<AssetList>(engine_error(
+                vmt::ErrorCode::InvalidArgument,
+                "list_assets needs at least one root and one extension"));
+        }
+
+        const vmt::Result<std::string> dump =
+            request_dump("assets", roots_arg + " " + extensions_arg, kAssetDumpTimeoutMs);
+        if (!dump.ok()) {
+            return vmt::Err<AssetList>(dump.error());
+        }
+        return parse_assets_dump(dump.value());
     }
 
     vmt::Result<std::vector<unsigned char>> read_binary_file(
@@ -378,15 +459,21 @@ public:
             return vmt::Err<Thumbnail>(engine_error(
                 vmt::ErrorCode::RenderFailed, "hlmv_backend is not initialized or running"));
         }
-        if (size <= 0) {
+        if (size <= 0 || size > 4096) {
             return vmt::Err<Thumbnail>(engine_error(
-                vmt::ErrorCode::InvalidArgument, "invalid thumbnail size"));
+                vmt::ErrorCode::InvalidArgument, "invalid thumbnail size (must be 1..4096)"));
         }
 
         wchar_t temp_dir[MAX_PATH] = {};
-        GetTempPathW(MAX_PATH, temp_dir);
+        if (GetTempPathW(MAX_PATH, temp_dir) == 0) {
+            return vmt::Err<Thumbnail>(engine_error(
+                vmt::ErrorCode::RenderFailed, "failed to get temporary directory"));
+        }
         wchar_t temp_file[MAX_PATH] = {};
-        GetTempFileNameW(temp_dir, L"vmt_thmb_", 0, temp_file);
+        if (GetTempFileNameW(temp_dir, L"vmt_thmb_", 0, temp_file) == 0) {
+            return vmt::Err<Thumbnail>(engine_error(
+                vmt::ErrorCode::RenderFailed, "failed to generate temporary thumbnail path"));
+        }
         std::filesystem::path thumb_path = temp_file;
         thumb_path.replace_extension(L".tga");
 
@@ -419,9 +506,9 @@ public:
                 vmt::ErrorCode::RenderFailed, "malformed thumbnail header"));
         }
 
-        int w = header[12] | (header[13] << 8);
-        int h = header[14] | (header[15] << 8);
-        if (w <= 0 || h <= 0) {
+        const int w = header[12] | (header[13] << 8);
+        const int h = header[14] | (header[15] << 8);
+        if (w <= 0 || h <= 0 || w > 4096 || h > 4096) {
             fclose(f);
             std::error_code ec;
             std::filesystem::remove(thumb_path, ec);
@@ -433,8 +520,17 @@ public:
         Thumbnail result;
         result.width = w;
         result.height = h;
-        size_t total_bytes = (size_t)w * h * 4;
-        result.bgra.resize(total_bytes);
+        const size_t total_bytes = static_cast<size_t>(w) * static_cast<size_t>(h) * 4;
+        try {
+            result.bgra.resize(total_bytes);
+        } catch (const std::exception&) {
+            fclose(f);
+            std::error_code ec;
+            std::filesystem::remove(thumb_path, ec);
+            std::filesystem::remove(temp_file, ec);
+            return vmt::Err<Thumbnail>(engine_error(
+                vmt::ErrorCode::OutOfMemory, "failed to allocate thumbnail pixel buffer"));
+        }
         if (fread(result.bgra.data(), 1, total_bytes, f) != total_bytes) {
             fclose(f);
             std::error_code ec;
@@ -450,11 +546,17 @@ public:
         std::filesystem::remove(temp_file, ec);
 
         if (flip_vertical) {
-            std::vector<unsigned char> flipped(result.bgra.size());
-            const size_t row_bytes = (size_t)w * 4;
+            std::vector<unsigned char> flipped;
+            try {
+                flipped.resize(result.bgra.size());
+            } catch (const std::exception&) {
+                return vmt::Err<Thumbnail>(engine_error(
+                    vmt::ErrorCode::OutOfMemory, "failed to allocate thumbnail buffer for flip"));
+            }
+            const size_t row_bytes = static_cast<size_t>(w) * 4;
             for (int y = 0; y < h; ++y) {
-                std::memcpy(flipped.data() + (size_t)y * row_bytes,
-                            result.bgra.data() + (size_t)(h - 1 - y) * row_bytes, row_bytes);
+                std::memcpy(flipped.data() + static_cast<size_t>(y) * row_bytes,
+                            result.bgra.data() + static_cast<size_t>(h - 1 - y) * row_bytes, row_bytes);
             }
             result.bgra.swap(flipped);
         }
@@ -488,9 +590,9 @@ public:
 
     // --- Model viewer: queries ------------------------------------------------
     // The response-file plumbing of docs/IPC_PROTOCOL.md. Each query blocks the
-    // calling thread while it polls for the backend's answer (up to 10 s), so
-    // run them on a worker thread. Concurrent calls are safe: every job
-    // generates its own token under a mutex.
+    // calling thread while it polls for the backend's answer (10 s, 60 s for
+    // the assets dump), so run them on a worker thread. Concurrent calls are
+    // safe: every job generates its own token under a mutex.
 
     vmt::Result<ModelList> list_models(const std::string& prefix) override {
         if (!backend_running()) {
@@ -656,6 +758,9 @@ private:
         if (child_hwnd_ == nullptr || !IsWindow(child_hwnd_)) {
             return false;
         }
+        if (cmd.empty() || cmd.size() > 65536) {
+            return false;
+        }
         COPYDATASTRUCT cds{};
         cds.dwData = 0;
         cds.cbData = static_cast<DWORD>(cmd.size());
@@ -691,20 +796,21 @@ private:
                std::to_string(token_counter_) + "_" + std::to_string(GetTickCount64());
     }
 
-    // Sends a DUMP/RAW command and waits up to 10 s for `<token>.done` or
-    // `<token>.err` (polled every 5 ms). On success the path of the
-    // `<token>.<payload_extension>` file is returned; the response files are
-    // removed on every failure path.
+    // Sends a DUMP/RAW command and waits up to `timeout_ms` for
+    // `<token>.done` or `<token>.err` (polled every 5 ms). On success the path
+    // of the `<token>.<payload_extension>` file is returned; the response files
+    // are removed on every failure path.
     vmt::Result<std::filesystem::path> run_dump_job(const std::string& command,
                                                     const std::string& token,
-                                                    const char* payload_extension) {
+                                                    const char* payload_extension,
+                                                    unsigned timeout_ms) {
         if (!backend_running()) {
             return vmt::Err<std::filesystem::path>(engine_error(
                 vmt::ErrorCode::RenderFailed, "hlmv_backend is not initialized or running"));
         }
 
         const std::filesystem::path dir = dump_dir();
-        if (!send_command_with_timeout(command, kDumpTimeoutMs)) {
+        if (!send_command_with_timeout(command, timeout_ms)) {
             remove_dump_files(token);
             return vmt::Err<std::filesystem::path>(engine_error(
                 vmt::ErrorCode::RenderFailed,
@@ -714,7 +820,7 @@ private:
         const std::filesystem::path done = dir / (token + ".done");
         const std::filesystem::path err = dir / (token + ".err");
         const auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(kDumpTimeoutMs);
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         for (;;) {
             std::error_code ec;
             if (std::filesystem::exists(err, ec)) {
@@ -747,7 +853,7 @@ private:
                 remove_dump_files(token);
                 return vmt::Err<std::filesystem::path>(engine_error(
                     vmt::ErrorCode::RenderFailed,
-                    "timed out after " + std::to_string(kDumpTimeoutMs / 1000) +
+                    "timed out after " + std::to_string(timeout_ms / 1000) +
                         " s waiting for hlmv_backend to answer \"" + command + "\""));
             }
             Sleep(5);
@@ -755,23 +861,38 @@ private:
     }
 
     // DUMP <kind> <token> [args] -> the UTF-8 payload of `<token>.dat`.
-    vmt::Result<std::string> request_dump(const std::string& kind, const std::string& args) {
+    vmt::Result<std::string> request_dump(const std::string& kind, const std::string& args,
+                                          unsigned timeout_ms = kDumpTimeoutMs) {
         const std::string token = generate_token();
         std::string command = "DUMP " + kind + " " + token;
         if (!args.empty()) {
             command += " " + args;
         }
 
-        const vmt::Result<std::filesystem::path> payload = run_dump_job(command, token, "dat");
+        const vmt::Result<std::filesystem::path> payload =
+            run_dump_job(command, token, "dat", timeout_ms);
         if (!payload.ok()) {
             return vmt::Err<std::string>(payload.error());
         }
 
+        std::error_code size_ec;
+        const std::uintmax_t file_sz = std::filesystem::file_size(payload.value(), size_ec);
+        if (size_ec || file_sz > 64 * 1024 * 1024) {
+            remove_dump_files(token);
+            return vmt::Err<std::string>(engine_error(
+                vmt::ErrorCode::IoError,
+                "dump file is missing or exceeds maximum size limit (64 MiB)"));
+        }
+
         std::ifstream file(payload.value(), std::ios::binary);
         std::string text;
-        const bool read_ok = static_cast<bool>(file);
+        bool read_ok = static_cast<bool>(file);
         if (file) {
-            text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+            try {
+                text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+            } catch (const std::exception&) {
+                read_ok = false;
+            }
         }
         // Windows refuses to delete an open file, so close it before cleanup.
         file.close();
@@ -789,16 +910,30 @@ private:
         const std::string token = generate_token();
         const std::string command = "RAW " + token + " " + game_path;
 
-        const vmt::Result<std::filesystem::path> payload = run_dump_job(command, token, "bin");
+        const vmt::Result<std::filesystem::path> payload =
+            run_dump_job(command, token, "bin", kDumpTimeoutMs);
         if (!payload.ok()) {
             return vmt::Err<std::vector<unsigned char>>(payload.error());
         }
 
+        std::error_code size_ec;
+        const std::uintmax_t file_sz = std::filesystem::file_size(payload.value(), size_ec);
+        if (size_ec || file_sz > 256 * 1024 * 1024) {
+            remove_dump_files(token);
+            return vmt::Err<std::vector<unsigned char>>(engine_error(
+                vmt::ErrorCode::IoError,
+                "raw binary file is missing or exceeds maximum size limit (256 MiB)"));
+        }
+
         std::ifstream file(payload.value(), std::ios::binary);
         std::vector<unsigned char> bytes;
-        const bool read_ok = static_cast<bool>(file);
+        bool read_ok = static_cast<bool>(file);
         if (file) {
-            bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+            try {
+                bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+            } catch (const std::exception&) {
+                read_ok = false;
+            }
         }
         // Windows refuses to delete an open file, so close it before cleanup.
         file.close();

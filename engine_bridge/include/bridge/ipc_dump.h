@@ -22,6 +22,9 @@ int dump_protocol_version(const std::string& text);
 // silent data loss would be worse).
 vmt::Result<ModelList> parse_models_dump(const std::string& text);
 
+// Parses an "assets" dump (files under the requested roots, loose or VPK).
+vmt::Result<AssetList> parse_assets_dump(const std::string& text);
+
 // Parses a "model_scene" dump.
 vmt::Result<ModelScene> parse_model_scene_dump(const std::string& text);
 

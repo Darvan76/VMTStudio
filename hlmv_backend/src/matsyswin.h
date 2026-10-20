@@ -47,6 +47,12 @@ public:
 
 
 extern MatSysWindow *g_MatSysWindow;
+// Set while rendering an offscreen thumbnail: draw() must leave the frame in
+// the back buffer instead of presenting it, so the caller can read it back.
+extern bool g_bSkipSwap;
+// Set while capturing: draw() leaves the material system frame open so the
+// caller can ReadPixels() before EndFrame() unbinds or presents it.
+extern bool g_bSkipEndFrame;
 extern IMaterial *g_materialBackground;
 extern IMaterial *g_materialWireframe;
 extern IMaterial *g_materialFlatshaded;

@@ -57,6 +57,20 @@ UISettings UISettings::load(const std::filesystem::path& file) {
             settings.validation_dock_visible = value == "1" || value == "true";
         } else if (key == "last_model") {
             settings.last_model = value;
+        } else if (key == "asset_kind") {
+            try { settings.asset_kind = std::stoi(value); } catch (...) { }
+        } else if (key == "asset_source") {
+            try { settings.asset_source = std::stoi(value); } catch (...) { }
+        } else if (key == "asset_grid") {
+            settings.asset_grid = value == "1" || value == "true";
+        } else if (key == "asset_sort") {
+            settings.asset_sort = value;
+        } else if (key == "asset_folders") {
+            if (!value.empty()) {
+                settings.asset_folders.push_back(value);
+            }
+        } else if (key == "asset_geometry") {
+            settings.asset_geometry = value;
         } else if (key == "ignored_update_version") {
             settings.ignored_update_version = value;
         } else if (key == "check_for_updates") {
@@ -102,6 +116,14 @@ bool UISettings::save(const std::filesystem::path& file) const {
         stream << "splitter_sizes=" << splitter_sizes << "\n";
         stream << "validation_dock_visible=" << (validation_dock_visible ? 1 : 0) << "\n";
         stream << "last_model=" << last_model << "\n";
+        stream << "asset_kind=" << asset_kind << "\n";
+        stream << "asset_source=" << asset_source << "\n";
+        stream << "asset_grid=" << (asset_grid ? 1 : 0) << "\n";
+        stream << "asset_sort=" << asset_sort << "\n";
+        stream << "asset_geometry=" << asset_geometry << "\n";
+        for (const std::string& folder : asset_folders) {
+            stream << "asset_folders=" << folder << "\n";
+        }
         stream << "ignored_update_version=" << ignored_update_version << "\n";
         stream << "check_for_updates=" << (check_for_updates ? 1 : 0) << "\n";
         for (const std::string& recent : recent_files) {

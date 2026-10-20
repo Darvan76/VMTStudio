@@ -12,6 +12,12 @@
 //   preview_environment=studio_dark
 //   preview_rig=0.3000 38.0000 42.0000 1.0000 0.1600
 //   browser_root=D:\Games\GarrysMod\garrysmod\materials
+//   asset_kind=-1
+//   asset_source=0
+//   asset_grid=0
+//   asset_sort=0,asc
+//   asset_folders=D:\mods\my_addon\materials     (repeated)
+//   asset_geometry=...                           (base64 QWidget::saveGeometry)
 //
 // The model viewer reuses the same store:
 //   last_model=models/props_c17/oildrum001.mdl
@@ -41,10 +47,20 @@ struct UISettings {
     std::string preview_environment = "studio_dark";
     std::string preview_rig; // "ambient azimuth elevation intensity background"
 
-    // Material browser.
+    // Material browser (legacy keys; kept so existing settings files round-trip).
     std::string browser_root;         // last scanned folder
     bool browser_scan_game = false;   // last scan source: true = game file system
     bool thumbnail_flip = true;       // engine readback rows are bottom-up
+
+    // Asset Browser (F3/F4). Additive keys: older settings files simply lack
+    // them and get the defaults below. `asset_kind` is a ui::AssetKind value or
+    // -1 for "All"; `asset_source` is the source combo index (0..3).
+    int asset_kind = -1;
+    int asset_source = 0;
+    bool asset_grid = false;
+    std::string asset_sort = "0,asc"; // "<column>,asc|desc"
+    std::vector<std::string> asset_folders; // user folders, most recent first
+    std::string asset_geometry;       // QWidget::saveGeometry(), base64
 
     // Window / layout persistence.
     int window_width = 0;

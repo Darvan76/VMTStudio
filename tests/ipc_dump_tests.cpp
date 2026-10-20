@@ -404,6 +404,108 @@ UT_TEST_CASE("ipc_dump: anim_state: malformed rows fail with ParseError") {
     UT_CHECK(contains(bad_flag.error().message, "paused"));
 }
 
+UT_TEST_CASE("ipc_dump: assets: loose and vpk entries parse") {
+    const std::string text = dump_text("assets", {
+        "asset\tmaterials/brick/brick001.vmt\tvpk",
+        "asset\tmodels/props_c17/oildrum001.mdl\tloose",
+    });
+    const vmt::Result<bridge::AssetList> parsed = bridge::parse_assets_dump(text);
+    UT_CHECK(parsed.ok());
+    if (!parsed.ok()) return;
+
+    const bridge::AssetList& assets = parsed.value();
+    UT_CHECK_EQ(assets.entries.size(), std::size_t{2});
+    if (assets.entries.size() != std::size_t{2}) return;
+    UT_CHECK_EQ(assets.entries[0].path, "materials/brick/brick001.vmt");
+    UT_CHECK(!assets.entries[0].loose);
+    UT_CHECK_EQ(assets.entries[1].path, "models/props_c17/oildrum001.mdl");
+    UT_CHECK(assets.entries[1].loose);
+    UT_CHECK(!assets.truncated);
+}
+
+UT_TEST_CASE("ipc_dump: assets: unknown rows are ignored") {
+    const std::string text = dump_text("assets", {
+        "note\ttruncated after the safety cap",
+        "asset\tmaterials/brick/brick001.vmt\tvpk",
+        "future_row\t1\t2\t3\t4\t5",
+    });
+    const vmt::Result<bridge::AssetList> parsed = bridge::parse_assets_dump(text);
+    UT_CHECK(parsed.ok());
+    if (!parsed.ok()) return;
+    UT_CHECK_EQ(parsed.value().entries.size(), std::size_t{1});
+}
+
+UT_TEST_CASE("ipc_dump: assets: the truncation note is exposed") {
+    const vmt::Result<bridge::AssetList> capped = bridge::parse_assets_dump(dump_text("assets", {
+        "asset\tmaterials/brick/brick001.vmt\tvpk",
+        "note\ttruncated",
+    }));
+    UT_CHECK(capped.ok());
+    if (!capped.ok()) return;
+    UT_CHECK(capped.value().truncated);
+    UT_CHECK_EQ(capped.value().entries.size(), std::size_t{1});
+
+    const vmt::Result<bridge::AssetList> whole = bridge::parse_assets_dump(dump_text("assets", {
+        "asset\tmaterials/brick/brick001.vmt\tvpk",
+    }));
+    UT_CHECK(whole.ok());
+    if (!whole.ok()) return;
+    UT_CHECK(!whole.value().truncated);
+}
+
+UT_TEST_CASE("ipc_dump: assets: malformed rows fail with ParseError") {
+    const vmt::Result<bridge::AssetList> missing_column = bridge::parse_assets_dump(dump_text("assets", {
+        "asset\tmaterials/brick/brick001.vmt\tvpk",
+        "asset\tmaterials/brick/brick001.vmt",
+    }));
+    UT_CHECK(!missing_column.ok());
+    UT_CHECK_EQ(missing_column.error().code, vmt::ErrorCode::ParseError);
+    UT_CHECK(contains(missing_column.error().message, "line 4"));
+    UT_CHECK(contains(missing_column.error().message, "asset"));
+
+    const vmt::Result<bridge::AssetList> bad_source = bridge::parse_assets_dump(dump_text("assets", {
+        "asset\tmaterials/brick/brick001.vmt\tfloppy",
+    }));
+    UT_CHECK(!bad_source.ok());
+    UT_CHECK_EQ(bad_source.error().code, vmt::ErrorCode::ParseError);
+    UT_CHECK(contains(bad_source.error().message, "source"));
+
+    const vmt::Result<bridge::AssetList> empty_path = bridge::parse_assets_dump(dump_text("assets", {
+        "asset\t\tvpk",
+    }));
+    UT_CHECK(!empty_path.ok());
+    UT_CHECK_EQ(empty_path.error().code, vmt::ErrorCode::ParseError);
+    UT_CHECK(contains(empty_path.error().message, "path"));
+}
+
+UT_TEST_CASE("ipc_dump: assets: header and kind are validated") {
+    const vmt::Result<bridge::AssetList> missing_header =
+        bridge::parse_assets_dump("kind\tassets\nasset\tmaterials/brick/brick001.vmt\tvpk\n");
+    UT_CHECK(!missing_header.ok());
+    UT_CHECK_EQ(missing_header.error().code, vmt::ErrorCode::ParseError);
+
+    const vmt::Result<bridge::AssetList> wrong_kind =
+        bridge::parse_assets_dump("VMTStudio-IPC\t2\nkind\tmodels\n");
+    UT_CHECK(!wrong_kind.ok());
+    UT_CHECK_EQ(wrong_kind.error().code, vmt::ErrorCode::ParseError);
+    UT_CHECK(contains(wrong_kind.error().message, "models"));
+
+    const vmt::Result<bridge::AssetList> newer =
+        bridge::parse_assets_dump("VMTStudio-IPC\t3\nkind\tassets\n");
+    UT_CHECK(!newer.ok());
+    UT_CHECK_EQ(newer.error().code, vmt::ErrorCode::ParseError);
+    UT_CHECK(contains(newer.error().message, "too new"));
+}
+
+UT_TEST_CASE("ipc_dump: assets: an empty list is valid") {
+    const vmt::Result<bridge::AssetList> parsed =
+        bridge::parse_assets_dump("VMTStudio-IPC\t2\nkind\tassets\n");
+    UT_CHECK(parsed.ok());
+    if (!parsed.ok()) return;
+    UT_CHECK(parsed.value().entries.empty());
+    UT_CHECK(!parsed.value().truncated);
+}
+
 UT_TEST_CASE("ipc_dump: CRLF line endings and names with spaces") {
     const std::string text = with_crlf(dump_text("models", {
         "model\tmodels/props c17/oil drum.mdl\tloose",
@@ -429,5 +531,17 @@ UT_TEST_CASE("ipc_dump: CRLF line endings and names with spaces") {
     if (scene.value().bones.size() == std::size_t{1}) {
         UT_CHECK_EQ(scene.value().bones[0].name, "left arm");
         UT_CHECK_EQ(scene.value().bones[0].parent, -1);
+    }
+
+    const std::string assets_text = with_crlf(dump_text("assets", {
+        "asset\tmaterials/rock wall/rock wall.vmt\tloose",
+    }));
+    const vmt::Result<bridge::AssetList> assets = bridge::parse_assets_dump(assets_text);
+    UT_CHECK(assets.ok());
+    if (!assets.ok()) return;
+    UT_CHECK_EQ(assets.value().entries.size(), std::size_t{1});
+    if (assets.value().entries.size() == std::size_t{1}) {
+        UT_CHECK_EQ(assets.value().entries[0].path, "materials/rock wall/rock wall.vmt");
+        UT_CHECK(assets.value().entries[0].loose);
     }
 }

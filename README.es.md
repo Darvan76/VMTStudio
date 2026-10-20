@@ -6,7 +6,7 @@
 
 **Un estudio de materiales nativo y moderno, impulsado por el renderizador de Source Engine de Valve — fidelidad pixel-perfect, directamente en tu escritorio.**
 
-![Release](https://img.shields.io/badge/release-v0.1.0-blue.svg)
+![Release](https://img.shields.io/badge/release-v0.2.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![C++](https://img.shields.io/badge/standard-C%2B%2B17-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)
@@ -67,10 +67,13 @@ A diferencia de visores genéricos que intentan replicar los shaders de Source m
 - **Sincronización Instantánea** — los cambios en cualquier editor actualizan la vista 3D en tiempo real (debounce de 250 ms).
 - **Deshacer / Rehacer Completo** — historial unificado en ambos editores (`Ctrl+Z` / `Ctrl+Y`).
 
-### 📂 Explorador de Materiales (`F3`)
+### 📂 Explorador de Assets (`F3` / `F4`)
 
-- Escaneo recursivo de directorios y lectura directa de archivos `.vpk` sin necesidad de extraerlos.
-- Generación de miniaturas en tiempo real renderizadas por el motor, con caché local en disco (`%LOCALAPPDATA%\VMTStudio\thumbnails\`).
+- Una única ventana modeless para materiales, texturas y modelos (`.vmt`, `.vtf`, `.mdl`) en carpetas loose, archivos `.vpk` montados y carpetas añadidas por el usuario, sin extraerlos.
+- Búsqueda por tokens, filtros por tipo y fuente, vistas de lista y rejilla, previews por tipo y arrastrar y soltar sobre el visor.
+- Apertura instantánea desde una caché de índice por juego (`%LOCALAPPDATA%\VMTStudio\cache\<game-key>\assets-v1.tsv`); **Refresh** (`Ctrl+R`) reescanea y la reescribe.
+- Las miniaturas se decodifican fuera del hilo de UI y se cachean por juego (`%LOCALAPPDATA%\VMTStudio\thumbnails\<game-key>\`).
+- `F4` abre la misma ventana filtrada a modelos; el selector de texturas del inspector la usa en modo *pick*, por lo que las texturas dentro de VPK son seleccionables.
 
 ### 🔍 Validación de Esquemas y Diagnósticos (`F7`)
 
@@ -201,7 +204,7 @@ El puente del motor soporta conexión automática con cualquier rama derivada de
 
 ¿Prefieres no compilar? Hay una versión portable lista para usar:
 
-1. **Descargar** — descarga `vmt-studio-v0.1.0-windows-x64.zip` desde la página de [Releases](https://github.com/tu-usuario/VMT-Studio/releases).
+1. **Descargar** — descarga `vmtstudio-v0.2.0-win64.zip` desde la página de [Releases](https://github.com/tu-usuario/VMT-Studio/releases).
 2. **Descomprimir** — extrae en cualquier carpeta (ej: `C:\Herramientas\VMT-Studio`). No requiere instalación ni permisos de administrador.
 3. **Ejecutar** — lanza `vmtstudio.exe`.
 4. **Conectar con Source Engine**:
@@ -209,7 +212,7 @@ El puente del motor soporta conexión automática con cualquier rama derivada de
    - Selecciona tu juego en **Juegos conocidos**, o haz clic en **Discover...** para escanear tus bibliotecas de Steam.
    - Opcionalmente, especifica manualmente la carpeta del juego (con `gameinfo.txt`) y la carpeta `/bin`.
    - Pulsa **Test Connection** para validar la instalación.
-5. **Comenzar a Editar** — abre cualquier `.vmt` desde **File > Open** o el **Material Browser (`F3`)**.
+5. **Comenzar a Editar** — abre cualquier `.vmt` desde **File > Open** o el **Explorador de Assets (`F3`)**.
 
 > [!NOTE]
 > El paquete ZIP incluye `vmtstudio.exe` (frontend Qt 6 de 64 bits), `hlmv_backend.exe` (backend de renderizado de 32 bits), `VTFLib.dll` y todas las dependencias de Qt 6. **No se distribuyen recursos propietarios de Valve** — las DLLs del motor se cargan dinámicamente desde tu instalación local del juego.
@@ -294,7 +297,7 @@ build64/bin/Release/vmtstudio.exe
    - Selecciona un juego en **Juegos conocidos** o pulsa **Discover...** para escanear bibliotecas de Steam.
    - O configura manualmente el **Directorio del Juego** (con `gameinfo.txt`) y el **Directorio Bin**.
    - Haz clic en **Test Connection** para validar.
-3. Abre cualquier `.vmt` desde **File > Open** o el **Material Browser (`F3`)**.
+3. Abre cualquier `.vmt` desde **File > Open** o el **Explorador de Assets (`F3`)**.
 4. El visor 3D iniciará el backend HLMV automáticamente, renderizando el material con fidelidad idéntica al motor Source.
 
 ---
@@ -303,7 +306,7 @@ build64/bin/Release/vmtstudio.exe
 
 VMT-Studio puede cargar e inspeccionar modelos de estudio (`.mdl`) de Source Engine con el mismo renderizador nativo:
 
-- **Abrir un modelo** — desde **Model > Open Model... (`F4`)** (explorador con búsqueda y filtros), **arrastrando y soltando** un `.mdl` sobre el visor, desde **Model > Recent Models**, o por línea de comandos: `vmtstudio --model models/props_c17/oildrum001.mdl`.
+- **Abrir un modelo** — desde **Model > Open Model... (`F4`)** (Explorador de Assets filtrado a modelos), **arrastrando y soltando** un `.mdl` sobre el visor, desde **Model > Recent Models**, o por línea de comandos: `vmtstudio --model models/props_c17/oildrum001.mdl`.
 - **Panel de materiales** — todos los materiales del modelo agrupados por bodypart, con búsqueda y navegación anterior/siguiente.
 - **Panel de animación** — lista de secuencias con filtros, línea de tiempo, velocidad de reproducción, blending, capas superpuestas, parámetros de pose, bodygroups y skins.
 - **Edición in situ** — al seleccionar un material se abre su VMT en el editor; los cambios se guardan como override suelto en la ruta game-relative del material. El motor re-resuelve solo esa ranura, manteniendo el resto intacto. **Ctrl+S** guarda atómicamente.
@@ -314,7 +317,8 @@ VMT-Studio puede cargar e inspeccionar modelos de estudio (`.mdl`) de Source Eng
 
 | Atajo | Acción |
 | --- | --- |
-| `F4` | Abrir el explorador de modelos |
+| `F3` | Abrir el Explorador de Assets |
+| `F4` | Abrir el Explorador de Assets filtrado a modelos |
 | `Espacio` | Reproducir / pausar animación |
 | `[` / `]` | Reducir / duplicar velocidad de reproducción |
 | `Alt+Izquierda` / `Alt+Derecha` | Material anterior / siguiente |

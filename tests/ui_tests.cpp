@@ -1,5 +1,8 @@
 #include "ut.h"
 
+#include "ui/asset_cache.h"
+#include "ui/asset_index.h"
+#include "ui/asset_pack.h"
 #include "ui/connection_model.h"
 #include "ui/material_browser.h"
 #include "ui/material_info.h"
@@ -24,7 +27,9 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -1907,6 +1912,12 @@ UT_TEST_CASE("ui settings: extended keys round-trip and save is atomic") {
     settings.browser_root = "D:\\games\\hl2\\materials";
     settings.browser_scan_game = true;
     settings.thumbnail_flip = false;
+    settings.asset_kind = 2;
+    settings.asset_source = 2;
+    settings.asset_grid = true;
+    settings.asset_sort = "3,desc";
+    settings.asset_folders = {"D:\\mods\\one\\materials", "D:\\mods\\two\\materials"};
+    settings.asset_geometry = "QUJD";
 
     UT_CHECK(settings.save(file));
     const ui::UISettings loaded = ui::UISettings::load(file);
@@ -1916,6 +1927,12 @@ UT_TEST_CASE("ui settings: extended keys round-trip and save is atomic") {
     UT_CHECK_EQ(loaded.browser_root, settings.browser_root);
     UT_CHECK(loaded.browser_scan_game);
     UT_CHECK(!loaded.thumbnail_flip);
+    UT_CHECK_EQ(loaded.asset_kind, 2);
+    UT_CHECK_EQ(loaded.asset_source, 2);
+    UT_CHECK(loaded.asset_grid);
+    UT_CHECK_EQ(loaded.asset_sort, std::string("3,desc"));
+    UT_CHECK_EQ(loaded.asset_folders, settings.asset_folders);
+    UT_CHECK_EQ(loaded.asset_geometry, std::string("QUJD"));
 
     // The atomic write leaves no temporary file behind.
     UT_CHECK(!fs::exists(fs::path(file.string() + ".tmp")));
@@ -2637,6 +2654,7 @@ UT_TEST_CASE("ui version: semantic version parsing and comparison") {
     // Serialization
     UT_CHECK_EQ(v1.to_string(), std::string("0.1.0"));
     UT_CHECK_EQ(v_beta.to_string(), std::string("0.2.0-beta.1"));
+    UT_CHECK_EQ(ui::AppVersion::current(), ui::AppVersion::parse("0.2.0"));
 }
 
 UT_TEST_CASE("ui settings: updater options roundtrip") {
@@ -2652,4 +2670,472 @@ UT_TEST_CASE("ui settings: updater options roundtrip") {
     const ui::UISettings loaded = ui::UISettings::load(file);
     UT_CHECK_EQ(loaded.ignored_update_version, std::string("v0.3.5"));
     UT_CHECK(!loaded.check_for_updates);
+}
+
+// --- asset index and its on-disk cache (asset browser core) -------------------
+
+UT_TEST_CASE("ui assets: extension classification and labels") {
+    using ui::AssetKind;
+    UT_CHECK(ui::asset_kind_from_path("materials/brick/brick001.vmt") == AssetKind::Material);
+    UT_CHECK(ui::asset_kind_from_path("materials/brick/brick001.VMT") == AssetKind::Material);
+    UT_CHECK(ui::asset_kind_from_path("materials/brick/brick001.vtf") == AssetKind::Texture);
+    UT_CHECK(ui::asset_kind_from_path("models/props_c17/oildrum001.mdl") == AssetKind::Model);
+    UT_CHECK(ui::asset_kind_from_path("models/props_c17/oildrum001.MDL") == AssetKind::Model);
+    UT_CHECK(ui::asset_kind_from_path("sound/ambience/wind.wav") == AssetKind::Other);
+    UT_CHECK(ui::asset_kind_from_path("materials/no_extension") == AssetKind::Other);
+    UT_CHECK(ui::asset_kind_from_path("materials/brick/brick001.vmt.bak") == AssetKind::Other);
+    UT_CHECK(ui::asset_kind_from_path("") == AssetKind::Other);
+
+    UT_CHECK_EQ(ui::asset_type_label(AssetKind::Material), std::string("Material"));
+    UT_CHECK_EQ(ui::asset_type_label(AssetKind::Texture), std::string("Texture"));
+    UT_CHECK_EQ(ui::asset_type_label(AssetKind::Model), std::string("Model"));
+    UT_CHECK_EQ(ui::asset_type_label(AssetKind::Other), std::string("Other"));
+}
+
+UT_TEST_CASE("ui assets: scanned and folder sources dedupe and merge") {
+    const fs::path root = fresh_temp_dir() / "asset_merge";
+    std::error_code ec;
+    fs::create_directories(root / "materials" / "brick", ec);
+    fs::create_directories(root / "materials" / "wood", ec);
+    UT_CHECK(!ec);
+    {
+        std::ofstream(root / "materials" / "brick" / "brick001.vmt") << "\"UnlitGeneric\"\n{\n}\n";
+        std::ofstream(root / "materials" / "wood" / "plank.vmt") << "\"UnlitGeneric\"\n{\n}\n";
+    }
+
+    ui::AssetIndex index;
+    index.add_scanned_assets({ { "materials/brick/brick001.vmt", false },
+                               { "materials/wood/plank.vmt", true } },
+                             ui::SourcePacked);
+    UT_CHECK_EQ(index.size(), std::size_t{ 2 });
+
+    // Both files already exist as engine rows, so the folder scan only merges
+    // the SourceFolder bit and fills disk_path/size.
+    UT_CHECK_EQ(index.add_directory(root, ui::SourceFolder), std::size_t{ 0 });
+    UT_CHECK_EQ(index.size(), std::size_t{ 2 });
+
+    // entries() is sorted by virtual_path: brick before wood.
+    const ui::AssetEntry& brick = index.entries()[0];
+    UT_CHECK_EQ(brick.virtual_path, std::string("materials/brick/brick001.vmt"));
+    UT_CHECK_EQ(brick.path_lower, std::string("materials/brick/brick001.vmt"));
+    UT_CHECK(brick.kind == ui::AssetKind::Material);
+    UT_CHECK_EQ(brick.sources, static_cast<std::uint8_t>(ui::SourcePacked | ui::SourceFolder));
+    UT_CHECK(brick.size > 0);
+    UT_CHECK(!brick.disk_path.empty());
+
+    const ui::AssetEntry& plank = index.entries()[1];
+    UT_CHECK_EQ(plank.virtual_path, std::string("materials/wood/plank.vmt"));
+    UT_CHECK_EQ(plank.sources, static_cast<std::uint8_t>(ui::SourceLoose | ui::SourceFolder));
+    UT_CHECK(!plank.disk_path.empty());
+
+    // Dedup is case-insensitive and keeps the first spelling for display.
+    ui::AssetIndex spelling;
+    spelling.add_scanned_assets({ { "Materials/Brick/Brick001.VMT", false },
+                                  { "materials/brick/brick001.vmt", false } },
+                                ui::SourcePacked);
+    UT_CHECK_EQ(spelling.size(), std::size_t{ 1 });
+    UT_CHECK_EQ(spelling.entries()[0].virtual_path, std::string("Materials/Brick/Brick001.VMT"));
+    UT_CHECK_EQ(spelling.entries()[0].path_lower, std::string("materials/brick/brick001.vmt"));
+
+    // Separator style, duplicate separators and "." components collapse into
+    // the same canonical path.
+    ui::AssetIndex normalized;
+    normalized.add_scanned_assets({ { "materials\\brick//./brick001.vmt", false } },
+                                  ui::SourcePacked);
+    UT_CHECK_EQ(normalized.size(), std::size_t{ 1 });
+    UT_CHECK_EQ(normalized.entries()[0].virtual_path,
+                std::string("materials/brick/brick001.vmt"));
+}
+
+UT_TEST_CASE("ui assets: directory scan caps entries and reports truncation") {
+    const fs::path root = fresh_temp_dir() / "asset_cap";
+    std::error_code ec;
+    fs::create_directories(root / "materials", ec);
+    UT_CHECK(!ec);
+    std::ofstream(root / "materials" / "a.vmt") << "x";
+    std::ofstream(root / "materials" / "b.vmt") << "x";
+    std::ofstream(root / "materials" / "c.vmt") << "x";
+    std::ofstream(root / "materials" / "ignored.txt") << "x";
+
+    ui::AssetIndex index;
+    UT_CHECK_EQ(index.add_directory(root, ui::SourceFolder, 1), std::size_t{ 1 });
+    UT_CHECK_EQ(index.size(), std::size_t{ 1 });
+    UT_CHECK(index.truncated());
+
+    index.clear();
+    UT_CHECK(index.empty());
+    UT_CHECK(!index.truncated());
+}
+
+UT_TEST_CASE("ui assets: filters combine kind, source, folder and AND tokens") {
+    ui::AssetIndex index;
+    index.add_scanned_assets({ { "materials/brick/brick001.vmt", false },
+                               { "materials/brick/brick001.vtf", false },
+                               { "materials/wood/plank.vmt", true },
+                               { "models/props_c17/oildrum001.mdl", false } },
+                             ui::SourcePacked);
+    UT_CHECK_EQ(index.size(), std::size_t{ 4 });
+
+    // An empty filter is the "All" chip: every entry, in path order.
+    const std::vector<std::size_t> all = index.filter(ui::AssetFilter{});
+    UT_CHECK_EQ(all.size(), std::size_t{ 4 });
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        UT_CHECK_EQ(all[i], i);
+    }
+
+    ui::AssetFilter materials;
+    materials.kinds = 1u << static_cast<std::uint32_t>(ui::AssetKind::Material);
+    UT_CHECK_EQ(index.filter(materials).size(), std::size_t{ 2 });
+
+    ui::AssetFilter models;
+    models.kinds = 1u << static_cast<std::uint32_t>(ui::AssetKind::Model);
+    const std::vector<std::size_t> model_hits = index.filter(models);
+    UT_CHECK_EQ(model_hits.size(), std::size_t{ 1 });
+    if (!model_hits.empty()) {
+        UT_CHECK_EQ(index.entries()[model_hits[0]].virtual_path,
+                    std::string("models/props_c17/oildrum001.mdl"));
+    }
+
+    ui::AssetFilter loose;
+    loose.sources = ui::SourceLoose;
+    const std::vector<std::size_t> loose_hits = index.filter(loose);
+    UT_CHECK_EQ(loose_hits.size(), std::size_t{ 1 });
+    if (!loose_hits.empty()) {
+        UT_CHECK_EQ(index.entries()[loose_hits[0]].virtual_path,
+                    std::string("materials/wood/plank.vmt"));
+    }
+
+    ui::AssetFilter folder;
+    folder.folder_prefix = "MATERIALS/BRICK";
+    UT_CHECK_EQ(index.filter(folder).size(), std::size_t{ 2 });
+
+    ui::AssetFilter folder_backslash;
+    folder_backslash.folder_prefix = "materials\\brick";
+    UT_CHECK_EQ(index.filter(folder_backslash).size(), std::size_t{ 2 });
+
+    ui::AssetFilter one_token;
+    one_token.tokens = { "brick" };
+    UT_CHECK_EQ(index.filter(one_token).size(), std::size_t{ 2 });
+
+    ui::AssetFilter two_tokens;
+    two_tokens.tokens = { "BRICK", "vtf" };
+    const std::vector<std::size_t> token_hits = index.filter(two_tokens);
+    UT_CHECK_EQ(token_hits.size(), std::size_t{ 1 });
+    if (!token_hits.empty()) {
+        UT_CHECK_EQ(index.entries()[token_hits[0]].virtual_path,
+                    std::string("materials/brick/brick001.vtf"));
+    }
+
+    ui::AssetFilter no_token;
+    no_token.tokens = { "brick", "nope" };
+    UT_CHECK_EQ(index.filter(no_token).size(), std::size_t{ 0 });
+
+    // All four stages at once: Material + Packed + materials/ + brick + vmt.
+    ui::AssetFilter combined;
+    combined.kinds = 1u << static_cast<std::uint32_t>(ui::AssetKind::Material);
+    combined.sources = ui::SourcePacked;
+    combined.folder_prefix = "materials/";
+    combined.tokens = { "brick", "vmt" };
+    const std::vector<std::size_t> combined_hits = index.filter(combined);
+    UT_CHECK_EQ(combined_hits.size(), std::size_t{ 1 });
+    if (!combined_hits.empty()) {
+        UT_CHECK_EQ(index.entries()[combined_hits[0]].virtual_path,
+                    std::string("materials/brick/brick001.vmt"));
+    }
+}
+
+UT_TEST_CASE("ui assets: cache round-trips and rejects another game or version") {
+    const fs::path root = fresh_temp_dir() / "asset_cache_scan";
+    std::error_code ec;
+    fs::create_directories(root / "materials" / "brick", ec);
+    UT_CHECK(!ec);
+    std::ofstream(root / "materials" / "brick" / "brick001.vmt") << "\"UnlitGeneric\"\n{\n}\n";
+
+    ui::AssetIndex index;
+    index.add_scanned_assets({ { "materials/brick/brick001.vmt", false },
+                               { "materials/wood/plank.vmt", true },
+                               { "models/props_c17/oildrum001.mdl", false } },
+                             ui::SourcePacked);
+    index.add_directory(root, ui::SourceFolder);
+
+    ui::AssetCacheMeta meta;
+    meta.game_dir = "C:\\Games\\GarrysMod\\garrysmod";
+    meta.generated = 1761000000;
+    meta.roots = { "materials", "models" };
+    meta.extensions = { ".vmt", ".vtf", ".mdl" };
+
+    // The parent directory does not exist yet: save must create it.
+    const fs::path file = fresh_temp_dir() / "cache" / "assets-v1.tsv";
+    UT_CHECK(ui::save_asset_cache(file, index, meta));
+    UT_CHECK(fs::exists(file));
+    fs::path temp_file = file;
+    temp_file += ".tmp";
+    UT_CHECK(!fs::exists(temp_file));
+
+    // Case, slash style and a trailing separator do not invalidate the cache.
+    const ui::AssetCacheLoad loaded =
+        ui::load_asset_cache(file, "c:/games/garrysmod/garrysmod/");
+    UT_CHECK(loaded.loaded);
+    UT_CHECK_EQ(loaded.index.size(), index.size());
+    UT_CHECK_EQ(loaded.meta.game_dir, meta.game_dir);
+    UT_CHECK_EQ(loaded.meta.generated, meta.generated);
+    UT_CHECK(loaded.meta.roots == meta.roots);
+    UT_CHECK(loaded.meta.extensions == meta.extensions);
+    for (std::size_t i = 0; i < loaded.index.size() && i < index.size(); ++i) {
+        UT_CHECK_EQ(loaded.index.entries()[i].virtual_path,
+                    index.entries()[i].virtual_path);
+        UT_CHECK(loaded.index.entries()[i].kind == index.entries()[i].kind);
+        UT_CHECK_EQ(loaded.index.entries()[i].sources, index.entries()[i].sources);
+        // The cache stores paths and flags only.
+        UT_CHECK(loaded.index.entries()[i].disk_path.empty());
+        UT_CHECK_EQ(loaded.index.entries()[i].size, std::uint64_t{ 0 });
+    }
+
+    const ui::AssetCacheLoad other_game =
+        ui::load_asset_cache(file, "C:\\Games\\TF2\\tf");
+    UT_CHECK(!other_game.loaded);
+    UT_CHECK(other_game.index.empty());
+
+    const fs::path wrong_version = fresh_temp_dir() / "assets-v2.tsv";
+    {
+        std::ofstream stream(wrong_version, std::ios::binary);
+        stream << "vmtstudio-assets\t2\n";
+        stream << "game_dir\tC:\\Games\\GarrysMod\\garrysmod\n";
+        stream << "count\t0\n";
+    }
+    const ui::AssetCacheLoad rejected =
+        ui::load_asset_cache(wrong_version, "C:\\Games\\GarrysMod\\garrysmod");
+    UT_CHECK(!rejected.loaded);
+    UT_CHECK(rejected.index.empty());
+
+    const ui::AssetCacheLoad missing =
+        ui::load_asset_cache(fresh_temp_dir() / "does-not-exist.tsv",
+                             "C:\\Games\\GarrysMod\\garrysmod");
+    UT_CHECK(!missing.loaded);
+    UT_CHECK(missing.index.empty());
+}
+
+UT_TEST_CASE("ui assets: cache serializes to and parses from memory") {
+    ui::AssetIndex index;
+    index.add_scanned_assets({ { "materials/brick/brick001.vmt", false },
+                               { "models/player/heavy.mdl", true } },
+                             ui::SourcePacked);
+
+    ui::AssetCacheMeta meta;
+    meta.game_dir = "C:\\Games\\TF2\\tf";
+    meta.generated = 1761000123;
+    meta.roots = { "materials", "models" };
+    meta.extensions = { ".vmt", ".vtf", ".mdl" };
+
+    const std::string text = ui::serialize_asset_cache(index, meta);
+    UT_CHECK(text.rfind("vmtstudio-assets\t1\n", 0) == 0);
+    UT_CHECK(text.find("game_dir\tC:\\Games\\TF2\\tf\n") != std::string::npos);
+    UT_CHECK(text.find("asset\td\tmodels/player/heavy.mdl\n") != std::string::npos);
+
+    const ui::AssetCacheLoad parsed =
+        ui::parse_asset_cache(text, "c:/games/tf2/tf/");
+    UT_CHECK(parsed.loaded);
+    UT_CHECK_EQ(parsed.index.size(), index.size());
+    UT_CHECK_EQ(parsed.meta.generated, meta.generated);
+    UT_CHECK(parsed.meta.roots == meta.roots);
+    UT_CHECK(parsed.meta.extensions == meta.extensions);
+
+    UT_CHECK(!ui::parse_asset_cache(text, "C:\\Games\\HL2\\hl2").loaded);
+    UT_CHECK(!ui::parse_asset_cache("not a cache", meta.game_dir).loaded);
+    UT_CHECK(!ui::parse_asset_cache("", meta.game_dir).loaded);
+}
+
+namespace {
+
+std::vector<unsigned char> rle_compress(const std::vector<unsigned char>& input) {
+    std::vector<unsigned char> out;
+    for (std::size_t i = 0; i < input.size();) {
+        const unsigned char value = input[i];
+        std::size_t run = 1;
+        while (i + run < input.size() && input[i + run] == value && run < 255) {
+            ++run;
+        }
+        out.push_back(static_cast<unsigned char>(run));
+        out.push_back(value);
+        i += run;
+    }
+    return out;
+}
+
+bool rle_decompress(const std::vector<unsigned char>& input,
+                    std::vector<unsigned char>& out) {
+    if ((input.size() % 2) != 0) {
+        return false;
+    }
+    out.clear();
+    for (std::size_t i = 0; i < input.size(); i += 2) {
+        out.insert(out.end(), input[i], input[i + 1]);
+    }
+    return true;
+}
+
+} // namespace
+
+UT_TEST_CASE("ui assets: pack round-trips, updates, compacts and trims a partial tail") {
+    const fs::path file = fresh_temp_dir() / "cache.pack";
+    const std::vector<unsigned char> index_bytes = { 'v', 'm', 't', 's', 't', 'u', 'd', 'i', 'o' };
+    const std::vector<unsigned char> thumb_bytes = { 0x89, 'P', 'N', 'G', 1, 2, 3 };
+
+    std::uint64_t good_size = 0;
+    {
+        ui::AssetPack pack;
+        UT_CHECK(pack.open(file, true));
+        UT_CHECK(pack.is_open());
+        UT_CHECK(pack.live_count() == 0);
+        UT_CHECK(pack.put(ui::kAssetPackTagMeta, "index", index_bytes, true));
+        UT_CHECK(pack.put(ui::kAssetPackTagThumb, "abc", thumb_bytes, false));
+        UT_CHECK(pack.live_count() == 2);
+
+        std::vector<unsigned char> read;
+        UT_CHECK(pack.get(ui::kAssetPackTagMeta, "index", read));
+        UT_CHECK(read == index_bytes);
+        UT_CHECK(pack.get(ui::kAssetPackTagThumb, "abc", read));
+        UT_CHECK(read == thumb_bytes);
+
+        // A later record with the same key wins; compact drops the old row.
+        const std::vector<unsigned char> updated = { 9, 9, 9, 9 };
+        UT_CHECK(pack.put(ui::kAssetPackTagThumb, "abc", updated, false));
+        UT_CHECK(pack.get(ui::kAssetPackTagThumb, "abc", read));
+        UT_CHECK(read == updated);
+        const std::uint64_t before_compact = pack.file_size();
+        UT_CHECK(pack.compact());
+        UT_CHECK(pack.file_size() < before_compact);
+        UT_CHECK(pack.get(ui::kAssetPackTagThumb, "abc", read));
+        UT_CHECK(read == updated);
+
+        // Remove a whole namespace without touching the index.
+        UT_CHECK(pack.remove_tag(ui::kAssetPackTagThumb));
+        UT_CHECK(!pack.contains(ui::kAssetPackTagThumb, "abc"));
+        UT_CHECK(pack.contains(ui::kAssetPackTagMeta, "index"));
+        UT_CHECK(pack.live_count() == 1);
+        good_size = pack.file_size();
+    }
+
+    // Simulate a crash halfway through an append.
+    {
+        std::ofstream append(file, std::ios::binary | std::ios::app);
+        append.write("\x01\x02\x03", 3);
+    }
+    {
+        ui::AssetPack reopened;
+        UT_CHECK(reopened.open(file, false));
+        UT_CHECK_EQ(reopened.file_size(), good_size);
+        std::vector<unsigned char> read;
+        UT_CHECK(reopened.get(ui::kAssetPackTagMeta, "index", read));
+        UT_CHECK(read == index_bytes);
+    }
+}
+
+UT_TEST_CASE("ui assets: pack uses the injected compressor and rejects bad checksums") {
+    const fs::path file = fresh_temp_dir() / "compressed.pack";
+    ui::AssetPack pack(rle_compress, rle_decompress);
+    UT_CHECK(pack.open(file, true));
+
+    const std::vector<unsigned char> zeros(4000, 0);
+    UT_CHECK(pack.put(ui::kAssetPackTagMeta, "index", zeros, true));
+    UT_CHECK(pack.last_put_compressed());
+    UT_CHECK(pack.file_size() < zeros.size());
+    std::vector<unsigned char> read;
+    UT_CHECK(pack.get(ui::kAssetPackTagMeta, "index", read));
+    UT_CHECK(read == zeros);
+
+    // A payload that does not shrink is stored raw instead of growing the file.
+    const std::vector<unsigned char> noise = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    UT_CHECK(pack.put(ui::kAssetPackTagThumb, "noise", noise, true));
+    UT_CHECK(!pack.last_put_compressed());
+    UT_CHECK(pack.get(ui::kAssetPackTagThumb, "noise", read));
+    UT_CHECK(read == noise);
+
+    // Flip one byte of the raw payload and check that the FNV checksum notices.
+    const fs::path raw_file = fresh_temp_dir() / "checksum.pack";
+    const std::vector<unsigned char> checksum_bytes = { 4, 5, 6, 7, 8 };
+    {
+        ui::AssetPack raw;
+        UT_CHECK(raw.open(raw_file, true));
+        UT_CHECK(raw.put(ui::kAssetPackTagMeta, "index", checksum_bytes, false));
+    }
+    {
+        std::fstream stream(raw_file, std::ios::binary | std::ios::in | std::ios::out);
+        const std::streamoff payload_offset =
+            static_cast<std::streamoff>(16 + 20 + std::string("meta\x1findex").size());
+        stream.seekg(payload_offset);
+        char byte = 0;
+        stream.read(&byte, 1);
+        byte = static_cast<char>(byte ^ 0x5A);
+        stream.seekp(payload_offset);
+        stream.write(&byte, 1);
+    }
+    {
+        ui::AssetPack raw;
+        UT_CHECK(raw.open(raw_file, true));
+        std::vector<unsigned char> corrupted;
+        UT_CHECK(!raw.get(ui::kAssetPackTagMeta, "index", corrupted));
+        UT_CHECK(corrupted.empty());
+    }
+}
+
+UT_TEST_CASE("ui assets: pack keys and loose signatures are stable") {
+    const std::string key = ui::asset_pack_key("materials/brick/brick001.vmt", 123456);
+    UT_CHECK_EQ(key.size(), std::size_t{ 16 });
+    for (const char c : key) {
+        UT_CHECK((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+    }
+    UT_CHECK_EQ(ui::asset_pack_key("materials/brick/brick001.vmt", 123456), key);
+    UT_CHECK(ui::asset_pack_key("materials/brick/brick001.vmt", 123457) != key);
+
+    UT_CHECK_EQ(ui::asset_signature(fs::path(), 777), std::uint64_t{ 777 });
+
+    const fs::path file = fresh_temp_dir() / "loose.bin";
+    std::ofstream(file, std::ios::binary) << "one";
+    const std::uint64_t first = ui::asset_signature(file, 0);
+    std::ofstream(file, std::ios::binary) << "two-two";
+    const std::uint64_t second = ui::asset_signature(file, 0);
+    UT_CHECK(first != 0);
+    UT_CHECK(second != 0);
+    UT_CHECK(first != second);
+}
+
+
+UT_TEST_CASE("ui assets: filter over 100k entries reports its runtime") {
+    constexpr std::size_t kCount = 100000;
+    std::vector<ui::ScannedAsset> scans;
+    scans.reserve(kCount);
+    for (std::size_t i = 0; i < kCount; ++i) {
+        const char* extension = ".mdl";
+        if (i % 3 == 0) {
+            extension = ".vtf";
+        } else if (i % 3 == 1) {
+            extension = ".vmt";
+        }
+        scans.push_back({ "materials/group" + std::to_string(i % 500) + "/asset" +
+                              std::to_string(i) + extension,
+                          false });
+    }
+
+    ui::AssetIndex index;
+    index.add_scanned_assets(scans, ui::SourcePacked);
+    UT_CHECK_EQ(index.size(), kCount);
+
+    ui::AssetFilter filter;
+    filter.kinds = (1u << static_cast<std::uint32_t>(ui::AssetKind::Material)) |
+                   (1u << static_cast<std::uint32_t>(ui::AssetKind::Texture));
+    filter.sources = ui::SourcePacked;
+    filter.folder_prefix = "materials/group1";
+    filter.tokens = { "asset", "1" };
+
+    const auto start = std::chrono::steady_clock::now();
+    const std::vector<std::size_t> hits = index.filter(filter);
+    const auto finish = std::chrono::steady_clock::now();
+    const double milliseconds =
+        std::chrono::duration<double, std::milli>(finish - start).count();
+    std::printf("  [perf] AssetIndex::filter over %zu assets: %.2f ms (%zu matches)\n",
+                index.size(), milliseconds, hits.size());
+    // The 30 ms budget from the plan is a Release-machine target, not a CI
+    // invariant: the test reports the measurement and only checks correctness.
+    UT_CHECK(!hits.empty());
 }

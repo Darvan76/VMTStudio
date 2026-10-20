@@ -1,13 +1,16 @@
 #include "backend_query.h"
 
 #include <windows.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <initializer_list>
+#include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "filesystem.h"
@@ -27,7 +30,17 @@ extern void HLMV_Log(const char* fmt, ...);
 
 // models dump limits; the walk stops with a "note\ttruncated" row.
 #define QUERY_MAX_MODEL_ROWS   30000
-#define QUERY_MAX_SCAN_ENTRIES 400000
+#define QUERY_MAX_MODEL_SCAN_ENTRIES 400000
+
+// assets dump limits. The row cap is what the UI index can absorb; the scan cap
+// and the clock budget keep a VPK-heavy game from monopolizing the backend's
+// main thread. The budget is per root so a pathological root cannot starve the
+// rest, with a global cap that leaves room for the source resolution and the
+// UI's 60 s query timeout (docs/IPC_PROTOCOL.md).
+#define QUERY_MAX_ASSET_ROWS 150000
+#define QUERY_MAX_SCAN_ENTRIES 1200000
+#define QUERY_ASSET_ROOT_BUDGET_MS 20000
+#define QUERY_MAX_ASSET_SCAN_MS 45000
 
 // RAW refuses files bigger than this (response files are polled, not streamed).
 #define QUERY_MAX_RAW_BYTES (256u * 1024u * 1024u)
@@ -269,12 +282,36 @@ static void WriteErrorResult(const std::string& token, const std::string& messag
 }
 
 //-----------------------------------------------------------------------------
-// models dump
+// file scans (models and assets dumps)
 //-----------------------------------------------------------------------------
 
-static bool HasMdlExtension(const std::string& path)
+// The engine indexes entries with their original casing; the dumps dedup by a
+// folded path but report the first spelling seen, which is what the game uses.
+static std::string LowerAscii(const std::string& text)
 {
-	return path.size() >= 4 && _stricmp(path.c_str() + path.size() - 4, ".mdl") == 0;
+	std::string out = text;
+	for (size_t i = 0; i < out.size(); ++i)
+	{
+		if (out[i] >= 'A' && out[i] <= 'Z')
+		{
+			out[i] = (char)(out[i] - 'A' + 'a');
+		}
+	}
+	return out;
+}
+
+static bool HasExtension(const std::string& path, const std::vector<std::string>& extensions)
+{
+	for (size_t i = 0; i < extensions.size(); ++i)
+	{
+		const std::string& extension = extensions[i];
+		if (path.size() >= extension.size() &&
+			_stricmp(path.c_str() + path.size() - extension.size(), extension.c_str()) == 0)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 // Find* entries are either leaf names of the scanned directory or already
@@ -305,7 +342,9 @@ static bool ResolvedPathIsInVpk(const char* resolved)
 	return path.find(needle) != std::string::npos;
 }
 
-static const char* QueryModelSource(const std::string& path)
+// Loose files and VPK entries both resolve through the engine; the resolved
+// path is the only reliable hint because PATH_IS_PACKFILE is not always set.
+static const char* QueryFileSource(const std::string& path)
 {
 	if (!g_pFileSystem)
 	{
@@ -320,18 +359,36 @@ static const char* QueryModelSource(const std::string& path)
 	return (IS_PACKFILE(pathType) || ResolvedPathIsInVpk(resolved)) ? "vpk" : "loose";
 }
 
-struct ModelScan
+// One scan shared by the models and assets dumps. The engine returns the same
+// file from the flat VPK wildcard and from the loose walk, so the lower-case
+// path is the dedup key while the first spelling seen is the one reported. A
+// map keeps the output deterministic (sorted by that key).
+struct FileScan
 {
-	std::set<std::string> paths;
+	std::map<std::string, std::string> paths;
+	size_t maxRows;
+	size_t maxScanEntries;
+	ULONGLONG scanDeadline;   // GetTickCount64() value; 0 disables the clock budget
 	size_t scanEntries;
 	bool truncated;
 
-	ModelScan() : scanEntries(0), truncated(false) {}
+	FileScan(size_t rows, size_t entries)
+		: maxRows(rows), maxScanEntries(entries), scanDeadline(0), scanEntries(0), truncated(false) {}
+
+	bool BudgetExhausted() const
+	{
+		if (scanEntries >= maxScanEntries)
+		{
+			return true;
+		}
+		return scanDeadline != 0 && GetTickCount64() >= scanDeadline;
+	}
 };
 
-static void AddModelCandidate(ModelScan& scan, const std::string& path, const std::string& prefix)
+static void AddScanCandidate(FileScan& scan, const std::string& path, const std::string& prefix,
+                             const std::vector<std::string>& extensions)
 {
-	if (!HasMdlExtension(path))
+	if (!HasExtension(path, extensions))
 	{
 		return;
 	}
@@ -340,44 +397,59 @@ static void AddModelCandidate(ModelScan& scan, const std::string& path, const st
 	{
 		return;
 	}
-	if (scan.paths.find(path) != scan.paths.end())
+	const std::string key = LowerAscii(path);
+	if (scan.paths.find(key) != scan.paths.end())
 	{
 		return;
 	}
-	if (scan.paths.size() >= QUERY_MAX_MODEL_ROWS)
+	if (scan.paths.size() >= scan.maxRows)
 	{
 		scan.truncated = true;
 		return;
 	}
-	scan.paths.insert(path);
+	scan.paths.insert(std::make_pair(key, path));
 }
 
-static void ScanModelsFlat(const std::string& root, const std::string& prefix, ModelScan& scan)
+// Flat wildcard per extension: this is what reaches the VPK index entries
+// whose wildcard matcher spans the whole stored path.
+static void ScanFilesFlat(const std::string& root, const std::string& prefix,
+                          const std::vector<std::string>& extensions, FileScan& scan)
 {
-	FileFindHandle_t handle = FILESYSTEM_INVALID_FIND_HANDLE;
-	const char* entry = g_pFileSystem->FindFirst((root + "/*.mdl").c_str(), &handle);
-	while (entry != NULL && !scan.truncated && scan.scanEntries < QUERY_MAX_SCAN_ENTRIES)
+	for (size_t i = 0; i < extensions.size() && !scan.truncated; ++i)
 	{
-		++scan.scanEntries;
-		if (!g_pFileSystem->FindIsDirectory(handle))
+		FileFindHandle_t handle = FILESYSTEM_INVALID_FIND_HANDLE;
+		const char* entry = g_pFileSystem->FindFirst((root + "/*" + extensions[i]).c_str(), &handle);
+		while (entry != NULL && !scan.truncated)
 		{
-			AddModelCandidate(scan, NormalizeEntry(root, entry), prefix);
+			if (scan.BudgetExhausted())
+			{
+				scan.truncated = true;
+				break;
+			}
+			++scan.scanEntries;
+			if (!g_pFileSystem->FindIsDirectory(handle))
+			{
+				AddScanCandidate(scan, NormalizeEntry(root, entry), prefix, extensions);
+			}
+			entry = g_pFileSystem->FindNext(handle);
 		}
-		entry = g_pFileSystem->FindNext(handle);
-	}
-	if (handle != FILESYSTEM_INVALID_FIND_HANDLE)
-	{
-		g_pFileSystem->FindClose(handle);
+		if (handle != FILESYSTEM_INVALID_FIND_HANDLE)
+		{
+			g_pFileSystem->FindClose(handle);
+		}
 	}
 }
 
-static void ScanModelsRecursive(const std::string& root, const std::string& prefix, ModelScan& scan)
+// Directory walk: covers loose files and addon folders that the VPK-style
+// wildcard misses.
+static void ScanFilesRecursive(const std::string& root, const std::string& prefix,
+                               const std::vector<std::string>& extensions, FileScan& scan)
 {
 	std::vector<std::string> pending;
 	std::set<std::string> visited;
 	pending.push_back(root);
 
-	while (!pending.empty() && !scan.truncated && scan.scanEntries < QUERY_MAX_SCAN_ENTRIES)
+	while (!pending.empty() && !scan.truncated)
 	{
 		std::string dir = pending.back();
 		pending.pop_back();
@@ -388,8 +460,13 @@ static void ScanModelsRecursive(const std::string& root, const std::string& pref
 
 		FileFindHandle_t handle = FILESYSTEM_INVALID_FIND_HANDLE;
 		const char* entry = g_pFileSystem->FindFirst((dir + "/*").c_str(), &handle);
-		while (entry != NULL && !scan.truncated && scan.scanEntries < QUERY_MAX_SCAN_ENTRIES)
+		while (entry != NULL && !scan.truncated)
 		{
+			if (scan.BudgetExhausted())
+			{
+				scan.truncated = true;
+				break;
+			}
 			++scan.scanEntries;
 			std::string name = entry;
 			if (name != "." && name != "..")
@@ -400,7 +477,7 @@ static void ScanModelsRecursive(const std::string& root, const std::string& pref
 				}
 				else
 				{
-					AddModelCandidate(scan, NormalizeEntry(dir, name), prefix);
+					AddScanCandidate(scan, NormalizeEntry(dir, name), prefix, extensions);
 				}
 			}
 			entry = g_pFileSystem->FindNext(handle);
@@ -411,6 +488,10 @@ static void ScanModelsRecursive(const std::string& root, const std::string& pref
 		}
 	}
 }
+
+//-----------------------------------------------------------------------------
+// models dump
+//-----------------------------------------------------------------------------
 
 static void BuildModelsDump(const std::string& args, std::string& text, std::string& error)
 {
@@ -438,15 +519,16 @@ static void BuildModelsDump(const std::string& args, std::string& text, std::str
 		}
 	}
 
-	ModelScan scan;
-	ScanModelsFlat(root, prefix, scan);
-	ScanModelsRecursive(root, prefix, scan);
+	static const std::vector<std::string> kModelExtensions = { ".mdl" };
+	FileScan scan(QUERY_MAX_MODEL_ROWS, QUERY_MAX_MODEL_SCAN_ENTRIES);
+	ScanFilesFlat(root, prefix, kModelExtensions, scan);
+	ScanFilesRecursive(root, prefix, kModelExtensions, scan);
 
 	text = "VMTStudio-IPC\t2\n";
 	AppendRow(text, { "kind", "models" });
-	for (std::set<std::string>::const_iterator it = scan.paths.begin(); it != scan.paths.end(); ++it)
+	for (std::map<std::string, std::string>::const_iterator it = scan.paths.begin(); it != scan.paths.end(); ++it)
 	{
-		AppendRow(text, { "model", *it, QueryModelSource(*it) });
+		AppendRow(text, { "model", it->second, QueryFileSource(it->second) });
 	}
 	if (scan.truncated)
 	{
@@ -455,6 +537,131 @@ static void BuildModelsDump(const std::string& args, std::string& text, std::str
 	}
 
 	HLMV_Log("[IPC] models dump: %d row(s)%s\n", (int)scan.paths.size(), scan.truncated ? " (truncated)" : "");
+}
+
+//-----------------------------------------------------------------------------
+// assets dump
+//-----------------------------------------------------------------------------
+
+// "a;b;c" -> { "a", "b", "c" } with trimmed, non-empty elements.
+static std::vector<std::string> SplitList(const std::string& text, char separator)
+{
+	std::vector<std::string> values;
+	size_t start = 0;
+	for (;;)
+	{
+		size_t end = text.find(separator, start);
+		if (end == std::string::npos)
+		{
+			end = text.size();
+		}
+		std::string value = Trimmed(text.substr(start, end - start));
+		if (!value.empty())
+		{
+			values.push_back(value);
+		}
+		if (end == text.size())
+		{
+			break;
+		}
+		start = end + 1;
+	}
+	return values;
+}
+
+static std::string NormalizeAssetExtension(const std::string& extension)
+{
+	std::string out = LowerAscii(Trimmed(extension));
+	if (!out.empty() && out[0] != '.')
+	{
+		out = "." + out;
+	}
+	return out;
+}
+
+static void BuildAssetsDump(const std::string& args, std::string& text, std::string& error)
+{
+	if (!g_pFileSystem)
+	{
+		error = "file system is not available";
+		return;
+	}
+
+	// "<roots> <extensions>": the first space separates the two lists and ';'
+	// separates the elements inside each one.
+	const size_t separator = args.find(' ');
+	const std::string rootsText = separator == std::string::npos ? args : args.substr(0, separator);
+	const std::string extensionsText = separator == std::string::npos ? std::string() : args.substr(separator + 1);
+
+	std::vector<std::string> roots;
+	const std::vector<std::string> rawRoots = SplitList(rootsText, ';');
+	for (size_t i = 0; i < rawRoots.size(); ++i)
+	{
+		std::string root = FixSlashes(rawRoots[i]);
+		while (!root.empty() && root.back() == '/')
+		{
+			root.pop_back();
+		}
+		if (!root.empty())
+		{
+			roots.push_back(root);
+		}
+	}
+
+	std::vector<std::string> extensions;
+	const std::vector<std::string> rawExtensions = SplitList(extensionsText, ';');
+	for (size_t i = 0; i < rawExtensions.size(); ++i)
+	{
+		const std::string extension = NormalizeAssetExtension(rawExtensions[i]);
+		if (!extension.empty() && std::find(extensions.begin(), extensions.end(), extension) == extensions.end())
+		{
+			extensions.push_back(extension);
+		}
+	}
+
+	if (roots.empty())
+	{
+		error = "missing asset roots";
+		return;
+	}
+	if (extensions.empty())
+	{
+		error = "missing asset extensions";
+		return;
+	}
+
+	const ULONGLONG startTick = GetTickCount64();
+	const ULONGLONG scanDeadline = startTick + QUERY_MAX_ASSET_SCAN_MS;
+
+	FileScan scan(QUERY_MAX_ASSET_ROWS, QUERY_MAX_SCAN_ENTRIES);
+	for (size_t i = 0; i < roots.size() && !scan.truncated; ++i)
+	{
+		scan.scanDeadline = GetTickCount64() + QUERY_ASSET_ROOT_BUDGET_MS;
+		if (scan.scanDeadline > scanDeadline)
+		{
+			scan.scanDeadline = scanDeadline;
+		}
+
+		ScanFilesFlat(roots[i], std::string(), extensions, scan);
+		ScanFilesRecursive(roots[i], std::string(), extensions, scan);
+	}
+
+	text = "VMTStudio-IPC\t2\n";
+	AppendRow(text, { "kind", "assets" });
+	for (std::map<std::string, std::string>::const_iterator it = scan.paths.begin(); it != scan.paths.end(); ++it)
+	{
+		AppendRow(text, { "asset", it->second, QueryFileSource(it->second) });
+	}
+	if (scan.truncated)
+	{
+		// Unknown rows are ignored by the parser; this documents the cut.
+		AppendRow(text, { "note", "truncated" });
+	}
+
+	const ULONGLONG elapsed = GetTickCount64() - startTick;
+	HLMV_Log("[IPC] assets dump: %d row(s), %d scan entr%s in %llu ms%s\n",
+		(int)scan.paths.size(), (int)scan.scanEntries, scan.scanEntries == 1 ? "y" : "ies",
+		(unsigned long long)elapsed, scan.truncated ? " (truncated)" : "");
 }
 
 //-----------------------------------------------------------------------------
@@ -500,6 +707,10 @@ static std::string MaterialNameFromVmtPath(const std::string& vmtPath)
 // texture shadow models).
 static std::string ResolveTextureMaterialName(studiohdr_t* hdr, int index)
 {
+	if (!hdr || index < 0 || index >= hdr->numtextures)
+	{
+		return std::string();
+	}
 	std::string textureName;
 	mstudiotexture_t* texture = hdr->pTexture(index);
 	if (texture && texture->sznameindex != 0)
@@ -625,7 +836,7 @@ static void BuildModelSceneDump(std::string& text, std::string& error)
 					continue;
 				}
 				int textureIndex = mesh->material;
-				if (hdr->numskinfamilies > 0 && hdr->numskinref > 0 &&
+				if (hdr->skinindex != 0 && hdr->numskinfamilies > 0 && hdr->numskinref > 0 &&
 					textureIndex >= 0 && textureIndex < hdr->numskinref)
 				{
 					int skinRef = skin * hdr->numskinref + textureIndex;
@@ -633,6 +844,10 @@ static void BuildModelSceneDump(std::string& text, std::string& error)
 					{
 						textureIndex = (int)hdr->pSkinref(skinRef)[0];
 					}
+				}
+				if (textureIndex < 0 || textureIndex >= hdr->numtextures)
+				{
+					textureIndex = 0;
 				}
 
 				char key[64];
@@ -746,6 +961,10 @@ static void RunDumpJob(const BackendQueryJob& job)
 	{
 		BuildModelsDump(job.args, text, error);
 	}
+	else if (job.kind == "assets")
+	{
+		BuildAssetsDump(job.args, text, error);
+	}
 	else if (job.kind == "model_scene")
 	{
 		BuildModelSceneDump(text, error);
@@ -793,15 +1012,24 @@ static void RunRawJob(const BackendQueryJob& job)
 	}
 
 	unsigned int size = g_pFileSystem->Size(file);
-	if (size > QUERY_MAX_RAW_BYTES)
+	if ((int)size < 0 || size > QUERY_MAX_RAW_BYTES)
 	{
 		g_pFileSystem->Close(file);
-		WriteErrorResult(job.token, "file is too large to query");
+		WriteErrorResult(job.token, "file is too large to query or has invalid size");
 		return;
 	}
 
 	std::string bytes;
-	bytes.resize(size);
+	try
+	{
+		bytes.resize(size);
+	}
+	catch (...)
+	{
+		g_pFileSystem->Close(file);
+		WriteErrorResult(job.token, "insufficient memory to read file");
+		return;
+	}
 	unsigned int total = 0;
 	while (total < size)
 	{

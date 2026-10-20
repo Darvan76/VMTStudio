@@ -117,19 +117,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vmtstudio-release-windows-x64
-          path: |
-            dist/*-Release*.zip
-            dist/*.zip
+          path: dist/*.zip
           if-no-files-found: error
 
       - name: Upload Release to GitHub
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == true))
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*-Release*.zip
-            dist/*.zip
-            *.zip
+          files: dist/*.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -217,7 +212,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vmtstudio-debug-windows-x64
-          path: |
-            dist/*-Debug*.zip
-            dist/*.zip
+          path: dist/*.zip
           if-no-files-found: error
+
+      - name: Upload Release to GitHub
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == true))
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

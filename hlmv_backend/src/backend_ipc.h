@@ -43,6 +43,9 @@ bool Backend_SetCamera(float pitch, float yaw, float dist, float tx, float ty, f
 
 // Thumbnail capture
 bool Backend_CaptureThumbnail(const std::string& material_name, int size, const std::string& out_path);
+// Writes a top-down 32-bit BMP (BGRA). Used by the hidden -thumb mode.
+bool Backend_WriteBmp32(const std::string& path, int width, int height,
+                        const unsigned char* bgra);
 
 // Render debug modes
 bool Backend_SetRenderMode(const std::string& mode);

@@ -36,6 +36,10 @@ signals:
     void fileDropped(const QString& filePath);
     // A .mdl file was dropped on the viewport; the path is a local disk path.
     void modelDropped(const QString& filePath);
+    // An asset dragged from the Asset Browser ("application/x-vmtstudio-asset"):
+    // the game-relative path, its ui::AssetKind and, for loose rows, the disk
+    // path (empty for VPK-only assets).
+    void assetDropped(const QString& virtualPath, int kind, const QString& diskPath);
     // Live playback tick posted by the backend (WM_USER+422): the current frame
     // and cycle * 10000. Best-effort; the receiver may ignore it entirely.
     void playheadTick(int frame, qintptr cycle_x10000);
