@@ -159,7 +159,7 @@ add_custom_command(TARGET vmtstudio POST_BUILD
 find_program(WINDEPLOYQT_EXE NAMES windeployqt HINTS "$ENV{QT_ROOT_DIR}/bin" "C:/Qt/6.8.2/msvc2022_64/bin")
 if(WINDEPLOYQT_EXE)
     add_custom_command(TARGET vmtstudio POST_BUILD
-        COMMAND "${WINDEPLOYQT_EXE}" $<$<CONFIG:Debug>:--debug>$<$<NOT:$<CONFIG:Debug>>:--release> --no-translations "$<TARGET_FILE:vmtstudio>"
+        COMMAND "${WINDEPLOYQT_EXE}" $<$<CONFIG:Debug>:--debug>$<$<NOT:$<CONFIG:Debug>>:--release> --no-translations --no-opengl-sw "$<TARGET_FILE:vmtstudio>"
         COMMENT "Deploying Qt runtime libraries for vmtstudio"
         VERBATIM
     )

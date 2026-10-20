@@ -12,6 +12,7 @@
 #include <vector>
 #include <filesystem>
 #include <fstream>
+#include <cstdio>
 #include "miniz.h"
 
 namespace fs = std::filesystem;
@@ -36,9 +37,10 @@ static std::wstring build_forward_args(const std::wstring& targetExe) {
     return result;
 }
 
-static bool extract_payload(const void* zipData, size_t zipSize, const fs::path& destDir) {
+static bool extract_payload(const void* zipData, size_t zipSize, const fs::path& destDir, std::wstring& errorDetail) {
     mz_zip_archive zip{};
     if (!mz_zip_reader_init_mem(&zip, zipData, zipSize, 0)) {
+        errorDetail = L"Error al inicializar el descompresor ZIP integrado.";
         return false;
     }
 
@@ -49,30 +51,82 @@ static bool extract_payload(const void* zipData, size_t zipSize, const fs::path&
             continue;
         }
 
-        std::string name = stat.m_filename;
-        // Strip top-level directory if present (e.g. "vmtstudio-v0.2.0-win64/...")
+        std::string rawName = stat.m_filename ? stat.m_filename : "";
+        if (rawName.empty()) {
+            continue;
+        }
+
+        // Normalize all backslashes to forward slashes
+        for (char& c : rawName) {
+            if (c == '\\') {
+                c = '/';
+            }
+        }
+
+        // Strip leading slashes if any
+        size_t start = rawName.find_first_not_of('/');
+        if (start == std::string::npos) {
+            continue;
+        }
+        std::string name = rawName.substr(start);
+
+        // Strip top-level directory prefix if present (e.g. "vmtstudio-v0.2.0-win64/...")
         auto slashPos = name.find('/');
-        if (slashPos != std::string::npos && name.rfind("vmtstudio-", 0) == 0) {
-            name = name.substr(slashPos + 1);
+        if (slashPos != std::string::npos) {
+            std::string topFolder = name.substr(0, slashPos);
+            if (topFolder.rfind("vmtstudio-", 0) == 0) {
+                name = name.substr(slashPos + 1);
+            }
+        } else if (name.rfind("vmtstudio-", 0) == 0) {
+            // Root folder entry itself without trailing slash
+            continue;
+        }
+
+        if (name.empty()) {
+            continue;
+        }
+
+        bool isDir = stat.m_is_directory || (name.back() == '/');
+
+        // Remove trailing slashes for path construction
+        while (!name.empty() && name.back() == '/') {
+            name.pop_back();
         }
         if (name.empty()) {
             continue;
         }
 
-        fs::path outPath = destDir / fs::u8path(name);
+        fs::path relPath = fs::u8path(name);
+        fs::path outPath = destDir / relPath;
 
-        if (mz_zip_reader_is_file_a_directory(&zip, i)) {
+        if (isDir) {
             std::error_code ec;
             fs::create_directories(outPath, ec);
+            if (ec) {
+                errorDetail = L"No se pudo crear el directorio: " + outPath.wstring();
+                mz_zip_reader_end(&zip);
+                return false;
+            }
         } else {
             std::error_code ec;
             fs::create_directories(outPath.parent_path(), ec);
 
-            // Extract file
-            if (!mz_zip_reader_extract_to_file(&zip, i, outPath.string().c_str(), 0)) {
+            FILE* fp = nullptr;
+            errno_t err = _wfopen_s(&fp, outPath.c_str(), L"wb");
+            if (err != 0 || !fp) {
+                errorDetail = L"No se pudo crear el archivo: " + outPath.wstring();
                 mz_zip_reader_end(&zip);
                 return false;
             }
+
+            if (!mz_zip_reader_extract_to_cfile(&zip, i, fp, 0)) {
+                fclose(fp);
+                errorDetail = L"Error al descomprimir: " + outPath.wstring();
+                mz_zip_reader_end(&zip);
+                return false;
+            }
+
+            fclose(fp);
         }
     }
 
@@ -123,8 +177,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*pC
         }
 
         fs::create_directories(appDir, ec);
-        if (!extract_payload(resData, resSize, appDir)) {
-            MessageBoxW(NULL, L"Error al preparar los componentes de VMT-Studio. Comprueba que haya espacio en disco suficiente.", L"VMT-Studio Launcher", MB_ICONERROR);
+        std::wstring errDetail;
+        if (!extract_payload(resData, resSize, appDir, errDetail)) {
+            std::wstring msg = L"Error al preparar los componentes de VMT-Studio:\n" + errDetail;
+            MessageBoxW(NULL, msg.c_str(), L"VMT-Studio Launcher", MB_ICONERROR);
             return 1;
         }
 

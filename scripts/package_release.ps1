@@ -293,7 +293,7 @@ if (-not $Windeployqt) {
 if ($Windeployqt) {
     $DeployMode = if ($Config -eq "Debug") { "--debug" } else { "--release" }
     Write-Host "Running windeployqt ($Windeployqt) with $DeployMode..."
-    & $Windeployqt $DeployMode --no-translations (Join-Path $StagingDir "vmtstudio.exe")
+    & $Windeployqt $DeployMode --no-translations --no-opengl-sw (Join-Path $StagingDir "vmtstudio.exe")
 } else {
     Write-Host "windeployqt not found; relying on pre-deployed Qt files from build folder."
 }
@@ -304,8 +304,7 @@ $AdditionalDllPatterns = @(
     "Qt6*.dll",
     "D3Dcompiler_47.dll",
     "dxcompiler.dll",
-    "dxil.dll",
-    "opengl32sw.dll"
+    "dxil.dll"
 )
 foreach ($pattern in $AdditionalDllPatterns) {
     Get-ChildItem -Path $ReleaseBinDir -Filter $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
@@ -399,7 +398,7 @@ foreach ($doc in $DocFiles) {
 # 6b. Staging directory hygiene cleanup
 # -----------------------------------------------------------------------------
 Write-Host "Sanitizing staging directory..."
-$JunkFilters = @("*.ilk", "*.exp", "*.obj", "*.iobj", "*.ipdb", "*.tmp", "*.temp", "*.log", "*.dmp", "*.mdmp", "*.stackdump", "*.core")
+$JunkFilters = @("*.ilk", "*.exp", "*.obj", "*.iobj", "*.ipdb", "*.tmp", "*.temp", "*.log", "*.dmp", "*.mdmp", "*.stackdump", "*.core", "opengl32sw.dll")
 if ($Config -ine "Debug") {
     $JunkFilters += "*.pdb"
 }
