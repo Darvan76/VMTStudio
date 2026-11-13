@@ -896,7 +896,9 @@ UT_TEST_CASE("vtf preview: selects an existing mip without undersampling or chan
 }
 
 UT_TEST_CASE("vtf preview: mip selection preserves tall and single-pixel aspect ratios and frames") {
-    const std::vector<std::pair<std::uint16_t, std::uint16_t>> sizes = {{8, 16}, {16, 1}};
+    const std::vector<std::pair<std::uint16_t, std::uint16_t>> sizes = {
+        {std::uint16_t{8}, std::uint16_t{16}},
+        {std::uint16_t{16}, std::uint16_t{1}}};
     for (const auto& size : sizes) {
         const std::vector<std::uint8_t> bytes = make_colored_mips(size.first, size.second, 5);
         const auto image = vtf::decode_vtf_preview_from_memory(bytes.data(), bytes.size(), 1, 6);
