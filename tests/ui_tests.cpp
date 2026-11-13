@@ -2655,7 +2655,7 @@ UT_TEST_CASE("ui version: semantic version parsing and comparison") {
     // Serialization
     UT_CHECK_EQ(v1.to_string(), std::string("0.1.0"));
     UT_CHECK_EQ(v_beta.to_string(), std::string("0.2.0-beta.1"));
-    UT_CHECK_EQ(ui::AppVersion::current(), ui::AppVersion::parse("0.2.0"));
+    UT_CHECK_EQ(ui::AppVersion::current(), ui::AppVersion::parse("0.2.1"));
 }
 
 UT_TEST_CASE("ui settings: updater options roundtrip") {
