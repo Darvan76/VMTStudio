@@ -23,7 +23,8 @@
 #include <cctype>
 #include <iterator>
 #include <fstream>
-#include <thread>
+#include <chrono>
+#include <exception>
 
 #include <QMenuBar>
 #include <QMenu>
@@ -52,6 +53,17 @@ namespace ui {
 namespace qt {
 
 namespace {
+
+template <class T>
+void wait_for_native_worker(std::future<T>& job) {
+    // Engine startup can synchronously resize/reparent its native child HWND.
+    // Service only sent Win32 messages while draining; pumping the Qt event
+    // loop here would permit a second close/game change during teardown.
+    while (job.wait_for(std::chrono::milliseconds(10)) != std::future_status::ready) {
+        MSG message{};
+        (void)PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+    }
+}
 
 bridge::PreviewShape to_bridge_shape(ui::PreviewShape shape) {
     switch (shape) {
@@ -217,6 +229,13 @@ MainWindow::MainWindow(QWidget* parent)
     m_previewSyncTimer->setInterval(200);
     connect(m_previewSyncTimer, &QTimer::timeout, this, &MainWindow::onPreviewSyncTimeout);
 
+    m_enginePollTimer = new QTimer(this);
+    m_enginePollTimer->setInterval(50);
+    connect(m_enginePollTimer, &QTimer::timeout, this, &MainWindow::finishEngineInitialization);
+    m_modelScenePollTimer = new QTimer(this);
+    m_modelScenePollTimer->setInterval(50);
+    connect(m_modelScenePollTimer, &QTimer::timeout, this, &MainWindow::finishModelSceneQuery);
+
     setupUi();
 
     // Populate the inspector's shader dropdown with the full catalog (known
@@ -259,25 +278,13 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
-    *m_alive = false;
     saveSettings();
-    // The animation dock must never outlive the engine it talks to.
-    if (m_animationDock) {
-        m_animationDock->setEngine(nullptr);
-    }
     // Remove the experimental isolate substitutes from the preview root.
     cleanupIsolation(false);
-    // The browser holds the engine pointer: detach it before the unique_ptr
-    // goes away. It has no WA_DeleteOnClose, so it is still alive here even if
-    // the user closed its window.
+    shutdownEngine();
     if (m_assetBrowser) {
-        m_assetBrowser->setEngine(nullptr);
         delete m_assetBrowser.data();
         m_assetBrowser = nullptr;
-    }
-    if (m_engine) {
-        m_engine->shutdown();
-        m_engine.reset();
     }
 }
 
@@ -731,6 +738,10 @@ bool MainWindow::ensureEngine(QString& error) {
         return false;
     }
 
+    if (m_engine) {
+        shutdownEngine();
+    }
+
     if (!m_engine) {
         auto createRes = bridge::EngineView::create();
         if (!createRes) {
@@ -784,19 +795,14 @@ bool MainWindow::ensureEngine(QString& error) {
 }
 
 void MainWindow::ensureEngineAsync() {
-    if (m_engineConnecting) {
-        return;
-    }
-    if (m_engine && m_engine->initialized()) {
+    if (m_engineConnecting || (m_engine && m_engine->initialized())) {
         return;
     }
     if (m_settings.last_bin_dir.empty() || m_settings.last_game_dir.empty()) {
         return;
     }
-
-    m_engineConnecting = true;
-    updateStatus();
-    m_viewport->setStatusText(tr("Source Engine Preview\nConnecting to HLMV backend in background..."));
+    // A failed backend can still have a scene query in flight.
+    shutdownEngine();
 
     bridge::EngineViewConfig config;
     config.bin_dir = m_settings.last_bin_dir;
@@ -805,91 +811,121 @@ void MainWindow::ensureEngineAsync() {
     config.width = std::max(64, m_viewport->width());
     config.height = std::max(64, m_viewport->height());
 
-    auto alive = m_alive;
-    std::filesystem::path previewRoot = m_previewRoot;
-    std::filesystem::path materialRoot = m_session.material_root();
-    ui::PreviewOptions previewOptions = m_previewOptions;
-    std::string renderMode = m_currentRenderMode;
-
-    std::thread([this, config, alive, previewRoot, materialRoot, previewOptions, renderMode]() {
-        auto createRes = bridge::EngineView::create();
-        if (!createRes) {
-            std::string errMsg = createRes.error().message;
-            QMetaObject::invokeMethod(qApp, [this, alive, errMsg]() {
-                if (!*alive) return;
-                m_engineConnecting = false;
-                m_viewport->setStatusText(tr("Engine Initialization Error:\n%1").arg(QString::fromStdString(errMsg)));
-                updateStatus();
-            }, Qt::QueuedConnection);
-            return;
-        }
-
-        auto engine = std::move(createRes.value());
-        auto initRes = engine->initialize(config);
-        if (!initRes) {
-            std::string errMsg = initRes.error().message;
-            QMetaObject::invokeMethod(qApp, [this, alive, errMsg]() {
-                if (!*alive) return;
-                m_engineConnecting = false;
-                m_viewport->setStatusText(tr("Engine Initialization Error:\n%1").arg(QString::fromStdString(errMsg)));
-                updateStatus();
-            }, Qt::QueuedConnection);
-            return;
-        }
-
-        // Mount temporary preview root
-        std::error_code ec;
-        std::filesystem::create_directories(previewRoot / "materials", ec);
-        (void)engine->mount_directory(previewRoot, true);
-        deploy_preview_models(previewRoot, engine.get());
-
-        // Mount material root if available
-        if (!materialRoot.empty()) {
-            (void)engine->mount_directory(materialRoot, true);
-        }
-
-        auto rawEngine = engine.release();
-        QMetaObject::invokeMethod(qApp, [this, alive, rawEngine, previewOptions, renderMode]() {
-            if (!*alive) {
-                delete rawEngine;
-                return;
+    m_engineConnecting = true;
+    updateStatus();
+    m_viewport->setStatusText(tr("Source Engine Preview\nConnecting to HLMV backend in background..."));
+    try {
+        m_engineFuture = std::async(std::launch::async, [config]() {
+            auto result = bridge::EngineView::create();
+            if (!result) {
+                return result;
             }
-
-            m_engine.reset(rawEngine);
-            m_engineConnecting = false;
-
-            if (!m_session.material_root().empty()) {
-                (void)m_engine->mount_directory(m_session.material_root(), true);
+            auto initialized = result.value()->initialize(config);
+            if (!initialized) {
+                return vmt::Err<std::unique_ptr<bridge::EngineView>>(initialized.error());
             }
-            checkBrushMaterial(false);
+            return result;
+        });
+        m_enginePollTimer->start();
+    } catch (const std::exception& error) {
+        m_engineConnecting = false;
+        m_viewport->setStatusText(tr("Cannot start engine worker: %1")
+                                     .arg(QString::fromUtf8(error.what())));
+        updateStatus();
+    }
+}
 
-            // Apply lighting and shapes
-            (void)m_engine->set_preview_shape(to_bridge_shape(m_previewOptions.shape));
-            (void)m_engine->set_lighting(to_bridge_lighting(previewOptions.lighting));
-            (void)m_engine->set_render_mode(renderMode);
-
-            m_viewport->setEngineView(m_engine.get());
-            if (m_animationDock) {
-                m_animationDock->setEngine(m_engine.get());
-            }
-            if (m_assetBrowser) {
-                m_assetBrowser->setEngine(m_engine.get());
-                m_assetBrowser->setGame(std::filesystem::path(m_settings.last_game_dir));
-            }
-            (void)m_engine->resize(0, 0);
+void MainWindow::finishEngineInitialization() {
+    if (!m_engineFuture.valid() ||
+        m_engineFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        return;
+    }
+    m_enginePollTimer->stop();
+    m_engineConnecting = false;
+    try {
+        auto result = m_engineFuture.get();
+        if (!result) {
+            m_viewport->setStatusText(tr("Engine Initialization Error:\n%1")
+                                         .arg(QString::fromStdString(result.error().message)));
             updateStatus();
+            return;
+        }
+        m_engine = std::move(result.value());
+    } catch (const std::exception& error) {
+        m_viewport->setStatusText(tr("Engine Initialization Error:\n%1")
+                                     .arg(QString::fromUtf8(error.what())));
+        updateStatus();
+        return;
+    }
 
-            // A model requested while the engine was starting owns the
-            // viewport; the flat material preview must not override it.
-            if (!m_pendingModelPath.isEmpty()) {
-                const QString pending = m_pendingModelPath;
-                m_pendingModelPath.clear();
-                loadModelNow(pending);
-            } else {
-                syncPreview();
-            }
-        }, Qt::QueuedConnection);
-    }).detach();
+    std::error_code ec;
+    std::filesystem::create_directories(m_previewRoot / "materials", ec);
+    (void)m_engine->mount_directory(m_previewRoot, true);
+    deploy_preview_models(m_previewRoot, m_engine.get());
+    if (!m_session.material_root().empty()) {
+        (void)m_engine->mount_directory(m_session.material_root(), true);
+    }
+    checkBrushMaterial(false);
+    // Use current options: the user may have changed them during startup.
+    (void)m_engine->set_preview_shape(to_bridge_shape(m_previewOptions.shape));
+    (void)m_engine->set_lighting(to_bridge_lighting(m_previewOptions.lighting));
+    (void)m_engine->set_render_mode(m_currentRenderMode);
+    m_viewport->setEngineView(m_engine.get());
+    if (m_animationDock) {
+        m_animationDock->setEngine(m_engine.get());
+    }
+    if (m_assetBrowser) {
+        m_assetBrowser->setEngine(m_engine.get());
+        m_assetBrowser->setGame(std::filesystem::path(m_settings.last_game_dir));
+    }
+    (void)m_engine->resize(0, 0);
+    updateStatus();
+    if (!m_pendingModelPath.isEmpty()) {
+        const QString pending = m_pendingModelPath;
+        m_pendingModelPath.clear();
+        loadModelNow(pending);
+    } else {
+        syncPreview();
+    }
+}
+
+void MainWindow::shutdownEngine() {
+    m_previewSyncTimer->stop();
+    m_enginePollTimer->stop();
+    m_modelScenePollTimer->stop();
+    ++m_modelSceneGeneration;
+    m_modelSceneQueryPending = false;
+    m_engineConnecting = false;
+    m_viewport->setEngineView(nullptr);
+    if (m_animationDock) {
+        m_animationDock->setEngine(nullptr);
+    }
+    if (m_assetBrowser) {
+        m_assetBrowser->setEngine(nullptr);
+    }
+    clearModelView();
+    // Drain jobs while their engine and HWND still exist. Native sent messages
+    // must be serviced if startup is waiting for a cross-thread window call.
+    try {
+        if (m_modelSceneFuture.valid()) {
+            wait_for_native_worker(m_modelSceneFuture);
+            (void)m_modelSceneFuture.get();
+        }
+    } catch (const std::exception& error) {
+        log_write("WARN", std::string("Scene query stopped: ") + error.what());
+    }
+    try {
+        if (m_engineFuture.valid()) {
+            wait_for_native_worker(m_engineFuture);
+            (void)m_engineFuture.get();
+        }
+    } catch (const std::exception& error) {
+        log_write("WARN", std::string("Engine startup stopped: ") + error.what());
+    }
+    if (m_engine) {
+        m_engine->shutdown();
+        m_engine.reset();
+    }
 }
 
 void MainWindow::refreshMaterialRoots() {
@@ -1611,33 +1647,49 @@ void MainWindow::queryModelSceneAsync() {
     if (!m_engine || !m_engine->initialized()) {
         return;
     }
+    // Keep at most one query in flight. A newer load is queried once the old
+    // job returns; its result is discarded by the generation check.
+    if (m_modelSceneFuture.valid()) {
+        m_modelSceneQueryPending = true;
+        return;
+    }
     bridge::EngineView* engine = m_engine.get();
-    const quint64 generation = m_modelSceneGeneration;
-    auto alive = m_alive;
+    m_modelSceneQueryGeneration = m_modelSceneGeneration;
+    try {
+        m_modelSceneFuture = std::async(std::launch::async, [engine]() {
+            return engine->query_model_scene();
+        });
+        m_modelScenePollTimer->start();
+    } catch (const std::exception& error) {
+        onModelSceneFailed(QString::fromUtf8(error.what()));
+    }
+}
 
-    std::thread([this, engine, generation, alive]() {
-        auto result = engine->query_model_scene();
-        if (!*alive) {
-            return;
+void MainWindow::finishModelSceneQuery() {
+    if (!m_modelSceneFuture.valid() ||
+        m_modelSceneFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        return;
+    }
+    m_modelScenePollTimer->stop();
+    const bool current = m_modelSceneQueryGeneration == m_modelSceneGeneration;
+    try {
+        auto result = m_modelSceneFuture.get();
+        if (current) {
+            if (result) {
+                onModelSceneLoaded(std::make_shared<bridge::ModelScene>(std::move(result.value())));
+            } else {
+                onModelSceneFailed(QString::fromStdString(result.error().message));
+            }
         }
-        if (result) {
-            auto scene = std::make_shared<bridge::ModelScene>(std::move(result.value()));
-            QMetaObject::invokeMethod(qApp, [this, alive, generation, scene]() {
-                if (!*alive || generation != m_modelSceneGeneration) {
-                    return; // superseded by a newer load or a close
-                }
-                onModelSceneLoaded(scene);
-            }, Qt::QueuedConnection);
-        } else {
-            const std::string message = result.error().message;
-            QMetaObject::invokeMethod(qApp, [this, alive, generation, message]() {
-                if (!*alive || generation != m_modelSceneGeneration) {
-                    return;
-                }
-                onModelSceneFailed(QString::fromStdString(message));
-            }, Qt::QueuedConnection);
+    } catch (const std::exception& error) {
+        if (current) {
+            onModelSceneFailed(QString::fromUtf8(error.what()));
         }
-    }).detach();
+    }
+    if (m_modelSceneQueryPending) {
+        m_modelSceneQueryPending = false;
+        queryModelSceneAsync();
+    }
 }
 
 void MainWindow::onModelSceneLoaded(const std::shared_ptr<bridge::ModelScene>& scene) {
@@ -1680,6 +1732,7 @@ void MainWindow::onModelSceneFailed(const QString& error) {
 
 void MainWindow::clearModelView() {
     ++m_modelSceneGeneration; // invalidates any in-flight scene query
+    m_modelSceneQueryPending = false;
 
     m_modelScene.reset();
     m_currentModelName.clear();
@@ -2268,28 +2321,14 @@ void MainWindow::onOpenGameConnection() {
         saveSettings();
         refreshMaterialRoots();
 
-        // Tear the model view down before the engine goes away: the animation
-        // dock must never keep a dangling engine pointer.
-        if (m_animationDock) {
-            m_animationDock->setEngine(nullptr);
-        }
-        if (m_assetBrowser) {
-            // The (possibly running) browser must stop using the engine before
-            // it is destroyed; ensureEngine/ensureEngineAsync reattach it once
-            // the new game is initialized.
-            m_assetBrowser->setEngine(nullptr);
-            if (m_assetBrowser->pickMode()) {
-                m_assetBrowser->endPick();
-                m_pendingTextureParam.clear();
-            }
+        shutdownEngine();
+        if (m_assetBrowser && m_assetBrowser->pickMode()) {
+            m_assetBrowser->endPick();
+            m_pendingTextureParam.clear();
         }
         cleanupIsolation(false);
         clearModelView();
 
-        if (m_engine) {
-            m_engine->shutdown();
-            m_engine.reset();
-        }
         ensureEngineAsync();
     }
 }

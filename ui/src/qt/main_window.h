@@ -10,7 +10,7 @@
 #include <QTimer>
 #include <QDockWidget>
 
-#include <atomic>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -153,6 +153,8 @@ private:
 
     bool ensureEngine(QString& error);
     void ensureEngineAsync();
+    void finishEngineInitialization();
+    void shutdownEngine();
     void syncPreview();
     void refreshMaterialRoots();
 
@@ -165,6 +167,7 @@ private:
     // --- Model viewer -------------------------------------------------------
     void loadModelNow(const QString& modelPath);
     void queryModelSceneAsync();
+    void finishModelSceneQuery();
     void onModelSceneLoaded(const std::shared_ptr<bridge::ModelScene>& scene);
     void onModelSceneFailed(const QString& error);
     void clearModelView();
@@ -208,7 +211,14 @@ private:
 
     std::unique_ptr<bridge::EngineView> m_engine;
     bool m_engineConnecting = false;
-    std::shared_ptr<std::atomic<bool>> m_alive = std::make_shared<std::atomic<bool>>(true);
+    // Owned jobs are drained before EngineView and its host window are destroyed.
+    // Workers return values; only the UI thread touches widgets or adopts results.
+    std::future<vmt::Result<std::unique_ptr<bridge::EngineView>>> m_engineFuture;
+    std::future<vmt::Result<bridge::ModelScene>> m_modelSceneFuture;
+    QTimer* m_enginePollTimer = nullptr;
+    QTimer* m_modelScenePollTimer = nullptr;
+    quint64 m_modelSceneQueryGeneration = 0;
+    bool m_modelSceneQueryPending = false;
     ui::PreviewOptions m_previewOptions;
     ui::PreviewSync m_previewSync;
     std::filesystem::path m_previewRoot;
