@@ -6,7 +6,7 @@
 
 **Un estudio de materiales nativo y moderno, impulsado por el renderizador de Source Engine de Valve — fidelidad pixel-perfect, directamente en tu escritorio.**
 
-![Release](https://img.shields.io/badge/release-v0.2.0-blue.svg)
+![Release](https://img.shields.io/badge/release-v0.2.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![C++](https://img.shields.io/badge/standard-C%2B%2B17-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)
@@ -204,7 +204,7 @@ El puente del motor soporta conexión automática con cualquier rama derivada de
 
 ¿Prefieres no compilar? Hay una versión portable lista para usar:
 
-1. **Descargar** — descarga `vmtstudio-v0.2.0-win64.zip` desde la página de [Releases](https://github.com/tu-usuario/VMT-Studio/releases).
+1. **Descargar** — descarga `vmtstudio-v0.2.1-win64.zip` desde la página de [Releases](https://github.com/Darvan76/VMTStudio/releases).
 2. **Descomprimir** — extrae en cualquier carpeta (ej: `C:\Herramientas\VMT-Studio`). No requiere instalación ni permisos de administrador.
 3. **Ejecutar** — lanza `vmtstudio.exe`.
 4. **Conectar con Source Engine**:
@@ -239,7 +239,7 @@ El backend de renderizado debe compilarse para **Win32 (32 bits)** para cargar l
 ### Paso 1: Clonar e Inicializar Submódulos
 
 ```powershell
-git clone --recursive https://github.com/tu-usuario/VMT-Studio.git
+git clone --recursive https://github.com/Darvan76/VMTStudio.git
 cd VMT-Studio
 ```
 

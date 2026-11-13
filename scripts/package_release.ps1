@@ -22,7 +22,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = "0.2.0",
+    [string]$Version = "0.2.1",
     [string]$Config = "Release",
     [string]$BuildDir = "build64",
     [string]$OutDir = "dist"
@@ -294,6 +294,9 @@ if ($Windeployqt) {
     $DeployMode = if ($Config -eq "Debug") { "--debug" } else { "--release" }
     Write-Host "Running windeployqt ($Windeployqt) with $DeployMode..."
     & $Windeployqt $DeployMode --no-translations --no-opengl-sw (Join-Path $StagingDir "vmtstudio.exe")
+    if ($LASTEXITCODE -ne 0) {
+        throw "windeployqt failed with exit code $LASTEXITCODE; the package is incomplete."
+    }
 } else {
     Write-Host "windeployqt not found; relying on pre-deployed Qt files from build folder."
 }

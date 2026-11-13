@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-13
+
+### Fixed
+- Preserve original materials, settings, previews and exports when file replacement fails; use unique temporary files and checked writes.
+- Keep malformed VMT text editable while blocking invalid saves and inspector edits.
+- Protect live previews with last-good rollback and isolate temporary overrides per window and game.
+- Save model materials to permanent destinations, remember those destinations and retain game-relative subfolders.
+- Drain engine initialization and scene queries before destroying the backend or reconnecting its viewport.
+- Bundle all eight shader schemas as Qt resources so portable copies do not depend on the build machine's paths.
+- Validate textures inside VPK archives through the Source backend instead of checking only loose files.
+- Preserve neighboring parameters, comments and braces when editing compact VMT documents.
+- Refresh decoded and persistent thumbnails without accepting stale background results.
+
+### Performance
+- Decode thumbnail previews from an appropriately sized existing VTF mipmap rather than always converting the full-resolution image.
+
+### Tests
+- Add 31 regression cases for persistence, parser edits, schema loading, VFS replies, mip selection and material save paths.
+
 ## [0.2.0] - 2026-10-20
 
 ### Added

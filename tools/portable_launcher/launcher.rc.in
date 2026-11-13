@@ -1,11 +1,11 @@
 #include <windows.h>
 
-1 ICON "../../ui/win32/app.ico"
-101 RCDATA "payload.zip"
+1 ICON "@VMTSTUDIO_LAUNCHER_ICON@"
+101 RCDATA "@VMTSTUDIO_PAYLOAD@"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     0,2,0,0
-PRODUCTVERSION  0,2,0,0
+FILEVERSION     @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+PRODUCTVERSION  @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS_NT_WINDOWS32
@@ -18,12 +18,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "VMT-Studio"
             VALUE "FileDescription",  "VMT-Studio Portable Launcher"
-            VALUE "FileVersion",      "0.2.0.0"
+            VALUE "FileVersion",      "@PROJECT_VERSION@.0"
             VALUE "InternalName",     "VMT-Studio-Portable"
             VALUE "LegalCopyright",   "Copyright (C) 2026"
-            VALUE "OriginalFilename", "VMT-Studio-v0.2.0-Portable.exe"
+            VALUE "OriginalFilename", "@VMTSTUDIO_LAUNCHER_OUTPUT@.exe"
             VALUE "ProductName",      "VMT-Studio"
-            VALUE "ProductVersion",   "0.2.0.0"
+            VALUE "ProductVersion",   "@PROJECT_VERSION@.0"
         END
     END
     BLOCK "VarFileInfo"
