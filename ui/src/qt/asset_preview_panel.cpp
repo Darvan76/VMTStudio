@@ -1,4 +1,5 @@
 #include "asset_preview_panel.h"
+#include "schema_resources.h"
 
 #include "ui/asset_index.h"
 #include "ui/material_info.h"
@@ -25,12 +26,6 @@
 #include <string>
 #include <thread>
 #include <utility>
-
-#ifndef VMT_SCHEMA_DIR
-// Only the vmtstudio target defines the schema location; an empty path makes
-// every shader unknown instead of breaking the build.
-#define VMT_SCHEMA_DIR ""
-#endif
 
 namespace ui {
 namespace qt {
@@ -106,18 +101,13 @@ QString format_texture_info(const vtf::VtfInfo& info) {
     return lines.join(QLatin1Char('\n'));
 }
 
-// Loaded once per process. A broken or missing data/schema does not fail the
-// preview: every shader is simply reported as having no schema.
+// Share the application's embedded library; a resource error must not prevent
+// texture previews from opening. MainWindow reports the diagnostic.
 const vmt::SchemaLibrary& schema_library() {
-    static const vmt::SchemaLibrary library = [] {
-        const vmt::Result<vmt::SchemaLibrary> loaded =
-            vmt::SchemaLibrary::load_dir(std::filesystem::path(VMT_SCHEMA_DIR));
-        if (loaded) {
-            return loaded.value();
-        }
-        return vmt::SchemaLibrary{};
-    }();
-    return library;
+    const auto& loaded = bundled_schemas();
+    if (loaded) return loaded.value();
+    static const vmt::SchemaLibrary empty;
+    return empty;
 }
 
 std::string to_lower(std::string text) {

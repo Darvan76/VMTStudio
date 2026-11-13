@@ -12,6 +12,7 @@
 #include "notification_popup.h"
 #include "app_updater.h"
 #include "update_dialog.h"
+#include "schema_resources.h"
 #include "ui/version.h"
 #include "ui/asset_index.h"
 #include "app_log.h"
@@ -202,15 +203,13 @@ MainWindow::MainWindow(QWidget* parent)
     loadSettings();
 
     // Load shader schemas
-#ifdef VMT_SCHEMA_DIR
-    auto library = vmt::SchemaLibrary::load_dir(std::filesystem::u8path(VMT_SCHEMA_DIR));
+    auto library = bundled_schemas();
     if (library) {
         m_schemas = std::move(library.value());
         log_write("APP ", "Loaded " + std::to_string(m_schemas.shader_names().size()) + " shader schemas");
     } else {
         log_write("WARN", "Failed to load schemas: " + library.error().message);
     }
-#endif
 
     // Setup preview sync timer
     m_previewSyncTimer = new QTimer(this);

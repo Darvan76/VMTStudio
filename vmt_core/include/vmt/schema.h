@@ -119,6 +119,11 @@ public:
     // (pass the file path when available).
     static Result<SchemaLibrary> load_json(std::string_view text, std::string source_name = {});
 
+    // Validate and append a schema supplied by a resource or another source.
+    // Duplicate shader names are rejected case-insensitively. On failure the
+    // existing library is unchanged; source_name labels diagnostics.
+    Result<void> add_json(std::string_view text, std::string source_name = {});
+
     // Case-insensitive lookup. Unknown shader names return an empty schema
     // (ShaderSchema::empty() == true); this is not an error.
     ShaderSchema schema_for(std::string_view shader_name) const;

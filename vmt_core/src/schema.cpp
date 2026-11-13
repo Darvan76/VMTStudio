@@ -449,6 +449,22 @@ Result<SchemaLibrary> SchemaLibrary::load_json(std::string_view text, std::strin
     return Ok(std::move(library));
 }
 
+Result<void> SchemaLibrary::add_json(std::string_view text, std::string source_name) {
+    Result<SchemaLibrary> loaded = load_json(text, source_name);
+    if (!loaded) return Err(loaded.error());
+
+    Entry& entry = loaded.value().schemas_.front();
+    const auto position = std::lower_bound(schemas_.begin(), schemas_.end(), entry.key,
+        [](const Entry& existing, const std::string& key) { return existing.key < key; });
+    if (position != schemas_.end() && position->key == entry.key) {
+        return Err(make_error(ErrorCode::SchemaValidationError,
+            "duplicate schema for shader '" + entry.schema.shader() + "'",
+            "Keep one schema per shader.", std::move(source_name)));
+    }
+    schemas_.insert(position, std::move(entry));
+    return Ok();
+}
+
 Result<SchemaLibrary> SchemaLibrary::load_dir(const std::filesystem::path& dir) {
     std::error_code ec;
     const bool is_dir = std::filesystem::is_directory(dir, ec);

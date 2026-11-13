@@ -3,4 +3,14 @@
     <file alias="app.png">icons/app.png</file>
     <file alias="app.ico">icons/app.ico</file>
 </qresource>
+<qresource prefix="/schemas">
+    <file alias="lightmappedgeneric.json">../../data/schema/lightmappedgeneric.json</file>
+    <file alias="refract.json">../../data/schema/refract.json</file>
+    <file alias="sprite.json">../../data/schema/sprite.json</file>
+    <file alias="unlitgeneric.json">../../data/schema/unlitgeneric.json</file>
+    <file alias="unlittwotexture.json">../../data/schema/unlittwotexture.json</file>
+    <file alias="vertexlitgeneric.json">../../data/schema/vertexlitgeneric.json</file>
+    <file alias="water.json">../../data/schema/water.json</file>
+    <file alias="worldvertextransition.json">../../data/schema/worldvertextransition.json</file>
+</qresource>
 </RCC>

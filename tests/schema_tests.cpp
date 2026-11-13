@@ -426,3 +426,47 @@ UT_TEST_CASE("schema: shipped advanced marks are booleans on known parameters") 
         UT_CHECK(seamless->advanced);
     }
 }
+
+UT_TEST_CASE("schema: resource JSON sources merge into one sorted library") {
+    vmt::SchemaLibrary library;
+    UT_CHECK(library.add_json(R"({"shader":"Zulu","groups":[]})", ":/schemas/z.json").ok());
+    UT_CHECK(library.add_json(R"({"shader":"Alpha","groups":[]})", ":/schemas/a.json").ok());
+    const std::vector<std::string> names = library.shader_names();
+    UT_CHECK_EQ(names.size(), std::size_t{2});
+    if (names.size() == 2) {
+        UT_CHECK_EQ(names[0], std::string("Alpha"));
+        UT_CHECK_EQ(names[1], std::string("Zulu"));
+    }
+    UT_CHECK(library.has_shader("ALPHA"));
+    UT_CHECK(library.has_shader("zulu"));
+}
+
+UT_TEST_CASE("schema: duplicate resource shader fails without replacing existing metadata") {
+    vmt::SchemaLibrary library;
+    const std::string original = R"({"shader":"Alpha","groups":[{"name":"Original","parameters":[]}]})";
+    UT_CHECK(library.add_json(original, ":/schemas/a.json").ok());
+    const auto duplicate = library.add_json(
+        R"({"shader":"aLPHa","groups":[]})", ":/schemas/duplicate.json");
+    UT_CHECK(!duplicate.ok());
+    if (!duplicate) {
+        UT_CHECK_EQ(duplicate.error().code, vmt::ErrorCode::SchemaValidationError);
+        UT_CHECK_EQ(duplicate.error().file, std::string(":/schemas/duplicate.json"));
+    }
+    UT_CHECK_EQ(library.shader_names().size(), std::size_t{1});
+    UT_CHECK(library.schema_for("Alpha").find_group("Original") != nullptr);
+}
+
+UT_TEST_CASE("schema: malformed resource errors retain path and location without partial mutation") {
+    vmt::SchemaLibrary library;
+    UT_CHECK(library.add_json(R"({"shader":"Alpha","groups":[]})", ":/schemas/a.json").ok());
+    const auto invalid = library.add_json("{\n  broken\n}", ":/schemas/broken.json");
+    UT_CHECK(!invalid.ok());
+    if (!invalid) {
+        UT_CHECK_EQ(invalid.error().code, vmt::ErrorCode::SchemaLoadError);
+        UT_CHECK_EQ(invalid.error().file, std::string(":/schemas/broken.json"));
+        UT_CHECK(invalid.error().line > 0);
+        UT_CHECK(invalid.error().column > 0);
+    }
+    UT_CHECK_EQ(library.shader_names().size(), std::size_t{1});
+    UT_CHECK(library.has_shader("Alpha"));
+}

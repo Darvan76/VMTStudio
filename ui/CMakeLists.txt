@@ -59,6 +59,8 @@ add_executable(vmtstudio WIN32
     src/main.cpp
     src/qt/main_window.h
     src/qt/main_window.cpp
+    src/qt/schema_resources.h
+    src/qt/schema_resources.cpp
     src/qt/viewport_widget.h
     src/qt/viewport_widget.cpp
     src/qt/vmt_highlighter.h
@@ -99,10 +101,6 @@ add_executable(vmtstudio WIN32
 target_include_directories(vmtstudio PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
-)
-
-target_compile_definitions(vmtstudio PRIVATE
-    VMT_SCHEMA_DIR="${CMAKE_SOURCE_DIR}/data/schema"
 )
 
 # Manifest and icon configuration
