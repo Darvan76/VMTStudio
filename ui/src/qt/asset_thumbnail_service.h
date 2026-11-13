@@ -147,9 +147,9 @@ public:
     // plus every user folder. Copied on assignment.
     void setSearchRoots(std::vector<std::filesystem::path> roots);
 
-    // Drops queued work (generation bump) and forgets what failed, without
-    // discarding the decoded pixmaps. Used after a scan and when the engine or
-    // the game changes.
+    // Drops queued work (generation bump), decoded pixmaps and failed paths.
+    // Used after a scan or engine change: an unchanged virtual path does not
+    // mean the asset's bytes are unchanged.
     void invalidate();
 
     // Generation bump plus a full clear: a different game must not show the

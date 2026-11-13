@@ -429,7 +429,9 @@ void AssetThumbnailService::setGame(std::shared_ptr<AssetPack> pack,
     }
     m_pack = std::move(pack);
     m_generated = generated;
-    m_failed.clear();
+    // Results from another pack/generation must not be delivered under the
+    // current game's virtual paths, even if the owner did not call reset().
+    reset();
 }
 
 void AssetThumbnailService::setSearchRoots(std::vector<std::filesystem::path> roots) {
@@ -437,12 +439,10 @@ void AssetThumbnailService::setSearchRoots(std::vector<std::filesystem::path> ro
 }
 
 void AssetThumbnailService::invalidate() {
-    // Queued jobs stop early; already delivered pictures stay (their paths did
-    // not change), but a path that failed during the scan gets another chance.
-    m_shared->generation.fetch_add(1);
-    m_failed.clear();
-    m_inflight.clear();
-    emit pendingChanged(0);
+    // A path can stay the same while its texture content changes. Keeping a
+    // pixmap here would make request() bypass the refreshed disk signature,
+    // so Refresh must discard decoded pictures as well as queued jobs.
+    reset();
 }
 
 void AssetThumbnailService::reset() {
