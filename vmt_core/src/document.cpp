@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -182,7 +183,7 @@ bool next_significant_is_lbrace(const std::string& s, std::size_t from) {
 
 std::size_t line_start_of(const std::string& s, std::size_t off) {
     if (off > s.size()) off = s.size();
-    while (off > 0 && s[off - 1] != '\n') --off;
+    while (off > 0 && s[off - 1] != '\n' && s[off - 1] != '\r') --off;
     return off;
 }
 
@@ -537,7 +538,8 @@ Result<void> Document::replace_value(const Node& node, std::string_view value_te
 }
 
 Result<void> Document::insert_parameter(std::string_view name, std::string_view value_text) {
-    if (body_close_brace_.length == 0) {
+    if (body_close_brace_.length != 1 || body_close_brace_.offset >= buffer_.size() ||
+        buffer_[body_close_brace_.offset] != '}') {
         return Err(make_error(ErrorCode::ParseError,
             "cannot add a parameter: the shader body has no closing brace",
             "Fix the malformed material or add the parameter manually", name_, 0, 0));
@@ -568,6 +570,25 @@ Result<void> Document::insert_parameter(std::string_view name, std::string_view 
     const std::size_t at = line_start_of(buffer_, close);
     const std::string key_tok = format_key(name, quoted);
     const std::string val_tok = format_value_token(value_text, quoted);
+    const bool closing_line_is_indented = std::all_of(
+        buffer_.begin() + static_cast<std::ptrdiff_t>(at),
+        buffer_.begin() + static_cast<std::ptrdiff_t>(close),
+        [](char c) { return detail::is_hspace(c); });
+
+    if (!closing_line_is_indented) {
+        // A compact material or a closing brace sharing a parameter's line:
+        // inserting at the start of that line would escape the shader body.
+        std::string insertion;
+        if (close > 0 && !detail::is_hspace(buffer_[close - 1])) insertion.push_back(' ');
+        insertion.append(key_tok);
+        insertion.append(sep);
+        insertion.append(val_tok);
+        insertion.push_back(' ');
+        buffer_.insert(close, insertion);
+        reparse();
+        return Ok();
+    }
+
     std::string line;
     line.reserve(indent.size() + key_tok.size() + sep.size() + val_tok.size() + eol.size());
     line.append(indent);
@@ -598,17 +619,43 @@ Result<void> Document::remove_parameter(std::string_view name) {
         return Err(make_error(ErrorCode::NotFound, "parameter '" + std::string(name) + "' not found"));
     }
 
-    const std::size_t ls = line_start_of(buffer_, n->span_.offset);
-    std::size_t erase_start = ls;
-    for (std::size_t i = ls; i < n->span_.offset; ++i) {
-        if (!detail::is_hspace(buffer_[i])) { erase_start = n->span_.offset; break; }
+    const std::size_t start = n->span_.offset;
+    const std::size_t end = n->span_.end();
+    const std::size_t ls = line_start_of(buffer_, start);
+    std::size_t line_end = end;
+    while (line_end < buffer_.size() && buffer_[line_end] != '\n' && buffer_[line_end] != '\r') ++line_end;
+
+    const bool owns_line_prefix = std::all_of(
+        buffer_.begin() + static_cast<std::ptrdiff_t>(ls),
+        buffer_.begin() + static_cast<std::ptrdiff_t>(start),
+        [](char c) { return detail::is_hspace(c); });
+
+    // Keep the established whole-line deletion for a standalone parameter,
+    // including its trailing comment. Never consume another parameter, block,
+    // closing brace, or a comment spanning multiple lines.
+    bool owns_line_suffix = true;
+    TokenStream suffix(buffer_, end);
+    while (suffix.peek().span.offset < line_end) {
+        const Token& token = suffix.peek();
+        if (token.kind != Token::Kind::Comment || !token.block_comment_terminated ||
+            token.span.end() > line_end) {
+            owns_line_suffix = false;
+            break;
+        }
+        suffix.take();
     }
 
-    std::size_t erase_end = n->span_.end();
-    while (erase_end < buffer_.size() && buffer_[erase_end] != '\n' && buffer_[erase_end] != '\r') ++erase_end;
-    if (erase_end < buffer_.size()) {
-        if (buffer_[erase_end] == '\r' && erase_end + 1 < buffer_.size() && buffer_[erase_end + 1] == '\n') erase_end += 2;
-        else erase_end += 1;
+    std::size_t erase_start = start;
+    std::size_t erase_end = end;
+    if (owns_line_prefix && owns_line_suffix) {
+        erase_start = ls;
+        erase_end = line_end;
+        if (erase_end < buffer_.size()) {
+            if (buffer_[erase_end] == '\r' && erase_end + 1 < buffer_.size() && buffer_[erase_end + 1] == '\n') erase_end += 2;
+            else erase_end += 1;
+        }
+    } else {
+        while (erase_end < buffer_.size() && detail::is_hspace(buffer_[erase_end])) ++erase_end;
     }
 
     buffer_.erase(erase_start, erase_end - erase_start);

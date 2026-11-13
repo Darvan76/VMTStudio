@@ -489,3 +489,99 @@ UT_TEST_CASE("set_shader: refuses a document that has no shader name") {
         UT_CHECK(result.error().code == vmt::ErrorCode::ParseError);
     }
 }
+
+UT_TEST_CASE("edit: a compact material keeps inserted parameters inside its body") {
+    for (const std::string& input : {
+             std::string("\"UnlitGeneric\" {}"),
+             std::string("\"UnlitGeneric\" { \"$basetexture\" \"a/b\" }"),
+             std::string("UnlitGeneric { $basetexture a/b}"),
+             std::string("UnlitGeneric\r\n{\r\n\t$basetexture a/b }\r\n")}) {
+        auto parsed = vmt::Document::parse(input);
+        UT_CHECK(parsed.ok());
+        if (!parsed) continue;
+        vmt::Document& doc = parsed.value();
+        UT_CHECK(doc.diagnostics().empty());
+        UT_CHECK(doc.set_parameter("$surfaceprop", "metal").ok());
+        UT_CHECK(doc.diagnostics().empty());
+        UT_CHECK_EQ(std::string(doc.shader()), std::string("UnlitGeneric"));
+        UT_CHECK(doc.has("$surfaceprop"));
+        if (doc.find("$surfaceprop") != nullptr) {
+            UT_CHECK_EQ(std::string(doc.find("$surfaceprop")->value()), std::string("metal"));
+        }
+        if (input.find("$basetexture") != std::string::npos) UT_CHECK(doc.has("$basetexture"));
+        UT_CHECK_EQ(std::count(doc.source().begin(), doc.source().end(), '\n'),
+                    std::count(input.begin(), input.end(), '\n'));
+    }
+}
+
+UT_TEST_CASE("edit: compact insertion preserves comments and CRLF") {
+    auto parsed = vmt::Document::parse(
+        "\"UnlitGeneric\"\r\n{\r\n\t\"$basetexture\" \"a/b\" /* keep */ } // end\r\n");
+    UT_CHECK(parsed.ok());
+    if (!parsed) return;
+    vmt::Document& doc = parsed.value();
+    UT_CHECK(doc.set_parameter("$surfaceprop", "metal").ok());
+    UT_CHECK_EQ(doc.source(), std::string(
+        "\"UnlitGeneric\"\r\n{\r\n\t\"$basetexture\" \"a/b\" /* keep */ \"$surfaceprop\" \"metal\" } // end\r\n"));
+    UT_CHECK(doc.diagnostics().empty());
+}
+
+UT_TEST_CASE("remove: compact parameters never consume neighbors or the closing brace") {
+    for (const char* key : {"$a", "$b", "$c"}) {
+        auto parsed = vmt::Document::parse("UnlitGeneric { $a 1 $b 2 $c 3 }");
+        UT_CHECK(parsed.ok());
+        if (!parsed) continue;
+        vmt::Document& doc = parsed.value();
+        UT_CHECK(doc.remove_parameter(key).ok());
+        UT_CHECK(doc.diagnostics().empty());
+        UT_CHECK(!doc.has(key));
+        UT_CHECK_EQ(doc.parameters().size(), std::size_t{2});
+        for (const char* other : {"$a", "$b", "$c"}) {
+            if (std::string(other) != key) UT_CHECK(doc.has(other));
+        }
+        UT_CHECK_EQ(doc.source().back(), '}');
+    }
+}
+
+UT_TEST_CASE("remove: a parameter sharing the closing line preserves comments and CRLF") {
+    auto parsed = vmt::Document::parse(
+        "UnlitGeneric\r\n{\r\n\t$a 1 /* keep */ $b 2 } // end\r\n");
+    UT_CHECK(parsed.ok());
+    if (!parsed) return;
+    vmt::Document& doc = parsed.value();
+    UT_CHECK(doc.remove_parameter("$a").ok());
+    UT_CHECK_EQ(doc.source(), std::string(
+        "UnlitGeneric\r\n{\r\n\t/* keep */ $b 2 } // end\r\n"));
+    UT_CHECK(doc.remove_parameter("$b").ok());
+    UT_CHECK_EQ(doc.source(), std::string(
+        "UnlitGeneric\r\n{\r\n\t/* keep */ } // end\r\n"));
+    UT_CHECK(doc.diagnostics().empty());
+}
+
+UT_TEST_CASE("remove: a multiline block comment is preserved after a parameter") {
+    auto parsed = vmt::Document::parse(
+        "UnlitGeneric\n{\n\t$a 1 /* keep\ncomment */\n\t$b 2\n}\n");
+    UT_CHECK(parsed.ok());
+    if (!parsed) return;
+    vmt::Document& doc = parsed.value();
+    UT_CHECK(doc.remove_parameter("$a").ok());
+    UT_CHECK_EQ(doc.source(), std::string(
+        "UnlitGeneric\n{\n\t/* keep\ncomment */\n\t$b 2\n}\n"));
+    UT_CHECK(doc.diagnostics().empty());
+    UT_CHECK(doc.has("$b"));
+}
+
+UT_TEST_CASE("edit: insertion refuses a missing outer closing brace without changing text") {
+    for (const std::string& input : {
+             std::string("UnlitGeneric { $a 1"),
+             std::string("UnlitGeneric { Proxies { Sine { resultvar $alpha } }"),
+             std::string("UnlitGeneric\n{\n\t$a 1\n// }\n")}) {
+        auto parsed = vmt::Document::parse(input);
+        UT_CHECK(parsed.ok());
+        if (!parsed) continue;
+        vmt::Document& doc = parsed.value();
+        UT_CHECK(!doc.diagnostics().empty());
+        UT_CHECK(!doc.set_parameter("$b", "2").ok());
+        UT_CHECK_EQ(doc.source(), input);
+    }
+}
