@@ -20,6 +20,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <system_error>
 #include <utility>
 
@@ -151,6 +152,9 @@ namespace qt {
 
 struct ThumbnailShared {
     std::atomic<int> generation{0};
+    // Couples the final generation check with cache writes. A scan can bump
+    // the generation before purging the pack without an older job repopulating it.
+    std::mutex cache_write_mutex;
     // Not named `slots`: moc treats that identifier as the Qt access keyword.
     std::shared_ptr<QSemaphore> semaphore = std::make_shared<QSemaphore>(kMaxConcurrent);
     std::shared_ptr<ThumbnailDispatcher> dispatcher = std::make_shared<ThumbnailDispatcher>();
@@ -201,12 +205,14 @@ public:
         const bool from_cache = !image.isNull();
         if (!from_cache) {
             image = decode(retryable);
-            if (!image.isNull() && m_pack &&
-                m_shared->generation.load() == m_generation) {
+            if (!image.isNull() && m_pack) {
                 // Best effort: a read-only or full disk only costs a re-decode.
                 std::vector<unsigned char> png;
                 if (encode_thumbnail_png(image, png)) {
-                    (void)m_pack->put(ui::kAssetPackTagThumb, key, png, false);
+                    const std::lock_guard<std::mutex> guard(m_shared->cache_write_mutex);
+                    if (m_shared->generation.load() == m_generation) {
+                        (void)m_pack->put(ui::kAssetPackTagThumb, key, png, false);
+                    }
                 }
             }
         }
@@ -446,7 +452,10 @@ void AssetThumbnailService::invalidate() {
 }
 
 void AssetThumbnailService::reset() {
-    m_shared->generation.fetch_add(1);
+    {
+        const std::lock_guard<std::mutex> guard(m_shared->cache_write_mutex);
+        m_shared->generation.fetch_add(1);
+    }
     m_pixels.clear();
     m_inflight.clear();
     m_failed.clear();

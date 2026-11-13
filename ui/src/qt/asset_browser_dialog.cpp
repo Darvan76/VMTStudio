@@ -463,12 +463,17 @@ AssetScanOutcome scan_worker(bridge::EngineView* engine, bool engine_ready,
         const std::vector<unsigned char> bytes(data.begin(), data.end());
         if (!pack->put(ui::kAssetPackTagMeta, "index", bytes, true)) {
             ui::log_write("assets", "asset pack index write failed");
-        } else {
-            // Refresh means the old pictures may describe files that changed or
-            // disappeared. They are regenerated lazily on the new generation.
-            (void)pack->remove_tag(ui::kAssetPackTagThumb);
-            (void)pack->remove_tag(ui::kAssetPackTagModel);
         }
+    }
+
+    // A folder-only Refresh can change the texture used by an unchanged VMT.
+    // Its VMT timestamp is insufficient as a thumbnail key, so invalidate the
+    // persisted pictures after every scan, even when no engine index was saved.
+    // startScan() has already stopped older thumbnail generations. Keep this
+    // work here: remove_tag() can compact the pack and must stay off the UI thread.
+    if (pack && pack->is_open()) {
+        (void)pack->remove_tag(ui::kAssetPackTagThumb);
+        (void)pack->remove_tag(ui::kAssetPackTagModel);
     }
 
     outcome.pack = std::move(pack);
@@ -1124,6 +1129,7 @@ void AssetBrowserDialog::startScan(const std::shared_ptr<ui::AssetIndex>& base) 
 
     const int generation = ++m_scanGeneration;
     m_scanRunning = true;
+    m_thumbnails->invalidate();
     updateRefreshState();
     updateStatus();
 
@@ -1441,6 +1447,9 @@ void AssetBrowserDialog::scheduleThumbnailPump() {
 }
 
 void AssetBrowserDialog::requestVisibleThumbnails() {
+    if (m_scanRunning) {
+        return; // the scan worker is invalidating the persisted thumbnail cache
+    }
     if (m_index == nullptr || m_index->empty() || m_views->currentWidget() == m_emptyPage) {
         return;
     }
