@@ -1,4 +1,5 @@
 #include "ui/session.h"
+#include "ui/atomic_file.h"
 
 #include <chrono>
 #include <fstream>
@@ -224,9 +225,20 @@ vmt::Result<void> EditorSession::apply_parsed(std::string text, const std::strin
 
     document_ = std::make_unique<vmt::Document>(std::move(parsed.value()));
     text_ = document_->source();
-    valid_ = true;
-    last_error_ = vmt::Error{};
+    update_parse_status();
     return vmt::Ok();
+}
+
+void EditorSession::update_parse_status() {
+    valid_ = document_ != nullptr && document_->diagnostics().empty();
+    if (valid_) {
+        last_error_ = vmt::Error{};
+    } else if (document_ != nullptr && !document_->diagnostics().empty()) {
+        const vmt::Diagnostic& diagnostic = document_->diagnostics().front();
+        last_error_ = vmt::make_error(
+            diagnostic.code, diagnostic.message, "Fix the syntax error in the VMT text",
+            document_->name(), diagnostic.location.line, diagnostic.location.column);
+    }
 }
 
 vmt::Result<void> EditorSession::set_parameter(std::string_view name, std::string_view value_text) {
@@ -252,7 +264,7 @@ vmt::Result<void> EditorSession::set_parameter(std::string_view name, std::strin
     redo_stack_.clear();
     coalesce_text_edit_ = false;
     text_ = document_->source();
-    last_error_ = vmt::Error{};
+    update_parse_status();
     return vmt::Ok();
 }
 
@@ -277,7 +289,7 @@ vmt::Result<void> EditorSession::set_shader(std::string_view name) {
     redo_stack_.clear();
     coalesce_text_edit_ = false;
     text_ = document_->source();
-    last_error_ = vmt::Error{};
+    update_parse_status();
     return vmt::Ok();
 }
 
@@ -376,52 +388,10 @@ vmt::Result<void> EditorSession::save_as(const std::filesystem::path& path) {
         return vmt::Err<void>(error);
     }
 
-    // Write to a sibling temp file, then rename over the target: a crash or a
-    // full disk cannot leave a truncated VMT behind. Windows rename does not
-    // replace an existing file, hence the remove + retry.
-    std::filesystem::path temp = path;
-    temp += L".tmp";
-    {
-        std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
-        if (!stream) {
-            vmt::Error error = io_error("cannot write the VMT file: " + path.string(), path);
-            last_error_ = error;
-            return vmt::Err<void>(error);
-        }
-        if (!text_.empty()) {
-            stream.write(text_.data(), static_cast<std::streamsize>(text_.size()));
-        }
-        if (!stream) {
-            vmt::Error error = io_error("failed while writing the VMT file: " + path.string(), path);
-            std::error_code ignored;
-            std::filesystem::remove(temp, ignored);
-            last_error_ = error;
-            return vmt::Err<void>(error);
-        }
-        stream.close();
-        if (!stream) {
-            vmt::Error error = io_error("failed to close the VMT file: " + path.string(), path);
-            std::error_code ignored;
-            std::filesystem::remove(temp, ignored);
-            last_error_ = error;
-            return vmt::Err<void>(error);
-        }
-    }
-
-    std::error_code ec;
-    std::filesystem::rename(temp, path, ec);
-    if (ec) {
-        std::error_code ignored;
-        std::filesystem::remove(path, ignored);
-        ec.clear();
-        std::filesystem::rename(temp, path, ec);
-    }
-    if (ec) {
-        vmt::Error error = io_error("cannot replace the VMT file: " + path.string(), path);
-        std::error_code ignored;
-        std::filesystem::remove(temp, ignored);
-        last_error_ = error;
-        return vmt::Err<void>(error);
+    const vmt::Result<void> written = atomic_write_file(path, text_);
+    if (!written) {
+        last_error_ = written.error();
+        return written;
     }
 
     path_ = path;
@@ -445,9 +415,6 @@ std::string EditorSession::display_name() const {
 }
 
 bool EditorSession::dirty() const noexcept {
-    if (!valid_ && !text_.empty()) {
-        return true; // unparsed text is unsaved work
-    }
     return text_ != saved_text_;
 }
 

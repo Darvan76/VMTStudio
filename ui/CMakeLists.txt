@@ -12,6 +12,7 @@ endif()
 # settings, validation, material browser, thumbnails).
 add_library(ui STATIC
     src/ui.cpp
+    src/atomic_file.cpp
     src/session.cpp
     src/panel_model.cpp
     src/settings.cpp

@@ -2,6 +2,7 @@
 
 #include "bridge/engine_view.h"
 #include "ui/export_plan.h"
+#include "ui/atomic_file.h"
 
 #include <QAbstractItemView>
 #include <QCheckBox>
@@ -24,7 +25,6 @@
 #include <QVBoxLayout>
 
 #include <cstddef>
-#include <fstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -73,51 +73,15 @@ QString native_path(const std::filesystem::path& path) {
     return QString::fromStdWString(path.wstring());
 }
 
-// Writes `text` to `path` through a sibling ".tmp" file followed by a rename,
-// mirroring EditorSession::save_as(): a crash or a full disk never leaves a
-// truncated .vmt behind, and an existing file is only replaced once the new
-// file is complete. Returns false and fills `error` on failure.
+// Use the same checked write/replace operation as the editor and preview.
 bool write_file_atomically(const std::filesystem::path& path, const std::string& text,
                            std::string& error) {
-    std::filesystem::path temp = path;
-    temp += L".tmp";
-    {
-        std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
-        if (!stream) {
-            error = "cannot open the temporary file for writing";
-            return false;
+    const vmt::Result<void> written = ui::atomic_write_file(path, text);
+    if (!written) {
+        error = written.error().message;
+        if (!written.error().detail.empty()) {
+            error += ": " + written.error().detail;
         }
-        if (!text.empty()) {
-            stream.write(text.data(), static_cast<std::streamsize>(text.size()));
-        }
-        if (!stream) {
-            error = "failed while writing the file";
-            std::error_code ignored;
-            std::filesystem::remove(temp, ignored);
-            return false;
-        }
-        stream.close();
-        if (!stream) {
-            error = "failed to close the file";
-            std::error_code ignored;
-            std::filesystem::remove(temp, ignored);
-            return false;
-        }
-    }
-
-    std::error_code ec;
-    std::filesystem::rename(temp, path, ec);
-    if (ec) {
-        // Windows rename does not replace an existing file; remove and retry.
-        std::error_code ignored;
-        std::filesystem::remove(path, ignored);
-        ec.clear();
-        std::filesystem::rename(temp, path, ec);
-    }
-    if (ec) {
-        error = "cannot replace the existing file: " + ec.message();
-        std::error_code ignored;
-        std::filesystem::remove(temp, ignored);
         return false;
     }
     return true;

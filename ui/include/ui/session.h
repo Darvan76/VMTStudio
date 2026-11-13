@@ -3,10 +3,11 @@
 // ui session - headless editing state shared by the parameter panel and the
 // raw text editor. This header is Windows-free and can be unit tested.
 //
-// Invariant: `text()` is always the exact buffer the user sees. When it parses,
-// `document()` is valid and `text() == document()->source()`; when it does not,
-// the last good document is kept (for the panel) and `text_is_valid()` is
-// false so saving is refused until the syntax is fixed.
+// Invariant: `text()` is always the exact buffer the user sees. The parser
+// recovers malformed documents, so `document()` can carry syntax diagnostics.
+// `text_is_valid()` is false while those diagnostics exist; saving and visual
+// edits are refused until the syntax is fixed. The current parse tree remains
+// available for displaying diagnostics.
 
 #include "vmt/document.h"
 #include "vmt/result.h"
@@ -46,13 +47,13 @@ public:
     // example): `text` is the VMT source and `display_name` the label shown in
     // the title bar ("brick/brickwall001a.vmt"). The session has no save
     // target, so Save falls back to Save As; the engine preview still writes
-    // the edited copy to the preview override path. On parse failure the
-    // previous session is kept.
+    // the edited copy to the preview override path. Recoverable syntax errors
+    // open successfully and are exposed by text_is_valid()/last_error().
     vmt::Result<void> open_text(std::string text, std::string display_name);
 
-    // Replaces the session with a document parsed from text. On parse failure
-    // nothing changes except last_error(): the previous document is kept and
-    // the text is remembered so the editor never loses the user's input.
+    // Replaces the session with a document parsed from text. Recoverable syntax
+    // diagnostics return success, retain the exact text and set text_is_valid()
+    // false; the user can repair or undo incomplete typing states.
     vmt::Result<void> set_text(std::string text, std::string name = {});
 
     // Single-parameter edit coming from the parameter panel. The document
@@ -92,7 +93,7 @@ public:
     bool has_document() const noexcept { return document_ != nullptr; }
     bool text_is_valid() const noexcept { return valid_; }
 
-    // Null until the first successful parse.
+    // Null until the first successful parse; may contain syntax diagnostics.
     const vmt::Document* document() const noexcept { return document_.get(); }
     const std::string& text() const noexcept { return text_; }
     const std::filesystem::path& path() const noexcept { return path_; }
@@ -104,7 +105,7 @@ public:
     std::string display_name() const;
     bool dirty() const noexcept;
 
-    // Error from the most recent failed operation; code == Ok when none.
+    // Error from the most recent failed operation or current parse diagnostics.
     const vmt::Error& last_error() const noexcept { return last_error_; }
 
 private:
@@ -112,6 +113,7 @@ private:
     static constexpr std::chrono::milliseconds kTypingCoalesce{ 800 };
 
     vmt::Result<void> apply_parsed(std::string text, const std::string& name, bool keep_text_on_error);
+    void update_parse_status();
     void push_undo(std::string text);
     vmt::Result<void> restore(std::string text);
     void clear_history();

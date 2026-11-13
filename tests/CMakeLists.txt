@@ -54,6 +54,7 @@ add_test(NAME vtf_tests COMMAND vtf_tests)
 add_executable(ui_tests
     test_main.cpp
     ui_tests.cpp
+    session_safety_tests.cpp
 )
 
 target_include_directories(ui_tests PRIVATE

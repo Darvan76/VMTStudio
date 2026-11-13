@@ -1,9 +1,10 @@
 #include "ui/settings.h"
+#include "ui/atomic_file.h"
 
 #include <algorithm>
 #include <fstream>
+#include <sstream>
 #include <string>
-#include <system_error>
 
 namespace ui {
 
@@ -93,69 +94,38 @@ bool UISettings::save(const std::filesystem::path& file) const {
         return false;
     }
 
-    std::filesystem::path temp = file;
-    temp += L".tmp";
-
-    {
-        std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
-        if (!stream) {
-            return false;
-        }
-
-        stream << "show_advanced=" << (show_advanced ? 1 : 0) << "\n";
-        stream << "last_bin_dir=" << last_bin_dir << "\n";
-        stream << "last_game_dir=" << last_game_dir << "\n";
-        stream << "preview_shape=" << preview_shape << "\n";
-        stream << "preview_environment=" << preview_environment << "\n";
-        stream << "preview_rig=" << preview_rig << "\n";
-        stream << "browser_root=" << browser_root << "\n";
-        stream << "browser_scan_game=" << (browser_scan_game ? 1 : 0) << "\n";
-        stream << "thumbnail_flip=" << (thumbnail_flip ? 1 : 0) << "\n";
-        stream << "window_width=" << window_width << "\n";
-        stream << "window_height=" << window_height << "\n";
-        stream << "splitter_sizes=" << splitter_sizes << "\n";
-        stream << "validation_dock_visible=" << (validation_dock_visible ? 1 : 0) << "\n";
-        stream << "last_model=" << last_model << "\n";
-        stream << "asset_kind=" << asset_kind << "\n";
-        stream << "asset_source=" << asset_source << "\n";
-        stream << "asset_grid=" << (asset_grid ? 1 : 0) << "\n";
-        stream << "asset_sort=" << asset_sort << "\n";
-        stream << "asset_geometry=" << asset_geometry << "\n";
-        for (const std::string& folder : asset_folders) {
-            stream << "asset_folders=" << folder << "\n";
-        }
-        stream << "ignored_update_version=" << ignored_update_version << "\n";
-        stream << "check_for_updates=" << (check_for_updates ? 1 : 0) << "\n";
-        for (const std::string& recent : recent_files) {
-            stream << "recent=" << recent << "\n";
-        }
-        for (const std::string& model : recent_models) {
-            stream << "recent_models=" << model << "\n";
-        }
-        stream.close();
-        if (!stream) {
-            std::error_code ignored;
-            std::filesystem::remove(temp, ignored);
-            return false;
-        }
+    std::ostringstream stream;
+    stream << "show_advanced=" << (show_advanced ? 1 : 0) << "\n";
+    stream << "last_bin_dir=" << last_bin_dir << "\n";
+    stream << "last_game_dir=" << last_game_dir << "\n";
+    stream << "preview_shape=" << preview_shape << "\n";
+    stream << "preview_environment=" << preview_environment << "\n";
+    stream << "preview_rig=" << preview_rig << "\n";
+    stream << "browser_root=" << browser_root << "\n";
+    stream << "browser_scan_game=" << (browser_scan_game ? 1 : 0) << "\n";
+    stream << "thumbnail_flip=" << (thumbnail_flip ? 1 : 0) << "\n";
+    stream << "window_width=" << window_width << "\n";
+    stream << "window_height=" << window_height << "\n";
+    stream << "splitter_sizes=" << splitter_sizes << "\n";
+    stream << "validation_dock_visible=" << (validation_dock_visible ? 1 : 0) << "\n";
+    stream << "last_model=" << last_model << "\n";
+    stream << "asset_kind=" << asset_kind << "\n";
+    stream << "asset_source=" << asset_source << "\n";
+    stream << "asset_grid=" << (asset_grid ? 1 : 0) << "\n";
+    stream << "asset_sort=" << asset_sort << "\n";
+    stream << "asset_geometry=" << asset_geometry << "\n";
+    for (const std::string& folder : asset_folders) {
+        stream << "asset_folders=" << folder << "\n";
     }
-
-    // Rename over the target so a crash cannot truncate the live file. On
-    // Windows rename fails when the target exists, hence the remove + retry.
-    std::error_code ec;
-    std::filesystem::rename(temp, file, ec);
-    if (ec) {
-        std::error_code ignored;
-        std::filesystem::remove(file, ignored);
-        ec.clear();
-        std::filesystem::rename(temp, file, ec);
+    stream << "ignored_update_version=" << ignored_update_version << "\n";
+    stream << "check_for_updates=" << (check_for_updates ? 1 : 0) << "\n";
+    for (const std::string& recent : recent_files) {
+        stream << "recent=" << recent << "\n";
     }
-    if (ec) {
-        std::error_code ignored;
-        std::filesystem::remove(temp, ignored);
-        return false;
+    for (const std::string& model : recent_models) {
+        stream << "recent_models=" << model << "\n";
     }
-    return true;
+    return stream.good() && atomic_write_file(file, stream.str()).ok();
 }
 
 void UISettings::remember_file(const std::string& path) {

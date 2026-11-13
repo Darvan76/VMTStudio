@@ -243,18 +243,19 @@ UT_TEST_CASE("ui session: a text edit reparses and updates the document") {
 UT_TEST_CASE("ui session: malformed text stays lossless and reports diagnostics") {
     ui::EditorSession session;
     UT_CHECK(session.open_file(data_path("malformed.vmt")).ok());
-    UT_CHECK(session.text_is_valid());
+    UT_CHECK(!session.text_is_valid());
     UT_CHECK(session.document() != nullptr);
     if (session.document() != nullptr) {
         UT_CHECK(!session.document()->diagnostics().empty());
     }
     UT_CHECK_EQ(session.text(), read_all(data_path("malformed.vmt")));
 
-    // Saving malformed-but-recoverable input must stay byte-lossless.
+    // Recoverable input remains editable, but cannot overwrite a valid file.
     const fs::path dir = fresh_temp_dir();
     const fs::path out = dir / "malformed_out.vmt";
-    UT_CHECK(session.save_as(out).ok());
-    UT_CHECK_EQ(read_all(out), session.text());
+    UT_CHECK(!session.save_as(out).ok());
+    UT_CHECK(!fs::exists(out));
+    UT_CHECK_EQ(session.text(), read_all(data_path("malformed.vmt")));
 }
 
 UT_TEST_CASE("ui session: save writes exactly the session text") {

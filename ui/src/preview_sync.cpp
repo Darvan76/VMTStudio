@@ -1,6 +1,6 @@
 #include "ui/preview_sync.h"
+#include "ui/atomic_file.h"
 
-#include <fstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -31,6 +31,16 @@ bool safe_material_relative_path(const std::string& material_name, std::string& 
     if (material_name.empty()) {
         error = "empty material name";
         return false;
+    }
+    if (material_name.front() == '/' || material_name.front() == '\\') {
+        error = "material name must be relative to materials/";
+        return false;
+    }
+    for (const unsigned char c : material_name) {
+        if (c < 32) {
+            error = "material name contains a control character";
+            return false;
+        }
     }
     if (material_name.find(':') != std::string::npos ||
         material_name.find('*') != std::string::npos ||
@@ -108,8 +118,6 @@ vmt::Result<void> write_preview_material_at(const std::filesystem::path& root,
     const std::filesystem::path materials = root / L"materials";
     std::filesystem::path target = materials / relative_path;
     target += L".vmt";
-    std::filesystem::path temp = target;
-    temp += L".tmp";
 
     std::error_code ec;
     std::filesystem::create_directories(target.parent_path(), ec);
@@ -119,37 +127,7 @@ vmt::Result<void> write_preview_material_at(const std::filesystem::path& root,
             "the preview folder could not be created: " + target.parent_path().string()));
     }
 
-    {
-        std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
-        if (!stream) {
-            return vmt::Err<void>(preview_error(
-                vmt::ErrorCode::IoError,
-                "the preview material could not be written: " + temp.string()));
-        }
-        if (!text.empty()) {
-            stream.write(text.data(), static_cast<std::streamsize>(text.size()));
-        }
-        stream.close();
-        if (!stream) {
-            std::error_code ignored;
-            std::filesystem::remove(temp, ignored);
-            return vmt::Err<void>(preview_error(
-                vmt::ErrorCode::IoError,
-                "the preview material could not be written: " + temp.string()));
-        }
-    }
-
-    std::filesystem::remove(target, ec);
-    ec.clear();
-    std::filesystem::rename(temp, target, ec);
-    if (ec) {
-        std::error_code ignored;
-        std::filesystem::remove(temp, ignored);
-        return vmt::Err<void>(preview_error(
-            vmt::ErrorCode::IoError,
-            "the preview material could not be replaced: " + target.string()));
-    }
-    return vmt::Ok();
+    return atomic_write_file(target, text);
 }
 
 void PreviewSync::configure(WriteFn write, ReloadFn reload) {
