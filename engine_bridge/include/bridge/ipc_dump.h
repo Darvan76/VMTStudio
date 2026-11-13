@@ -25,6 +25,10 @@ vmt::Result<ModelList> parse_models_dump(const std::string& text);
 // Parses an "assets" dump (files under the requested roots, loose or VPK).
 vmt::Result<AssetList> parse_assets_dump(const std::string& text);
 
+// Parses an "exists" dump. A missing/malformed result is an error, never a
+// negative lookup: the caller must distinguish unavailable VFS from absence.
+vmt::Result<bool> parse_exists_dump(const std::string& text);
+
 // Parses a "model_scene" dump.
 vmt::Result<ModelScene> parse_model_scene_dump(const std::string& text);
 

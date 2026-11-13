@@ -952,6 +952,43 @@ static void BuildAnimStateDump(std::string& text, std::string& error)
 // Job execution
 //-----------------------------------------------------------------------------
 
+static void BuildExistsDump(const std::string& args, std::string& text, std::string& error)
+{
+	if (!g_pFileSystem)
+	{
+		error = "file system is not available";
+		return;
+	}
+	const std::string path = FixSlashes(Trimmed(args));
+	if (path.empty() || std::any_of(path.begin(), path.end(), [](unsigned char c) {
+		return c < 32 || c == 127;
+	}))
+	{
+		error = "exists requires a game-relative file path";
+		return;
+	}
+	const std::filesystem::path relative = std::filesystem::u8path(path);
+	if (relative.has_root_path())
+	{
+		error = "exists requires a game-relative file path";
+		return;
+	}
+	for (const std::filesystem::path& part : relative)
+	{
+		if (part == "..")
+		{
+			error = "exists path must stay inside the game paths";
+			return;
+		}
+	}
+
+	// The engine resolves loose files, mounted content and VPK entries without
+	// opening or copying the texture payload into a RAW response file.
+	text = "VMTStudio-IPC\t2\n";
+	AppendRow(text, { "kind", "exists" });
+	AppendRow(text, { "exists", g_pFileSystem->FileExists(path.c_str(), "GAME") ? "1" : "0" });
+}
+
 static void RunDumpJob(const BackendQueryJob& job)
 {
 	std::string text;
@@ -972,6 +1009,10 @@ static void RunDumpJob(const BackendQueryJob& job)
 	else if (job.kind == "anim_state")
 	{
 		BuildAnimStateDump(text, error);
+	}
+	else if (job.kind == "exists")
+	{
+		BuildExistsDump(job.args, text, error);
 	}
 	else
 	{

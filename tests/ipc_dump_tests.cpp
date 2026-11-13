@@ -80,6 +80,60 @@ UT_TEST_CASE("ipc_dump: the kind row is validated") {
     UT_CHECK_EQ(no_kind.error().code, vmt::ErrorCode::ParseError);
 }
 
+UT_TEST_CASE("ipc_dump: exists distinguishes present and confirmed missing files") {
+    const vmt::Result<bool> present =
+        bridge::parse_exists_dump(dump_text("exists", { "exists\t1" }));
+    UT_CHECK(present.ok());
+    if (present.ok()) UT_CHECK(present.value());
+
+    const vmt::Result<bool> missing =
+        bridge::parse_exists_dump(with_crlf(dump_text("exists", { "exists\t0" })));
+    UT_CHECK(missing.ok());
+    if (missing.ok()) UT_CHECK(!missing.value());
+}
+
+UT_TEST_CASE("ipc_dump: exists ignores future rows but requires one result") {
+    const vmt::Result<bool> future = bridge::parse_exists_dump(dump_text("exists", {
+        "future\tvalue", "exists\t1", "note\tanything",
+    }));
+    UT_CHECK(future.ok());
+    if (future.ok()) UT_CHECK(future.value());
+
+    const vmt::Result<bool> absent =
+        bridge::parse_exists_dump(dump_text("exists", { "future\tvalue" }));
+    UT_CHECK(!absent.ok());
+    UT_CHECK_EQ(absent.error().code, vmt::ErrorCode::ParseError);
+    UT_CHECK(contains(absent.error().message, "missing lookup result"));
+}
+
+UT_TEST_CASE("ipc_dump: exists rejects malformed or ambiguous results") {
+    const std::vector<std::vector<std::string>> invalid = {
+        { "exists" },
+        { "exists\t1\textra" },
+        { "exists\t" },
+        { "exists\t2" },
+        { "exists\ttrue" },
+        { "exists\t-1" },
+        { "exists\t1", "exists\t0" },
+    };
+    for (const std::vector<std::string>& rows : invalid) {
+        const vmt::Result<bool> result = bridge::parse_exists_dump(dump_text("exists", rows));
+        UT_CHECK(!result.ok());
+        UT_CHECK_EQ(result.error().code, vmt::ErrorCode::ParseError);
+    }
+}
+
+UT_TEST_CASE("ipc_dump: exists refuses wrong kinds and newer protocol versions") {
+    const vmt::Result<bool> wrong_kind =
+        bridge::parse_exists_dump(dump_text("models", { "exists\t0" }));
+    UT_CHECK(!wrong_kind.ok());
+
+    const vmt::Result<bool> newer =
+        bridge::parse_exists_dump("VMTStudio-IPC\t3\nkind\texists\nexists\t1\n");
+    UT_CHECK(!newer.ok());
+    UT_CHECK(contains(newer.error().message, "too new"));
+}
+
 UT_TEST_CASE("ipc_dump: models: loose and vpk entries parse") {
     const std::string text = dump_text("models", {
         "model\tmodels/props_c17/oildrum001.mdl\tloose",

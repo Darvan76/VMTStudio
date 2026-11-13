@@ -73,7 +73,7 @@ keeps the message handler fast (the `WM_COPYDATA` round trip has a 1 s timeout)
 and lets the UI wait without blocking its own message loop.
 
 ```
-DUMP <kind> <token> [args]      # kind: models | assets | model_scene | anim_state
+DUMP <kind> <token> [args]      # kind: models | assets | model_scene | anim_state | exists
 RAW <token> <game-relative path>  # binary payload (VPK-aware)
 ```
 
@@ -123,6 +123,14 @@ DUMP assets <token> materials;models .vmt;.vtf;.mdl
 model in one round trip.
 
 `DUMP anim_state`: the playback state of the loaded model.
+
+`DUMP exists <token> <game-relative path>`: checks `IFileSystem::FileExists`
+against the mounted `GAME` search paths, including VPK entries and loose
+overrides. The path keeps its extension and may contain spaces; absolute paths,
+`..` components and control characters are rejected. This query does not open
+or copy the file payload. An unavailable file system produces `<token>.err`,
+not an `exists=0` result. Older backends reject this new dump kind through the
+same error response, allowing the UI to report lookup availability accurately.
 
 ### `.dat` text schema
 
@@ -187,6 +195,16 @@ the current skin.
 ```
 state\t<sequence index>\t<frame>\t<cycle 0..1>\t<speed scale>\t<ground speed>\t<paused 0|1>
 ```
+
+`kind=exists`:
+
+```
+exists\t<found 0|1>
+```
+
+Exactly one `exists` row is required. `0` confirms that the engine file system
+could not find the file; a missing or malformed result is a protocol error and
+must never be interpreted as a missing texture by validation.
 
 ## Live tick (backend -> UI)
 

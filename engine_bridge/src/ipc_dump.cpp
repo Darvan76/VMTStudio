@@ -336,6 +336,34 @@ vmt::Result<AssetList> parse_assets_dump(const std::string& text) {
     return vmt::Ok(std::move(assets));
 }
 
+vmt::Result<bool> parse_exists_dump(const std::string& text) {
+    const vmt::Result<std::vector<DumpRow>> rows = dump_rows("exists", text);
+    if (!rows.ok()) {
+        return vmt::Err<bool>(rows.error());
+    }
+
+    bool found = false;
+    bool result_seen = false;
+    for (const DumpRow& row : rows.value()) {
+        const std::vector<std::string> fields = split_tabs(row.text);
+        if (fields.empty() || fields[0] != "exists") continue;
+        if (result_seen) {
+            return vmt::Err<bool>(row_error("exists", row.line, fields[0],
+                                            "duplicate lookup result"));
+        }
+        vmt::Error error;
+        const RowReader reader("exists", row.line, fields, error);
+        if (!reader.expect(2) || !reader.as_flag(1, "found", found)) {
+            return vmt::Err<bool>(std::move(error));
+        }
+        result_seen = true;
+    }
+    if (!result_seen) {
+        return vmt::Err<bool>(protocol_error("exists", "missing lookup result"));
+    }
+    return vmt::Ok(found);
+}
+
 vmt::Result<ModelScene> parse_model_scene_dump(const std::string& text) {
     vmt::Result<std::vector<DumpRow>> rows = dump_rows("model_scene", text);
     if (!rows.ok()) {

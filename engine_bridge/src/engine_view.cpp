@@ -7,6 +7,7 @@
 #endif
 
 #include <windows.h>
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -269,6 +270,33 @@ public:
     }
 
     vmt::Result<bool> file_exists(const std::string& game_path) override {
+        if (game_path.empty() ||
+            std::any_of(game_path.begin(), game_path.end(), [](unsigned char c) {
+                return c < 32 || c == 127;
+            })) {
+            return vmt::Err<bool>(engine_error(vmt::ErrorCode::InvalidArgument,
+                                                "invalid game-relative file path"));
+        }
+        const std::filesystem::path relative = std::filesystem::u8path(game_path);
+        if (relative.has_root_path()) {
+            return vmt::Err<bool>(engine_error(vmt::ErrorCode::InvalidArgument,
+                                                "file lookup requires a game-relative path"));
+        }
+        for (const std::filesystem::path& part : relative) {
+            if (part == "..") {
+                return vmt::Err<bool>(engine_error(vmt::ErrorCode::InvalidArgument,
+                                                    "file lookup must stay inside the game paths"));
+            }
+        }
+        if (backend_running()) {
+            const vmt::Result<std::string> dump = request_dump("exists", game_path);
+            if (!dump.ok()) {
+                // Do not turn a timeout, old backend or VFS failure into a
+                // false "missing texture" validation error.
+                return vmt::Err<bool>(dump.error());
+            }
+            return parse_exists_dump(dump.value());
+        }
 #if !defined(_WIN64)
         const spike::ExistsResult result = spike::file_exists(game_path);
         if (result.ok) {
@@ -276,12 +304,14 @@ public:
         }
 #endif
         if (!config_.game_dir.empty()) {
-            std::filesystem::path full = config_.game_dir / std::filesystem::u8path(game_path);
-            if (std::filesystem::exists(full)) {
+            const std::filesystem::path full = config_.game_dir / relative;
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(full, ec)) {
                 return vmt::Ok(true);
             }
         }
-        return vmt::Ok(false);
+        return vmt::Err<bool>(engine_error(vmt::ErrorCode::EngineInitFailed,
+                                            "the game file system is unavailable for this lookup"));
     }
 
     vmt::Result<std::vector<std::string>> list_materials() override {

@@ -224,7 +224,8 @@ public:
 
     // Checks whether a game-relative file (for example
     // "materials/foo/bar.vtf") exists in the mounted search paths, including
-    // VPKs. Used by validation for texture lookups.
+    // VPKs. Used by validation for texture lookups. A false value means the
+    // engine confirmed absence; an unavailable VFS returns an error instead.
     virtual vmt::Result<bool> file_exists(const std::string& game_path) = 0;
 
     // Enumerates every .vmt in the mounted search paths (game folders + VPKs)
