@@ -15,6 +15,8 @@
 #include "schema_resources.h"
 #include "ui/version.h"
 #include "ui/asset_index.h"
+#include "ui/export_plan.h"
+#include "ui/material_browser.h"
 #include "app_log.h"
 #include "ui/animation_model.h"
 #include "ui/shader_catalog.h"
@@ -90,15 +92,6 @@ bridge::PreviewLighting to_bridge_lighting(const ui::PreviewLighting& lighting) 
         out.background[i] = lighting.background[i];
     }
     return out;
-}
-
-std::filesystem::path temp_preview_dir() {
-    wchar_t buffer[MAX_PATH] = {};
-    const DWORD length = GetTempPathW(MAX_PATH, buffer);
-    if (length == 0 || length >= MAX_PATH) {
-        return std::filesystem::temp_directory_path() / "VMTStudio" / "preview";
-    }
-    return std::filesystem::path(buffer) / L"VMTStudio" / L"preview";
 }
 
 std::filesystem::path app_data_dir() {
@@ -209,7 +202,7 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowIcon(QIcon(":/icons/app.png"));
     resize(1360, 820);
 
-    m_previewRoot = temp_preview_dir();
+    (void)resetPreviewDirectory();
     m_settingsPath = app_data_dir() / "settings.json";
 
     loadSettings();
@@ -703,6 +696,7 @@ void MainWindow::updateTitle() {
 }
 
 void MainWindow::updateStatus() {
+    if (m_inspector) m_inspector->setEnabled(m_session.text_is_valid());
     if (m_session.path().empty()) {
         m_statusDoc->setText(tr("Document: untitled.vmt (Unsaved)"));
     } else {
@@ -730,6 +724,11 @@ bool MainWindow::ensureEngine(QString& error) {
 
     if (m_engineConnecting) {
         error = tr("Engine is currently connecting in the background. Please wait a moment.");
+        return false;
+    }
+
+    if (m_previewRoot.empty()) {
+        error = tr("The temporary preview directory could not be created.");
         return false;
     }
 
@@ -775,6 +774,7 @@ bool MainWindow::ensureEngine(QString& error) {
     if (!m_session.material_root().empty()) {
         (void)m_engine->mount_directory(m_session.material_root(), true);
     }
+    (void)m_engine->mount_directory(m_previewRoot, true);
 
     // Apply lighting and shapes
     (void)m_engine->set_preview_shape(to_bridge_shape(m_previewOptions.shape));
@@ -799,6 +799,10 @@ void MainWindow::ensureEngineAsync() {
         return;
     }
     if (m_settings.last_bin_dir.empty() || m_settings.last_game_dir.empty()) {
+        return;
+    }
+    if (m_previewRoot.empty()) {
+        m_viewport->setStatusText(tr("The temporary preview directory could not be created."));
         return;
     }
     // A failed backend can still have a scene query in flight.
@@ -865,6 +869,7 @@ void MainWindow::finishEngineInitialization() {
     if (!m_session.material_root().empty()) {
         (void)m_engine->mount_directory(m_session.material_root(), true);
     }
+    (void)m_engine->mount_directory(m_previewRoot, true);
     checkBrushMaterial(false);
     // Use current options: the user may have changed them during startup.
     (void)m_engine->set_preview_shape(to_bridge_shape(m_previewOptions.shape));
@@ -891,6 +896,9 @@ void MainWindow::finishEngineInitialization() {
 
 void MainWindow::shutdownEngine() {
     m_previewSyncTimer->stop();
+    m_previewSync = ui::PreviewSync{};
+    m_previewIdentity.clear();
+    m_previewMountedMaterialRoot.clear();
     m_enginePollTimer->stop();
     m_modelScenePollTimer->stop();
     ++m_modelSceneGeneration;
@@ -1008,21 +1016,58 @@ void MainWindow::checkBrushMaterial(bool forcePopup) {
     m_lastShader = currentShader;
 }
 
+bool MainWindow::resetPreviewDirectory() {
+    auto directory = std::make_unique<QTemporaryDir>(
+        QDir::tempPath() + QStringLiteral("/VMTStudio-preview-XXXXXX"));
+    if (!directory->isValid()) {
+        log_write("WARN", "Cannot create an isolated preview directory");
+        m_previewDirectory.reset();
+        m_previewRoot.clear();
+        m_previewSync = ui::PreviewSync{};
+        m_previewIdentity.clear();
+        m_previewMountedMaterialRoot.clear();
+        return false;
+    }
+    m_previewDirectory = std::move(directory);
+    m_previewRoot = std::filesystem::path(m_previewDirectory->path().toStdWString());
+    m_previewSync = ui::PreviewSync{};
+    m_previewIdentity.clear();
+    m_previewMountedMaterialRoot.clear();
+    return true;
+}
+
 void MainWindow::syncPreview() {
+    if (!m_session.text_is_valid()) {
+        m_previewSyncTimer->stop();
+        (void)m_previewSync.document_changed(false, m_session.last_error());
+        statusBar()->showMessage(tr("Preview paused: fix the VMT syntax error first."), 4000);
+        return;
+    }
     m_previewSyncTimer->start();
 }
 
-void MainWindow::onPreviewSyncTimeout() {
-    if (m_engineConnecting) {
-        return;
+bool MainWindow::syncPreviewAfterSave() {
+    syncPreview();
+    if (m_engine && m_engine->initialized() && !m_engineConnecting) {
+        // A slot change can follow Save immediately. Persist its preview before
+        // the editor switches identity instead of waiting for the debounce.
+        m_previewSyncTimer->stop();
+        onPreviewSyncTimeout();
+        return m_lastPreviewSucceeded;
     }
-    QString err;
-    if (!ensureEngine(err)) {
-        return;
-    }
+    return true;
+}
 
-    // A model load queued while the engine was starting owns the viewport as
-    // soon as it begins; the flat material preview must not override it.
+void MainWindow::onPreviewSyncTimeout() {
+    m_lastPreviewSucceeded = false;
+    if (!m_session.text_is_valid() || m_engineConnecting || m_previewRoot.empty()) {
+        return;
+    }
+    QString error;
+    if (!ensureEngine(error)) {
+        statusBar()->showMessage(error, 4000);
+        return;
+    }
     if (!m_pendingModelPath.isEmpty()) {
         const QString pending = m_pendingModelPath;
         m_pendingModelPath.clear();
@@ -1030,63 +1075,87 @@ void MainWindow::onPreviewSyncTimeout() {
         return;
     }
 
-    // A material of the loaded model is previewed through its loose override at
-    // the material's own game-relative path (docs/IPC_PROTOCOL.md): drop any
-    // forced material and re-resolve just that slot, so the engine keeps
-    // painting the model with its own materials.
-    if (!m_currentModelMaterial.empty()) {
-        const std::string modelMaterial = m_currentModelMaterial;
-        if (m_session.dirty()) {
-            if (!m_session.text_is_valid()) {
-                statusBar()->showMessage(tr("Preview paused: fix the VMT syntax error first."), 4000);
-                return;
-            }
-            const vmt::Result<void> writeRes =
-                ui::write_preview_material_at(m_previewRoot, modelMaterial, m_session.text());
-            if (!writeRes) {
-                statusBar()->showMessage(
-                    tr("Preview update failed: %1")
-                        .arg(QString::fromStdString(writeRes.error().message)), 5000);
-                return;
-            }
-        }
-        (void)m_engine->set_material("");
-        (void)m_engine->reload_material_by_name(modelMaterial);
+    const bool modelMaterial = !m_currentModelMaterial.empty();
+    std::string materialName = modelMaterial ? m_currentModelMaterial : ui::kPreviewMaterialName;
+    if (!modelMaterial && !m_session.path().empty()) {
+        materialName = ui::vtf_texture_path(m_session.path());
+        if (materialName.empty()) materialName = m_session.path().stem().u8string();
+    }
+    const std::filesystem::path outFile = preview_override_path(m_previewRoot, materialName);
+    if (outFile.empty()) {
+        statusBar()->showMessage(tr("The preview material has an invalid relative path."), 5000);
         return;
     }
 
-    std::string materialName = "vmtviewer_preview";
+    if (m_previewMountedMaterialRoot != m_session.material_root()) {
+        if (!m_session.material_root().empty()) {
+            auto mounted = m_engine->mount_directory(m_session.material_root(), true);
+            if (!mounted) {
+                statusBar()->showMessage(QString::fromStdString(mounted.error().message), 5000);
+                return;
+            }
+        }
+        // The edited copy must outrank the newly mounted source material.
+        auto mounted = m_engine->mount_directory(m_previewRoot, true);
+        if (!mounted) {
+            statusBar()->showMessage(QString::fromStdString(mounted.error().message), 5000);
+            return;
+        }
+        m_previewMountedMaterialRoot = m_session.material_root();
+    }
+
+    // A standalone VTF outside a materials tree needs an adjacent loose copy.
+    // update_existing avoids copying the binary again for every VMT keystroke.
     if (!m_session.path().empty()) {
-        materialName = ui::vtf_texture_path(m_session.path());
-        if (materialName.empty()) {
-            materialName = m_session.path().stem().string();
+        const auto source = m_session.path().parent_path() /
+                            (m_session.path().stem().wstring() + L".vtf");
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(source, ec)) {
+            std::filesystem::create_directories(outFile.parent_path(), ec);
+            if (!ec) {
+                const auto destination = outFile.parent_path() / source.filename();
+                std::filesystem::copy_file(source, destination,
+                    std::filesystem::copy_options::update_existing, ec);
+            }
+            if (ec) {
+                statusBar()->showMessage(tr("The preview texture could not be copied: %1")
+                                             .arg(QString::fromStdString(ec.message())), 5000);
+                return;
+            }
         }
     }
 
-    // Write preview file to mounted preview root preserving directory hierarchy
-    std::filesystem::path outFile = m_previewRoot / "materials" / (materialName + ".vmt");
-    std::error_code ec;
-    std::filesystem::create_directories(outFile.parent_path(), ec);
-
-    std::ofstream stream(outFile, std::ios::binary);
-    if (stream) {
-        stream << m_session.text();
-        stream.close();
-    }
-
-    // If there is an adjacent loose .vtf in the source directory (i.e. not in a materials/ structure),
-    // copy it into the preview materials directory so the engine can resolve $basetexture
-    if (!m_session.path().empty()) {
-        std::filesystem::path srcDir = m_session.path().parent_path();
-        std::filesystem::path srcVtf = srcDir / (m_session.path().stem().string() + ".vtf");
-        if (std::filesystem::is_regular_file(srcVtf, ec)) {
-            std::filesystem::path destVtf = outFile.parent_path() / (m_session.path().stem().string() + ".vtf");
-            std::filesystem::copy_file(srcVtf, destVtf, std::filesystem::copy_options::overwrite_existing, ec);
+    const std::string identity = m_previewRoot.u8string() + "|" + materialName +
+                                 (modelMaterial ? "|model" : "|shape");
+    if (m_previewIdentity != identity) {
+        m_previewSync = ui::PreviewSync{};
+        m_previewIdentity = identity;
+        m_previewSync.configure(
+            [this, materialName](const std::string& text) {
+                return ui::write_preview_material_at(m_previewRoot, materialName, text).ok();
+            },
+            [this, materialName, modelMaterial]() {
+                if (!m_engine || !m_engine->initialized()) return false;
+                auto selected = m_engine->set_material(modelMaterial ? "" : materialName);
+                if (!selected) return false;
+                return m_engine->reload_material_by_name(materialName).ok();
+            });
+        m_previewSync.set_active(true);
+        // Seed from the opened/saved revision even if the user started typing
+        // before the engine connected. A first rejected edit can then roll back.
+        const auto baseline = vmt::Document::parse(m_session.saved_text());
+        if (baseline && baseline.value().diagnostics().empty()) {
+            (void)m_previewSync.flush_now(m_session.saved_text(), true);
         }
     }
-
-    (void)m_engine->set_material(materialName);
-    (void)m_engine->reload_material();
+    const auto applied = m_previewSync.flush_now(m_session.text(), m_session.text_is_valid(),
+                                                m_session.last_error());
+    if (!applied) {
+        statusBar()->showMessage(tr("Preview update failed: %1")
+                                     .arg(QString::fromStdString(applied.error().message)), 5000);
+    } else {
+        m_lastPreviewSucceeded = true;
+    }
 }
 
 bool MainWindow::maybeSave() {
@@ -1156,6 +1225,7 @@ bool MainWindow::openFile(const QString& filePath) {
         const auto& matRoot = m_session.material_root();
         if (!matRoot.empty()) {
             (void)m_engine->mount_directory(matRoot, true);
+            (void)m_engine->mount_directory(m_previewRoot, true);
         }
     }
 
@@ -1229,34 +1299,64 @@ void MainWindow::onOpenFile() {
 
 void MainWindow::onSaveFile() {
     if (!m_currentModelMaterial.empty()) {
-        saveModelMaterialOverride();
+        saveModelMaterial();
         return;
     }
-    if (m_session.path().empty()) {
+    if (m_session.path().empty() || m_session.is_vtf()) {
         onSaveFileAs();
         return;
     }
     auto res = m_session.save();
     if (!res) {
         QMessageBox::warning(this, tr("Save Failed"), QString::fromStdString(res.error().message));
+    } else {
+        syncPreviewAfterSave();
     }
     updateTitle();
     updateStatus();
 }
 
 void MainWindow::onSaveFileAs() {
+    if (!m_session.text_is_valid()) {
+        QMessageBox::warning(this, tr("Save Failed"),
+            tr("Fix the VMT syntax error before saving the material."));
+        return;
+    }
+    QString suggested;
+    if (!m_session.path().empty()) {
+        auto destination = m_session.path();
+        destination.replace_extension(L".vmt");
+        suggested = QString::fromStdWString(destination.wstring());
+    } else if (!m_currentModelMaterial.empty() && !m_settings.last_game_dir.empty()) {
+        suggested = QString::fromStdWString(
+            preview_override_path(std::filesystem::path(m_settings.last_game_dir),
+                                  m_currentModelMaterial).wstring());
+    }
     QString file = QFileDialog::getSaveFileName(
-        this, tr("Save Material As"),
-        QString(), tr("Source Materials (*.vmt);;All Files (*.*)"));
+        this, tr("Save Material As"), suggested,
+        tr("Source Materials (*.vmt);;All Files (*.*)"));
     if (file.isEmpty()) return;
 
-    auto res = m_session.save_as(std::filesystem::path(file.toStdWString()));
+    const std::filesystem::path destination(file.toStdWString());
+    std::error_code ec;
+    if (!destination.parent_path().empty()) {
+        std::filesystem::create_directories(destination.parent_path(), ec);
+    }
+    if (ec) {
+        QMessageBox::warning(this, tr("Save Failed"),
+            tr("Cannot create the destination folder: %1").arg(QString::fromStdString(ec.message())));
+        return;
+    }
+    auto res = m_session.save_as(destination);
     if (!res) {
         QMessageBox::warning(this, tr("Save Failed"), QString::fromStdString(res.error().message));
     } else {
         addRecentFile(file);
-        // The session now targets an explicit file, not a model override.
-        m_currentModelMaterial.clear();
+        if (!m_currentModelMaterial.empty()) {
+            m_modelMaterialFiles[m_currentModelMaterial] = destination;
+        }
+        refreshMaterialRoots();
+        syncPreviewAfterSave();
     }
     updateTitle();
     updateStatus();
@@ -1268,22 +1368,71 @@ void MainWindow::onSaveToGame() {
             tr("Please configure the game mod folder via Game > Connection Settings."));
         return;
     }
+    if (!m_session.text_is_valid()) {
+        QMessageBox::warning(this, tr("Save Failed"),
+            tr("Fix the VMT syntax error before saving the material."));
+        return;
+    }
 
-    QString matName = QString::fromStdWString(m_session.path().stem().wstring());
-    if (matName.isEmpty()) matName = "custom_material";
+    std::string materialName = m_currentModelMaterial;
+    if (materialName.empty() && m_session.has_path()) {
+        materialName = ui::vtf_texture_path(m_session.path());
+    }
+    if (materialName.empty()) {
+        materialName = ui::material_name_from_game_path(m_session.display_name());
+    }
+    if (materialName.empty() || materialName == "untitled") materialName = "custom_material";
 
-    std::filesystem::path gameMatPath =
-        std::filesystem::path(m_settings.last_game_dir) / "materials" / (matName.toStdString() + ".vmt");
-
+    ui::ExportOptions options;
+    options.layout = ui::ExportLayout::MaterialsTree;
+    options.destination = std::filesystem::path(m_settings.last_game_dir);
+    auto plan = ui::plan_material_export({materialName}, options);
+    if (!plan || plan.value().items.empty()) {
+        QMessageBox::warning(this, tr("Save Failed"),
+            plan ? tr("No material destination was produced.")
+                 : QString::fromStdString(plan.error().message));
+        return;
+    }
+    const auto gameMatPath = plan.value().items.front().absolute;
     std::error_code ec;
+    if (std::filesystem::exists(gameMatPath, ec)) {
+        std::error_code equivalentError;
+        const bool currentFile = m_session.has_path() &&
+            std::filesystem::equivalent(m_session.path(), gameMatPath, equivalentError);
+        if (!currentFile && QMessageBox::question(
+                this, tr("Replace Game Material"),
+                tr("Replace the existing material?\n%1")
+                    .arg(QString::fromStdWString(gameMatPath.wstring())),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+            return;
+        }
+    }
+    if (ec) {
+        QMessageBox::warning(this, tr("Save Failed"), QString::fromStdString(ec.message()));
+        return;
+    }
     std::filesystem::create_directories(gameMatPath.parent_path(), ec);
-
-    auto res = m_session.save_as(gameMatPath);
-    if (!res) {
-        QMessageBox::warning(this, tr("Save Failed"), QString::fromStdString(res.error().message));
+    if (ec) {
+        QMessageBox::warning(this, tr("Save Failed"), QString::fromStdString(ec.message()));
+        return;
+    }
+    auto saved = m_session.save_as(gameMatPath);
+    if (!saved) {
+        QMessageBox::warning(this, tr("Save Failed"), QString::fromStdString(saved.error().message));
     } else {
-        QMessageBox::information(this, tr("Saved to Game"),
-            tr("Material saved to:\n%1").arg(QString::fromStdWString(gameMatPath.wstring())));
+        addRecentFile(QString::fromStdWString(gameMatPath.wstring()));
+        if (!m_currentModelMaterial.empty()) {
+            m_modelMaterialFiles[m_currentModelMaterial] = gameMatPath;
+        }
+        refreshMaterialRoots();
+        if (syncPreviewAfterSave()) {
+            statusBar()->showMessage(tr("Material saved to: %1")
+                                         .arg(QString::fromStdWString(gameMatPath.wstring())), 5000);
+        } else {
+            const QString previewError = statusBar()->currentMessage();
+            statusBar()->showMessage(tr("Material saved to %1. %2")
+                .arg(QString::fromStdWString(gameMatPath.wstring()), previewError), 8000);
+        }
     }
     updateTitle();
     updateStatus();
@@ -1872,35 +2021,33 @@ bool MainWindow::openModelMaterial(const QString& gameName, bool focusEditor) {
         return true;
     }
 
-    // Leaving a material: flush its latest valid text to the override before
-    // the editor buffer is replaced. A failed write aborts the switch so
-    // unsynced edits cannot slip away.
-    if (!m_currentModelMaterial.empty() &&
-        m_session.dirty() && m_session.text_is_valid()) {
-        const std::string previous = m_currentModelMaterial;
-        const vmt::Result<void> flushRes =
-            ui::write_preview_material_at(m_previewRoot, previous, m_session.text());
-        if (!flushRes) {
-            statusBar()->showMessage(
-                tr("Cannot switch material: the pending edits of \"%1\" could not be written (%2).")
-                    .arg(QString::fromStdString(previous),
-                         QString::fromStdString(flushRes.error().message)),
-                8000);
-            return false;
-        }
+    if (!maybeSave()) {
+        return false;
+    }
+    // Discard removes the transient override so the model shows the game copy.
+    if (m_session.dirty() && !m_currentModelMaterial.empty()) {
+        const auto previous = preview_override_path(m_previewRoot, m_currentModelMaterial);
+        std::error_code ec;
+        if (!previous.empty()) std::filesystem::remove(previous, ec);
         if (m_engine && m_engine->initialized()) {
-            (void)m_engine->reload_material_by_name(previous);
+            (void)m_engine->reload_material_by_name(m_currentModelMaterial);
         }
     }
 
-    // Prefer the loose override (the preview root outranks the game files):
+    // A durable save is authoritative even if rendering rolled its preview
+    // back to older bytes. Keep the destination when revisiting this slot.
+    std::filesystem::path permanentFile;
+    const auto savedFile = m_modelMaterialFiles.find(name);
+    if (savedFile != m_modelMaterialFiles.end()) permanentFile = savedFile->second;
+
+    // Otherwise prefer the loose override (the preview root outranks game files):
     // reopening a material shows what was written last, the engine copy only
     // seeds a material that has no override yet. On the x64 UI the engine copy
     // is read from the game folder on disk.
     std::string text;
     bool loaded = false;
     const std::filesystem::path overrideFile = preview_override_path(m_previewRoot, name);
-    if (!overrideFile.empty()) {
+    if (!overrideFile.empty() && permanentFile.empty()) {
         std::ifstream stream(overrideFile, std::ios::binary);
         if (stream) {
             std::string contents((std::istreambuf_iterator<char>(stream)),
@@ -1912,7 +2059,7 @@ bool MainWindow::openModelMaterial(const QString& gameName, bool focusEditor) {
         }
     }
 
-    if (!loaded) {
+    if (!loaded && permanentFile.empty()) {
         if (!m_engine || !m_engine->initialized()) {
             statusBar()->showMessage(
                 tr("Material \"%1\" needs a connected engine to read.").arg(gameName), 5000);
@@ -1929,7 +2076,9 @@ bool MainWindow::openModelMaterial(const QString& gameName, bool focusEditor) {
         text = std::move(readRes.value());
     }
 
-    auto openRes = m_session.open_text(std::move(text), name + ".vmt");
+    auto openRes = permanentFile.empty()
+        ? m_session.open_text(std::move(text), name + ".vmt")
+        : m_session.open_file(permanentFile);
     if (!openRes) {
         statusBar()->showMessage(
             tr("Cannot open material \"%1\": %2")
@@ -1957,39 +2106,25 @@ bool MainWindow::openModelMaterial(const QString& gameName, bool focusEditor) {
     updateTitle();
     updateStatus();
     checkBrushMaterial(true);
+    syncPreview();
     return true;
 }
 
-void MainWindow::saveModelMaterialOverride() {
-    const std::string name = m_currentModelMaterial;
-    if (name.empty()) {
+void MainWindow::saveModelMaterial() {
+    // The preview override is disposable. Saving must always target a file
+    // chosen by the user; keep the model-slot identity for subsequent previews.
+    if (!m_session.has_path() || m_session.is_vtf()) {
+        onSaveFileAs();
         return;
     }
-
-    const std::filesystem::path file = preview_override_path(m_previewRoot, name);
-    if (file.empty()) {
-        QMessageBox::warning(this, tr("Save Failed"),
-            tr("The material name cannot be mapped to a preview override path."));
+    auto saved = m_session.save();
+    if (!saved) {
+        QMessageBox::warning(this, tr("Save Failed"), QString::fromStdString(saved.error().message));
         return;
-    }
-
-    // save_as() writes atomically and marks the session clean; the written
-    // file IS the in-place override the engine re-reads.
-    auto res = m_session.save_as(file);
-    if (!res) {
-        QMessageBox::warning(this, tr("Save Failed"), QString::fromStdString(res.error().message));
-        return;
-    }
-
-    if (m_engine && m_engine->initialized()) {
-        (void)m_engine->reload_material_by_name(name);
     }
     updateTitle();
     updateStatus();
-    statusBar()->showMessage(
-        tr("Model material saved as a loose override: %1")
-            .arg(QString::fromStdWString(file.wstring())),
-        5000);
+    syncPreviewAfterSave();
 }
 
 void MainWindow::onModelMaterialsExported(const QStringList& materials) {
@@ -2316,6 +2451,7 @@ void MainWindow::onToggleDebugConsole() {
 }
 
 void MainWindow::onOpenGameConnection() {
+    if (!maybeSave()) return;
     ConnectionDialog dlg(m_settings, this);
     if (dlg.exec() == QDialog::Accepted) {
         saveSettings();
@@ -2327,7 +2463,9 @@ void MainWindow::onOpenGameConnection() {
             m_pendingTextureParam.clear();
         }
         cleanupIsolation(false);
-        clearModelView();
+        m_modelMaterialFiles.clear();
+        (void)resetPreviewDirectory();
+        refreshMaterialRoots();
 
         ensureEngineAsync();
     }
@@ -2412,7 +2550,11 @@ void MainWindow::onCodeEditorTextChanged() {
 void MainWindow::onInspectorParameterChanged(const QString& name, const QString& value) {
     if (m_suppressSync) return;
 
-    (void)m_session.set_parameter(name.toStdString(), value.toStdString());
+    const auto changed = m_session.set_parameter(name.toStdString(), value.toStdString());
+    if (!changed) {
+        statusBar()->showMessage(QString::fromStdString(changed.error().message), 5000);
+        return;
+    }
 
     const int savedPosition = m_codeEditor->textCursor().position();
 
@@ -2431,7 +2573,11 @@ void MainWindow::onInspectorParameterChanged(const QString& name, const QString&
 void MainWindow::onInspectorShaderChanged(const QString& newShader) {
     if (m_suppressSync) return;
 
-    (void)m_session.set_shader(newShader.toStdString());
+    const auto changed = m_session.set_shader(newShader.toStdString());
+    if (!changed) {
+        statusBar()->showMessage(QString::fromStdString(changed.error().message), 5000);
+        return;
+    }
 
     const int savedPosition = m_codeEditor->textCursor().position();
 

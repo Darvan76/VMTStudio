@@ -55,6 +55,7 @@ add_executable(ui_tests
     test_main.cpp
     ui_tests.cpp
     session_safety_tests.cpp
+    material_save_path_tests.cpp
 )
 
 target_include_directories(ui_tests PRIVATE

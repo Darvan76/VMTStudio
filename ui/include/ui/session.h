@@ -96,6 +96,8 @@ public:
     // Null until the first successful parse; may contain syntax diagnostics.
     const vmt::Document* document() const noexcept { return document_.get(); }
     const std::string& text() const noexcept { return text_; }
+    // Last opened/saved bytes, used to seed a new preview before any edits.
+    const std::string& saved_text() const noexcept { return saved_text_; }
     const std::filesystem::path& path() const noexcept { return path_; }
     bool has_path() const noexcept { return !path_.empty(); }
     const std::filesystem::path& material_root() const noexcept { return material_root_; }

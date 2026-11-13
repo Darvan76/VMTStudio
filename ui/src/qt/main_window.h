@@ -9,10 +9,12 @@
 #include <QLabel>
 #include <QTimer>
 #include <QDockWidget>
+#include <QTemporaryDir>
 
 #include <future>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "ui/session.h"
@@ -155,7 +157,9 @@ private:
     void ensureEngineAsync();
     void finishEngineInitialization();
     void shutdownEngine();
+    bool resetPreviewDirectory();
     void syncPreview();
+    bool syncPreviewAfterSave();
     void refreshMaterialRoots();
 
     // One modeless Asset Browser per window. It stays alive while hidden so the
@@ -186,7 +190,7 @@ private:
     // in the VMT editor and previews it through the loose override at its own
     // game-relative path (no global forced preview).
     bool openModelMaterial(const QString& gameName, bool focusEditor);
-    void saveModelMaterialOverride();
+    void saveModelMaterial();
     void setAnimationSpeedScale(float speed);
 
     // Experimental isolate mode: transparent substitutes for every material of
@@ -221,6 +225,10 @@ private:
     bool m_modelSceneQueryPending = false;
     ui::PreviewOptions m_previewOptions;
     ui::PreviewSync m_previewSync;
+    std::string m_previewIdentity;
+    bool m_lastPreviewSucceeded = false;
+    std::filesystem::path m_previewMountedMaterialRoot;
+    std::unique_ptr<QTemporaryDir> m_previewDirectory;
     std::filesystem::path m_previewRoot;
     std::vector<std::filesystem::path> m_materialRoots;
 
@@ -234,6 +242,8 @@ private:
     QString m_requestedModelPath; // path the model was requested with (game-relative preferred)
     QString m_pendingModelPath;   // load deferred until the engine is ready
     std::string m_currentModelMaterial; // model material open in the editor, empty when none
+    // Durable destinations take precedence over a render rollback's older copy.
+    std::unordered_map<std::string, std::filesystem::path> m_modelMaterialFiles;
     quint64 m_modelSceneGeneration = 0; // drops stale scene queries after reload/close
     float m_animSpeedScale = 1.0f;
     std::vector<IsolateSubstitute> m_isolateSubstitutes;
