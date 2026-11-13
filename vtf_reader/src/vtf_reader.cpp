@@ -439,7 +439,39 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
             "The VTF file has corrupted image dimensions",
             origin.string()));
     }
-    vlByte* source = vlImageGetData(frame, 0, 0, 0);
+    const bool needs_downscale = (max_size != 0 && (width > max_size || height > max_size));
+    const std::uint32_t longest = std::max(width, height);
+    // Derive the output from the original aspect ratio. The selected mip can
+    // have a clamped 1-pixel edge and must not redefine the output geometry.
+    const std::uint32_t target_width = needs_downscale
+        ? std::max(1u, static_cast<std::uint32_t>(static_cast<std::uint64_t>(width) * max_size / longest))
+        : width;
+    const std::uint32_t target_height = needs_downscale
+        ? std::max(1u, static_cast<std::uint32_t>(static_cast<std::uint64_t>(height) * max_size / longest))
+        : height;
+
+    vlUInt source_width = width;
+    vlUInt source_height = height;
+    vlUInt mip_level = 0;
+    const vlUInt mip_count = vlImageGetMipmapCount();
+    if (needs_downscale) {
+        // Decode the smallest existing mip that still covers both target
+        // edges. This bounds the temporary RGBA buffer near the thumbnail
+        // size without upscaling an undersized mip or discarding image detail.
+        while (mip_level + 1 < mip_count && (source_width > 1 || source_height > 1)) {
+            vlUInt next_width = 0;
+            vlUInt next_height = 0;
+            vlUInt next_depth = 0;
+            vlImageComputeMipmapDimensions(width, height, depth, mip_level + 1,
+                                           &next_width, &next_height, &next_depth);
+            if (next_width < target_width || next_height < target_height) break;
+            source_width = next_width;
+            source_height = next_height;
+            ++mip_level;
+        }
+    }
+
+    vlByte* source = vlImageGetData(frame, 0, 0, mip_level);
     if (source == nullptr) {
         return vmt::Err<RgbaImage>(vmt::make_error(
             vmt::ErrorCode::Internal,
@@ -448,15 +480,14 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
             origin.string()));
     }
 
-    const bool needs_downscale = (max_size != 0 && (width > max_size || height > max_size));
     vmt::Error error;
     RgbaImage image;
 
-    if (!needs_downscale) {
-        if (!allocate_rgba(width, height, image.pixels, error)) {
+    if (source_width == target_width && source_height == target_height) {
+        if (!allocate_rgba(target_width, target_height, image.pixels, error)) {
             return vmt::Err<RgbaImage>(std::move(error));
         }
-        if (vlImageConvertToRGBA8888(source, image.pixels.data(), width, height, format) == vlFalse) {
+        if (vlImageConvertToRGBA8888(source, image.pixels.data(), source_width, source_height, format) == vlFalse) {
             return vmt::Err<RgbaImage>(vmt::make_error(
                 vmt::ErrorCode::VtfUnsupportedFormat,
                 "the texture format '" + format_name_of(format_info) + "' could not be converted to RGBA8 (" +
@@ -464,16 +495,10 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
                 "Preview is unavailable for this texture format",
                 origin.string()));
         }
-        image.width = width;
-        image.height = height;
+        image.width = target_width;
+        image.height = target_height;
         return vmt::Ok(std::move(image));
     }
-
-    const std::uint32_t longest = std::max(width, height);
-    const std::uint32_t target_width = std::max(1u, static_cast<std::uint32_t>(
-        static_cast<std::uint64_t>(width) * max_size / longest));
-    const std::uint32_t target_height = std::max(1u, static_cast<std::uint32_t>(
-        static_cast<std::uint64_t>(height) * max_size / longest));
 
     if (!allocate_rgba(target_width, target_height, image.pixels, error)) {
         return vmt::Err<RgbaImage>(std::move(error));
@@ -481,7 +506,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
 
     if (format == IMAGE_FORMAT_RGBA8888) {
         // Fast path: source is already uncompressed RGBA8888; resize directly without intermediate allocation.
-        if (vlImageResize(source, image.pixels.data(), width, height, target_width, target_height,
+        if (vlImageResize(source, image.pixels.data(), source_width, source_height, target_width, target_height,
                           MIPMAP_FILTER_NICE, vlFalse) == vlFalse) {
             return vmt::Err<RgbaImage>(vmt::make_error(
                 vmt::ErrorCode::Internal,
@@ -492,10 +517,10 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
         }
     } else {
         std::vector<std::uint8_t> rgba;
-        if (!allocate_rgba(width, height, rgba, error)) {
+        if (!allocate_rgba(source_width, source_height, rgba, error)) {
             return vmt::Err<RgbaImage>(std::move(error));
         }
-        if (vlImageConvertToRGBA8888(source, rgba.data(), width, height, format) == vlFalse) {
+        if (vlImageConvertToRGBA8888(source, rgba.data(), source_width, source_height, format) == vlFalse) {
             return vmt::Err<RgbaImage>(vmt::make_error(
                 vmt::ErrorCode::VtfUnsupportedFormat,
                 "the texture format '" + format_name_of(format_info) + "' could not be converted to RGBA8 (" +
@@ -503,7 +528,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
                 "Preview is unavailable for this texture format",
                 origin.string()));
         }
-        if (vlImageResize(rgba.data(), image.pixels.data(), width, height, target_width, target_height,
+        if (vlImageResize(rgba.data(), image.pixels.data(), source_width, source_height, target_width, target_height,
                           MIPMAP_FILTER_NICE, vlFalse) == vlFalse) {
             return vmt::Err<RgbaImage>(vmt::make_error(
                 vmt::ErrorCode::Internal,
@@ -512,7 +537,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
                 "Try a different preview size",
                 origin.string()));
         }
-        // Explicitly free the full-size buffer immediately to minimize peak memory
+        // Release the decoded mip buffer as soon as resizing is complete.
         std::vector<std::uint8_t>().swap(rgba);
     }
 

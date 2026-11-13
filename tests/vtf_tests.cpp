@@ -102,6 +102,46 @@ double seconds_between(std::chrono::steady_clock::time_point start,
     return std::chrono::duration<double>(end - start).count();
 }
 
+// Minimal VTF 7.2, no thumbnail/resources, with a distinct solid color in
+// every mip/frame. Unlike a gradient, this proves which mip was decoded:
+// resizing mip 0 cannot produce the color assigned to mip 2.
+std::vector<std::uint8_t> make_colored_mips(std::uint16_t width, std::uint16_t height,
+                                          std::uint8_t mip_count) {
+    std::vector<std::uint8_t> bytes = make_file_header(7, 2, 80);
+    bytes.resize(80, 0);
+    const auto put_u16 = [&bytes](std::size_t offset, std::uint16_t value) {
+        bytes[offset] = static_cast<std::uint8_t>(value & 0xffu);
+        bytes[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+    };
+    const auto put_u32 = [&bytes](std::size_t offset, std::uint32_t value) {
+        for (unsigned i = 0; i < 4; ++i) {
+            bytes[offset + i] = static_cast<std::uint8_t>((value >> (i * 8)) & 0xffu);
+        }
+    };
+    put_u16(16, width);
+    put_u16(18, height);
+    put_u16(24, 2); // frames
+    put_u32(48, 0x3f800000u); // bump scale 1.0
+    put_u32(52, 0); // IMAGE_FORMAT_RGBA8888
+    bytes[56] = mip_count;
+    put_u32(57, 0xffffffffu); // no low-resolution image
+    put_u16(63, 1); // depth
+
+    // VTF stores the smallest mip first, with all frames of each mip together.
+    for (int mip = static_cast<int>(mip_count) - 1; mip >= 0; --mip) {
+        const unsigned mip_width = std::max(1u, static_cast<unsigned>(width) >> mip);
+        const unsigned mip_height = std::max(1u, static_cast<unsigned>(height) >> mip);
+        for (unsigned frame = 0; frame < 2; ++frame) {
+            const std::uint8_t red = static_cast<std::uint8_t>(20 + mip * 30);
+            const std::uint8_t green = static_cast<std::uint8_t>(40 + frame * 80);
+            for (unsigned pixel = 0; pixel < mip_width * mip_height; ++pixel) {
+                bytes.insert(bytes.end(), {red, green, 60, 255});
+            }
+        }
+    }
+    return bytes;
+}
+
 // --- Minimal expected.json reader -------------------------------------------
 //
 // The manifest is a tiny, fixed-shape document, so a full JSON library would
@@ -831,6 +871,73 @@ UT_TEST_CASE("vtf: fuzz - arbitrary bytes never crash or hang") {
 // The Asset Browser decodes textures that live inside VPK archives, so the
 // decoder has to work on a buffer rather than a path. These tests pin the
 // equivalence with the file-based API and the input-validation contract.
+
+UT_TEST_CASE("vtf preview: selects an existing mip without undersampling or changing full-size output") {
+    const std::vector<std::uint8_t> bytes = make_colored_mips(16, 8, 5);
+    const auto check_preview = [&bytes](std::uint32_t cap, std::uint32_t width,
+                                        std::uint32_t height, int red) {
+        const auto image = vtf::decode_vtf_preview_from_memory(bytes.data(), bytes.size(), 0, cap);
+        UT_CHECK(image.ok());
+        if (!image.ok()) return;
+        UT_CHECK_EQ(image.value().width, width);
+        UT_CHECK_EQ(image.value().height, height);
+        UT_CHECK_EQ(image.value().pixels.size(), static_cast<std::size_t>(width) * height * 4);
+        if (image.value().pixels.empty()) return;
+        // The resize filter can round a constant channel by one unit.
+        const int actual = image.value().pixels[0];
+        UT_CHECK(actual >= red - 1 && actual <= red + 1);
+        UT_CHECK_EQ(image.value().pixels[3], 255);
+    };
+    check_preview(4, 4, 2, 80);   // exact mip 2
+    check_preview(6, 6, 3, 50);   // mip 1; mip 2 would require upscaling
+    check_preview(1, 1, 1, 140);  // smallest mip
+    check_preview(0, 16, 8, 20);  // original resolution always uses mip 0
+    check_preview(64, 16, 8, 20); // caps never enlarge the original
+}
+
+UT_TEST_CASE("vtf preview: mip selection preserves tall and single-pixel aspect ratios and frames") {
+    const std::vector<std::pair<std::uint16_t, std::uint16_t>> sizes = {{8, 16}, {16, 1}};
+    for (const auto& size : sizes) {
+        const std::vector<std::uint8_t> bytes = make_colored_mips(size.first, size.second, 5);
+        const auto image = vtf::decode_vtf_preview_from_memory(bytes.data(), bytes.size(), 1, 6);
+        UT_CHECK(image.ok());
+        if (!image.ok()) continue;
+        UT_CHECK_EQ(image.value().width, size.first == 8 ? 3u : 6u);
+        UT_CHECK_EQ(image.value().height, size.first == 8 ? 6u : 1u);
+        if (image.value().pixels.size() < 4) continue;
+        UT_CHECK(image.value().pixels[0] >= 49 && image.value().pixels[0] <= 51);
+        UT_CHECK(image.value().pixels[1] >= 119 && image.value().pixels[1] <= 121);
+    }
+
+    const std::vector<std::uint8_t> no_mips = make_colored_mips(16, 8, 1);
+    const auto fallback = vtf::decode_vtf_preview_from_memory(no_mips.data(), no_mips.size(), 0, 4);
+    UT_CHECK(fallback.ok());
+    if (fallback.ok()) {
+        UT_CHECK_EQ(fallback.value().width, 4u);
+        UT_CHECK_EQ(fallback.value().height, 2u);
+        if (!fallback.value().pixels.empty()) {
+            UT_CHECK(fallback.value().pixels[0] >= 19 && fallback.value().pixels[0] <= 21);
+        }
+    }
+}
+
+UT_TEST_CASE("vtf preview: compressed mip previews support small blocks and animated frames") {
+    for (const char* name : {"dxt1.vtf", "brick05.vtf", "multiframe.vtf"}) {
+        for (std::uint32_t cap : {1u, 7u, 16u}) {
+            const auto image = vtf::decode_vtf_preview(fixture_dir() / name, 0, cap);
+            UT_CHECK(image.ok());
+            if (!image.ok()) continue;
+            UT_CHECK_EQ(image.value().width, cap);
+            UT_CHECK_EQ(image.value().height, cap);
+            UT_CHECK_EQ(image.value().pixels.size(), static_cast<std::size_t>(cap) * cap * 4);
+        }
+    }
+    const auto frame0 = vtf::decode_vtf_preview(fixture_dir() / "multiframe.vtf", 0, 4);
+    const auto frame1 = vtf::decode_vtf_preview(fixture_dir() / "multiframe.vtf", 1, 4);
+    UT_CHECK(frame0.ok());
+    UT_CHECK(frame1.ok());
+    if (frame0.ok() && frame1.ok()) UT_CHECK(frame0.value().pixels != frame1.value().pixels);
+}
 
 UT_TEST_CASE("vtf memory: decoding a buffer matches decoding the same file") {
     const fs::path fixture = fixture_dir() / "brick05.vtf";
