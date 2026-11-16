@@ -100,6 +100,13 @@ cmake-build-*/
 # ------------------------------------------------------------------------------
 .omo/
 .agent/
+/.agents/
+/.codex/
+
+# Documentación y configuración auxiliar local
+/docs/
+/.github/
+
 *.log
 hlmv_debug.log
 *.tmp
