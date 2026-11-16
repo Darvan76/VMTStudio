@@ -36,9 +36,6 @@ public:
     void setScene(const bridge::ModelScene& scene);
     void clear();
 
-    // Game-relative name of the selected material, empty when none.
-    QString currentMaterial() const;
-
 public slots:
     // Walk-through navigation (also bound to Alt+Left / Alt+Right).
     void selectNextMaterial();

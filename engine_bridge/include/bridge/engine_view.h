@@ -80,17 +80,6 @@ struct BinaryPrefix {
 // game folder ("models/props_c17/oildrum001.mdl"), which is how the engine file
 // system addresses loose files and VPK entries alike.
 
-// One .mdl found by list_models().
-struct ModelEntry {
-    std::string name;      // game-relative, ends in ".mdl"
-    bool loose = false;    // true when it lives on disk (not inside a VPK)
-};
-
-struct ModelList {
-    std::vector<ModelEntry> entries;
-    bool truncated = false; // the backend stopped after its safety cap
-};
-
 // A material of the loaded model, indexed by the model's texture table.
 struct ModelMaterial {
     int texture_index = -1;
@@ -234,9 +223,8 @@ public:
     // `extensions`, through the engine file system (loose files and VPKs).
     // Roots are game-relative with forward slashes ("materials",
     // "models/props_c17"); the extensions include the dot (".vmt") and are
-    // case-insensitive. The
-    // backend dedups paths case-insensitively. Same blocking contract as
-    // list_models(), and only available while the backend runs.
+    // case-insensitive. The backend dedups paths case-insensitively. This
+    // blocking query is only available while the backend runs.
     virtual vmt::Result<AssetList> list_assets(const std::vector<std::string>& roots,
                                                const std::vector<std::string>& extensions) = 0;
 
@@ -288,16 +276,9 @@ public:
     // them, so they block the calling thread for a few milliseconds up to the
     // timeout. Call them from a worker thread, never from the UI thread.
 
-    // Every .mdl in the game file system (loose folders and VPKs). `prefix` is
-    // an optional game-relative filter ("models/props_c17/"); empty lists all.
-    virtual vmt::Result<ModelList> list_models(const std::string& prefix) = 0;
-
     // Everything the UI needs about the currently loaded model in one round
     // trip. Fails when no model is loaded.
     virtual vmt::Result<ModelScene> query_model_scene() = 0;
-
-    // Playback state of the loaded model (frame, cycle, speed, ground speed).
-    virtual vmt::Result<AnimState> query_anim_state() = 0;
 
     // Reads a game file as raw bytes through the engine file system, so assets
     // inside VPKs are reachable (textures above all), same contract as

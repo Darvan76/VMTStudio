@@ -101,7 +101,6 @@ public:
     const std::filesystem::path& path() const noexcept { return path_; }
     bool has_path() const noexcept { return !path_.empty(); }
     const std::filesystem::path& material_root() const noexcept { return material_root_; }
-    void set_material_root(std::filesystem::path root) { material_root_ = std::move(root); }
     bool is_vtf() const noexcept { return is_vtf_; }
     const vtf::VtfInfo* vtf_info() const noexcept { return is_vtf_ ? &vtf_info_ : nullptr; }
     std::string display_name() const;

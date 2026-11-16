@@ -17,7 +17,6 @@
 #include <QButtonGroup>
 #include <QClipboard>
 #include <QComboBox>
-#include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
@@ -246,12 +245,6 @@ bool q_decompress_bytes(const std::vector<unsigned char>& input,
 
 std::shared_ptr<ui::AssetPack> make_asset_pack() {
     return std::make_shared<ui::AssetPack>(q_compress_bytes, q_decompress_bytes);
-}
-
-std::filesystem::path backend_executable() {
-    const QString path =
-        QCoreApplication::applicationDirPath() + QStringLiteral("/hlmv_backend.exe");
-    return std::filesystem::path(path.toStdWString());
 }
 
 // One-time import of the old assets-v1.tsv plus the loose *.bmp thumbnails.

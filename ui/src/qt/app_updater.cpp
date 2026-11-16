@@ -34,11 +34,6 @@ AppUpdater::~AppUpdater() {
     if (m_preparation.valid()) m_preparation.wait();
 }
 
-void AppUpdater::setRepository(const QString& owner, const QString& repo) {
-    m_owner = owner;
-    m_repo = repo;
-}
-
 void AppUpdater::cleanupCheckReply() {
     if (m_checkReply) {
         m_checkReply->disconnect(this);

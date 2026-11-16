@@ -32,7 +32,6 @@ namespace qt {
 
 class ViewportWidget;
 class InspectorWidget;
-class VmtHighlighter;
 class NotificationPopup;
 class AssetBrowserDialog;
 class ModelMaterialsDock;
@@ -257,7 +256,6 @@ private:
     InspectorWidget* m_inspector = nullptr;
     ViewportWidget* m_viewport = nullptr;
     QPlainTextEdit* m_codeEditor = nullptr;
-    VmtHighlighter* m_highlighter = nullptr;
     QDockWidget* m_validationDock = nullptr;
     QTableWidget* m_validationTable = nullptr;
     NotificationPopup* m_notificationPopup = nullptr;
@@ -266,7 +264,6 @@ private:
 
     QComboBox* m_shapeCombo = nullptr;
     QComboBox* m_renderModeCombo = nullptr;
-    QAction* m_animAction = nullptr;
     QAction* m_materialsDockAction = nullptr;
     QAction* m_animationDockAction = nullptr;
     QAction* m_closeModelAction = nullptr;

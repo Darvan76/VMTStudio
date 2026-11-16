@@ -20,7 +20,6 @@ namespace ui {
 void log_open(const std::filesystem::path& dir);
 void log_close();
 void log_write(const std::string& tag, const std::string& message);
-std::filesystem::path log_path();
 
 // Debug console management
 void console_open();

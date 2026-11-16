@@ -53,9 +53,5 @@ const vmt::Result<vmt::SchemaLibrary>& bundled_schemas() {
     return library;
 }
 
-vmt::Result<vmt::SchemaLibrary> load_bundled_schemas() {
-    return bundled_schemas();
-}
-
 } // namespace qt
 } // namespace ui

@@ -71,10 +71,6 @@ public:
     explicit AppUpdater(QObject* parent = nullptr);
     ~AppUpdater() override;
 
-    void setRepository(const QString& owner, const QString& repo);
-    QString owner() const { return m_owner; }
-    QString repo() const { return m_repo; }
-
     // Initiates an asynchronous check against GitHub Releases.
     // If manual is true, user-initiated (errors and up-to-date will notify).
     // If ignoredVersion is provided and matches the latest release tag,

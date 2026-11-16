@@ -22,8 +22,6 @@ endif()
 
 set(VTFLIB_IMPORT_LIB
     "$<IF:$<CONFIG:Debug>,${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/VTFLib/Debug/VTFLib++_d.lib,${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/VTFLib/Release/VTFLib++.lib>")
-set(VTFLIB_RUNTIME_DLL
-    "$<IF:$<CONFIG:Debug>,${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/bin/VTFLib++_d.dll,${VTFLIB_ROOT}/${VTFLIB_BUILD_DIR}/bin/VTFLib++.dll>")
 
 # Applying the patches must happen before the standalone VTFLib++ build, so
 # do it at configure time (and again on demand via the build target).

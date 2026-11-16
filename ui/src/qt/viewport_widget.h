@@ -57,8 +57,6 @@ private slots:
 private:
     bridge::EngineView* m_engine = nullptr;
     QTimer* m_resizeTimer = nullptr;
-    int m_pendingWidth = 0;
-    int m_pendingHeight = 0;
     QString m_statusText;
 };
 

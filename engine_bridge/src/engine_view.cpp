@@ -531,31 +531,12 @@ public:
     // the assets dump), so run them on a worker thread. Concurrent calls are
     // safe: every job generates its own token under a mutex.
 
-    vmt::Result<ModelList> list_models(const std::string& prefix) override {
-        if (!backend_running()) {
-            return list_models_from_disk(prefix);
-        }
-        const vmt::Result<std::string> dump = request_dump("models", prefix);
-        if (!dump.ok()) {
-            return vmt::Err<ModelList>(dump.error());
-        }
-        return parse_models_dump(dump.value());
-    }
-
     vmt::Result<ModelScene> query_model_scene() override {
         const vmt::Result<std::string> dump = request_dump("model_scene", std::string());
         if (!dump.ok()) {
             return vmt::Err<ModelScene>(dump.error());
         }
         return parse_model_scene_dump(dump.value());
-    }
-
-    vmt::Result<AnimState> query_anim_state() override {
-        const vmt::Result<std::string> dump = request_dump("anim_state", std::string());
-        if (!dump.ok()) {
-            return vmt::Err<AnimState>(dump.error());
-        }
-        return parse_anim_state_dump(dump.value());
     }
 
     vmt::Result<std::vector<unsigned char>> read_game_binary(
@@ -961,45 +942,6 @@ private:
                 vmt::ErrorCode::IoError, "failed to read the hlmv_backend binary prefix response"));
         }
         return parse_binary_prefix(bytes, max_bytes);
-    }
-
-    // list_models() without a backend: walks the loose <game_dir>/models tree.
-    // VPK content is only visible to the backend, so everything found here is
-    // reported as loose.
-    vmt::Result<ModelList> list_models_from_disk(const std::string& prefix) const {
-        if (config_.game_dir.empty()) {
-            return vmt::Err<ModelList>(engine_error(
-                vmt::ErrorCode::EngineInitFailed,
-                "hlmv_backend is not running and no game folder is set to scan for models"));
-        }
-
-        ModelList models;
-        std::error_code dir_error;
-        std::filesystem::recursive_directory_iterator it(config_.game_dir / L"models", dir_error);
-        const std::filesystem::recursive_directory_iterator end;
-        while (it != end) {
-            const std::filesystem::directory_entry entry = *it;
-            it.increment(dir_error);
-            if (dir_error) break;
-
-            std::error_code type_error;
-            if (!entry.is_regular_file(type_error) || type_error) continue;
-            if (entry.path().extension() != L".mdl") continue;
-
-            std::error_code relative_error;
-            const std::filesystem::path relative =
-                std::filesystem::relative(entry.path(), config_.game_dir, relative_error);
-            if (relative_error) continue;
-
-            std::string name = relative.generic_string();
-            if (!prefix.empty() && name.compare(0, prefix.size(), prefix) != 0) continue;
-
-            ModelEntry model;
-            model.name = std::move(name);
-            model.loose = true;
-            models.entries.push_back(std::move(model));
-        }
-        return vmt::Ok(std::move(models));
     }
 
     bool wait_for_backend_exit(unsigned timeout_ms) {

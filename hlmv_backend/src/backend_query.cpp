@@ -29,10 +29,6 @@
 
 extern void HLMV_Log(const char* fmt, ...);
 
-// models dump limits; the walk stops with a "note\ttruncated" row.
-#define QUERY_MAX_MODEL_ROWS   30000
-#define QUERY_MAX_MODEL_SCAN_ENTRIES 400000
-
 // assets dump limits. The row cap is what the UI index can absorb; the scan cap
 // and the clock budget keep a VPK-heavy game from monopolizing the backend's
 // main thread. The budget is per root so a pathological root cannot starve the
@@ -534,58 +530,6 @@ static void ScanFilesRecursive(const std::string& root, const std::string& prefi
 }
 
 //-----------------------------------------------------------------------------
-// models dump
-//-----------------------------------------------------------------------------
-
-static void BuildModelsDump(const std::string& args, const std::string& token,
-                            std::string& text, std::string& error)
-{
-	if (!g_pFileSystem)
-	{
-		error = "file system is not available";
-		return;
-	}
-
-	std::string prefix = FixSlashes(Trimmed(args));
-
-	// Walk the directory the prefix points into; an empty or partial prefix
-	// falls back to the models/ root.
-	std::string root = "models";
-	if (!prefix.empty())
-	{
-		size_t slash = prefix.find_last_of('/');
-		if (slash != std::string::npos)
-		{
-			root = prefix.substr(0, slash);
-			if (root.empty())
-			{
-				root = "models";
-			}
-		}
-	}
-
-	static const std::vector<std::string> kModelExtensions = { ".mdl" };
-	FileScan scan(QUERY_MAX_MODEL_ROWS, QUERY_MAX_MODEL_SCAN_ENTRIES, token);
-	ScanFilesFlat(root, prefix, kModelExtensions, scan);
-	ScanFilesRecursive(root, prefix, kModelExtensions, scan);
-
-	text = "VMTStudio-IPC\t2\n";
-	AppendRow(text, { "kind", "models" });
-	for (std::map<std::string, std::string>::const_iterator it = scan.paths.begin(); it != scan.paths.end(); ++it)
-	{
-		if (scan.Cancelled()) { error = "query cancelled"; return; }
-		AppendRow(text, { "model", it->second, QueryFileSource(it->second) });
-	}
-	if (scan.truncated)
-	{
-		// Unknown rows are ignored by the parser; this documents the cut.
-		AppendRow(text, { "note", "truncated" });
-	}
-
-	HLMV_Log("[IPC] models dump: %d row(s)%s\n", (int)scan.paths.size(), scan.truncated ? " (truncated)" : "");
-}
-
-//-----------------------------------------------------------------------------
 // assets dump
 //-----------------------------------------------------------------------------
 
@@ -974,29 +918,6 @@ static void BuildModelSceneDump(std::string& text, std::string& error)
 }
 
 //-----------------------------------------------------------------------------
-// anim_state dump
-//-----------------------------------------------------------------------------
-
-static void BuildAnimStateDump(std::string& text, std::string& error)
-{
-	if (!ModelIsLoaded())
-	{
-		error = "no model is loaded";
-		return;
-	}
-
-	text = "VMTStudio-IPC\t2\n";
-	AppendRow(text, { "kind", "anim_state" });
-	AppendRow(text, { "state",
-		IntField(g_pStudioModel->GetSequence()),
-		FloatField(g_pStudioModel->GetFrame()),
-		FloatField(g_pStudioModel->GetCycle()),
-		FloatField(g_viewerSettings.speedScale),
-		FloatField(g_pStudioModel->GetGroundSpeed()),
-		g_viewerSettings.pause ? "1" : "0" });
-}
-
-//-----------------------------------------------------------------------------
 // Job execution
 //-----------------------------------------------------------------------------
 
@@ -1026,21 +947,13 @@ static void RunDumpJob(const BackendQueryJob& job)
 	std::string text;
 	std::string error;
 
-	if (job.kind == "models")
-	{
-		BuildModelsDump(job.args, job.token, text, error);
-	}
-	else if (job.kind == "assets")
+	if (job.kind == "assets")
 	{
 		BuildAssetsDump(job.args, job.token, text, error);
 	}
 	else if (job.kind == "model_scene")
 	{
 		BuildModelSceneDump(text, error);
-	}
-	else if (job.kind == "anim_state")
-	{
-		BuildAnimStateDump(text, error);
 	}
 	else if (job.kind == "exists")
 	{

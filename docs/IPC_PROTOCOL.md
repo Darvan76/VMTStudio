@@ -72,7 +72,7 @@ keeps the message handler fast (the `WM_COPYDATA` round trip has a 1 s timeout)
 and lets the UI wait without blocking its own message loop.
 
 ```
-DUMP <kind> <token> [args]      # kind: models | assets | model_scene | anim_state | exists
+DUMP <kind> <token> [args]      # kind: assets | model_scene | exists
 RAW <token> <game-relative path>  # binary payload (VPK-aware)
 RAW_PREFIX <token> <max-bytes> <game-relative path> # bounded prefix + original size
 ```
@@ -113,10 +113,6 @@ RAW_PREFIX <token> <max-bytes> <game-relative path> # bounded prefix + original 
   native messages while waiting for the embedded child and allows 100 ms for
   normal DLL cleanup before the existing forced-exit fallback. The renderer owns
   no edited documents; frontend writes and workers are finished first.
-
-`DUMP models [prefix]`: every `*.mdl` reachable through the engine file system
-(loose folders and VPKs), including VPK-packed content. `prefix` is a
-game-relative path prefix such as `models/props_c17/`.
 
 `RAW_PREFIX <token> <max-bytes> <game-relative path>` opens the mounted game
 file (loose or VPK) and reads only its first `min(file-size, max-bytes)` bytes.
@@ -160,8 +156,6 @@ DUMP assets <token> materials;models .vmt;.vtf;.mdl
 `DUMP model_scene` (no arguments): everything the UI needs about the loaded
 model in one round trip.
 
-`DUMP anim_state`: the playback state of the loaded model.
-
 `DUMP exists <token> <game-relative path>`: checks `IFileSystem::FileExists`
 against the mounted `GAME` search paths, including VPK entries and loose
 overrides. The path keeps its extension and may contain spaces; absolute paths,
@@ -183,16 +177,6 @@ kind\t<kind>
   must have `TAB`, `LF` and `CR` replaced by a space.
 * Rows are `field<TAB>...`; unknown `field`s must be ignored by the parser so
   the backend can add information without breaking older UIs.
-
-`kind=models`:
-
-```
-model\t<game-relative path ending in .mdl>\t<loose|vpk>
-note\ttruncated
-```
-
-* `note\ttruncated` is only written when the scan hit its safety cap; a parser
-  should surface it as "refine the search" (the list is incomplete).
 
 `kind=assets`:
 
@@ -227,12 +211,6 @@ pose\t<index>\t<name>\t<min value>\t<max value>
 (`studiohdr_t::textureindex`), which is what `use` rows reference. Skin
 families remap texture indices per skin; the dump reports the material table of
 the current skin.
-
-`kind=anim_state`:
-
-```
-state\t<sequence index>\t<frame>\t<cycle 0..1>\t<speed scale>\t<ground speed>\t<paused 0|1>
-```
 
 `kind=exists`:
 

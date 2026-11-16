@@ -305,7 +305,7 @@ void MainWindow::setupUi() {
     m_codeEditor->setFont(monoFont);
     m_codeEditor->setTabStopDistance(24);
 
-    m_highlighter = new VmtHighlighter(m_codeEditor->document());
+    new VmtHighlighter(m_codeEditor->document());
     mainSplitter->addWidget(m_codeEditor);
 
     // Set proportional initial split
@@ -434,7 +434,7 @@ void MainWindow::setupMenus() {
     modeMenu->addAction(tr("Normals"), [this]() { onRenderModeSelected(3); });
 
     auto* animMenu = previewMenu->addMenu(tr("&Animation"));
-    m_animAction = animMenu->addAction(tr("Play / Pause"), QKeySequence(Qt::Key_Space), this, &MainWindow::onToggleAnimation);
+    animMenu->addAction(tr("Play / Pause"), QKeySequence(Qt::Key_Space), this, &MainWindow::onToggleAnimation);
     animMenu->addAction(tr("Halve Playback Speed"), QKeySequence(Qt::Key_BracketLeft), this, &MainWindow::onAnimationSpeedDown);
     animMenu->addAction(tr("Double Playback Speed"), QKeySequence(Qt::Key_BracketRight), this, &MainWindow::onAnimationSpeedUp);
     animMenu->addAction(tr("0.5x Speed"), [this]() { onSetAnimationSpeed(0.5f); });

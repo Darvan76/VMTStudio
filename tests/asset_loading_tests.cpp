@@ -140,9 +140,7 @@ public:
     vmt::Result<void> set_render_mode(const std::string&) override { return vmt::Ok(); }
     vmt::Result<void> set_animation(const std::string&) override { return vmt::Ok(); }
     vmt::Result<void> set_speed(float) override { return vmt::Ok(); }
-    vmt::Result<bridge::ModelList> list_models(const std::string&) override { return vmt::Ok(bridge::ModelList{}); }
     vmt::Result<bridge::ModelScene> query_model_scene() override { return vmt::Ok(bridge::ModelScene{}); }
-    vmt::Result<bridge::AnimState> query_anim_state() override { return vmt::Ok(bridge::AnimState{}); }
     vmt::Result<std::vector<unsigned char>> read_game_binary(const std::string& path) override {
         return read_binary_file(path);
     }

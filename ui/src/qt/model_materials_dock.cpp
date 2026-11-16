@@ -59,10 +59,6 @@ void ModelMaterialsDock::clear() {
     updateHeader();
 }
 
-QString ModelMaterialsDock::currentMaterial() const {
-    return selectedMaterialName();
-}
-
 void ModelMaterialsDock::selectNextMaterial() {
     stepMaterial(1);
 }

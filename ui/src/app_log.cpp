@@ -281,10 +281,6 @@ void log_write(const std::string& tag, const std::string& message) {
     }
 }
 
-std::filesystem::path log_path() {
-    return g_path;
-}
-
 void log_session_begin() {
     const std::filesystem::path marker = marker_path();
     if (marker.empty()) {

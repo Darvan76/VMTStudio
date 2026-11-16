@@ -33,7 +33,6 @@ public:
 
 signals:
     void parameterChanged(const QString& name, const QString& value);
-    void parameterRemoved(const QString& name);
     void shaderChanged(const QString& newShader);
     void showAdvancedToggled(bool show);
     void browseTextureRequested(const QString& paramName, const QString& currentValue);

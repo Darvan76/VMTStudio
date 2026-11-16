@@ -41,12 +41,6 @@ void write_u32(unsigned char* p, std::uint32_t value) {
     p[3] = static_cast<unsigned char>((value >> 24) & 0xFF);
 }
 
-void append_u32(std::vector<unsigned char>& out, std::uint32_t value) {
-    unsigned char bytes[4];
-    write_u32(bytes, value);
-    out.insert(out.end(), bytes, bytes + 4);
-}
-
 std::uint32_t fnv1a32(const unsigned char* data, std::size_t size) {
     std::uint32_t hash = 2166136261u;
     for (std::size_t i = 0; i < size; ++i) {

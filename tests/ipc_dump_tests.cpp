@@ -95,12 +95,12 @@ UT_TEST_CASE("ipc_dump: binary prefix rejects invalid limits and inconsistent fr
 
 UT_TEST_CASE("ipc_dump: version detection accepts the current one and reports the rest") {
     const std::string valid =
-        dump_text("models", { "model\tmodels/props_c17/oildrum001.mdl\tloose" });
+        dump_text("assets", { "asset\tmodels/props_c17/oildrum001.mdl\tloose" });
     UT_CHECK_EQ(bridge::dump_protocol_version(valid), 2);
     UT_CHECK_EQ(bridge::dump_protocol_version(with_crlf(valid)), 2);
 
     UT_CHECK_EQ(bridge::dump_protocol_version(""), 0);
-    UT_CHECK_EQ(bridge::dump_protocol_version("kind\tmodels\n"), 0);
+    UT_CHECK_EQ(bridge::dump_protocol_version("kind\tassets\n"), 0);
     UT_CHECK_EQ(bridge::dump_protocol_version("VMTStudio-IPC\t"), 0);
     UT_CHECK_EQ(bridge::dump_protocol_version("VMTStudio-IPC\t2x\n"), 0);
     UT_CHECK_EQ(bridge::dump_protocol_version("VMTStudio-IPC\t0\n"), 0);
@@ -108,27 +108,27 @@ UT_TEST_CASE("ipc_dump: version detection accepts the current one and reports th
     UT_CHECK_EQ(bridge::dump_protocol_version("VMTStudio-IPC\t3\n"), 3);
 
     // A dump without a header cannot be parsed.
-    const vmt::Result<bridge::ModelList> missing = bridge::parse_models_dump("kind\tmodels\n");
+    const vmt::Result<bridge::AssetList> missing = bridge::parse_assets_dump("kind\tassets\n");
     UT_CHECK(!missing.ok());
     UT_CHECK_EQ(missing.error().code, vmt::ErrorCode::ParseError);
 
     // A dump from a newer backend is refused with a clear error.
-    const vmt::Result<bridge::ModelList> newer =
-        bridge::parse_models_dump("VMTStudio-IPC\t3\nkind\tmodels\n");
+    const vmt::Result<bridge::AssetList> newer =
+        bridge::parse_assets_dump("VMTStudio-IPC\t3\nkind\tassets\n");
     UT_CHECK(!newer.ok());
     UT_CHECK_EQ(newer.error().code, vmt::ErrorCode::ParseError);
     UT_CHECK(contains(newer.error().message, "too new"));
 }
 
 UT_TEST_CASE("ipc_dump: the kind row is validated") {
-    const vmt::Result<bridge::ModelList> wrong_kind =
-        bridge::parse_models_dump("VMTStudio-IPC\t2\nkind\tanim_state\n");
+    const vmt::Result<bridge::AssetList> wrong_kind =
+        bridge::parse_assets_dump("VMTStudio-IPC\t2\nkind\tmodel_scene\n");
     UT_CHECK(!wrong_kind.ok());
     UT_CHECK_EQ(wrong_kind.error().code, vmt::ErrorCode::ParseError);
-    UT_CHECK(contains(wrong_kind.error().message, "anim_state"));
+    UT_CHECK(contains(wrong_kind.error().message, "model_scene"));
 
-    const vmt::Result<bridge::ModelList> no_kind = bridge::parse_models_dump(
-        "VMTStudio-IPC\t2\nmodel\tmodels/props_c17/oildrum001.mdl\tloose\n");
+    const vmt::Result<bridge::AssetList> no_kind = bridge::parse_assets_dump(
+        "VMTStudio-IPC\t2\nasset\tmodels/props_c17/oildrum001.mdl\tloose\n");
     UT_CHECK(!no_kind.ok());
     UT_CHECK_EQ(no_kind.error().code, vmt::ErrorCode::ParseError);
 }
@@ -178,87 +178,13 @@ UT_TEST_CASE("ipc_dump: exists rejects malformed or ambiguous results") {
 
 UT_TEST_CASE("ipc_dump: exists refuses wrong kinds and newer protocol versions") {
     const vmt::Result<bool> wrong_kind =
-        bridge::parse_exists_dump(dump_text("models", { "exists\t0" }));
+        bridge::parse_exists_dump(dump_text("assets", { "exists\t0" }));
     UT_CHECK(!wrong_kind.ok());
 
     const vmt::Result<bool> newer =
         bridge::parse_exists_dump("VMTStudio-IPC\t3\nkind\texists\nexists\t1\n");
     UT_CHECK(!newer.ok());
     UT_CHECK(contains(newer.error().message, "too new"));
-}
-
-UT_TEST_CASE("ipc_dump: models: loose and vpk entries parse") {
-    const std::string text = dump_text("models", {
-        "model\tmodels/props_c17/oildrum001.mdl\tloose",
-        "model\tmodels/props_junk/wood_crate001a.mdl\tvpk",
-    });
-    const vmt::Result<bridge::ModelList> parsed = bridge::parse_models_dump(text);
-    UT_CHECK(parsed.ok());
-    if (!parsed.ok()) return;
-
-    const bridge::ModelList& models = parsed.value();
-    UT_CHECK_EQ(models.entries.size(), std::size_t{2});
-    if (models.entries.size() != std::size_t{2}) return;
-    UT_CHECK_EQ(models.entries[0].name, "models/props_c17/oildrum001.mdl");
-    UT_CHECK(models.entries[0].loose);
-    UT_CHECK_EQ(models.entries[1].name, "models/props_junk/wood_crate001a.mdl");
-    UT_CHECK(!models.entries[1].loose);
-    UT_CHECK(!models.truncated);
-}
-
-UT_TEST_CASE("ipc_dump: models: unknown rows are ignored") {
-    const std::string text = dump_text("models", {
-        "note\ttruncated after the safety cap",
-        "model\tmodels/props_c17/oildrum001.mdl\tloose",
-        "future_row\t1\t2\t3\t4\t5",
-    });
-    const vmt::Result<bridge::ModelList> parsed = bridge::parse_models_dump(text);
-    UT_CHECK(parsed.ok());
-    if (!parsed.ok()) return;
-    UT_CHECK_EQ(parsed.value().entries.size(), std::size_t{1});
-}
-
-UT_TEST_CASE("ipc_dump: models: the truncation note is exposed") {
-    const vmt::Result<bridge::ModelList> capped = bridge::parse_models_dump(dump_text("models", {
-        "model\tmodels/props_c17/oildrum001.mdl\tloose",
-        "note\ttruncated",
-    }));
-    UT_CHECK(capped.ok());
-    if (!capped.ok()) return;
-    UT_CHECK(capped.value().truncated);
-    UT_CHECK_EQ(capped.value().entries.size(), std::size_t{1});
-
-    const vmt::Result<bridge::ModelList> whole = bridge::parse_models_dump(dump_text("models", {
-        "model\tmodels/props_c17/oildrum001.mdl\tloose",
-    }));
-    UT_CHECK(whole.ok());
-    if (!whole.ok()) return;
-    UT_CHECK(!whole.value().truncated);
-}
-
-UT_TEST_CASE("ipc_dump: models: malformed rows fail with ParseError") {
-    const vmt::Result<bridge::ModelList> missing_column = bridge::parse_models_dump(dump_text("models", {
-        "model\tmodels/props_c17/oildrum001.mdl\tloose",
-        "model\tmodels/props_junk/broken.mdl",
-    }));
-    UT_CHECK(!missing_column.ok());
-    UT_CHECK_EQ(missing_column.error().code, vmt::ErrorCode::ParseError);
-    UT_CHECK(contains(missing_column.error().message, "line 4"));
-    UT_CHECK(contains(missing_column.error().message, "model"));
-
-    const vmt::Result<bridge::ModelList> bad_source = bridge::parse_models_dump(dump_text("models", {
-        "model\tmodels/props_junk/broken.mdl\tfloppy",
-    }));
-    UT_CHECK(!bad_source.ok());
-    UT_CHECK_EQ(bad_source.error().code, vmt::ErrorCode::ParseError);
-}
-
-UT_TEST_CASE("ipc_dump: models: an empty list is valid") {
-    const vmt::Result<bridge::ModelList> parsed =
-        bridge::parse_models_dump("VMTStudio-IPC\t2\nkind\tmodels\n");
-    UT_CHECK(parsed.ok());
-    if (!parsed.ok()) return;
-    UT_CHECK(parsed.value().entries.empty());
 }
 
 UT_TEST_CASE("ipc_dump: model_scene: every row kind parses") {
@@ -458,59 +384,6 @@ UT_TEST_CASE("ipc_dump: model_scene: malformed rows fail with ParseError") {
     UT_CHECK_EQ(bad_stats.error().code, vmt::ErrorCode::ParseError);
 }
 
-UT_TEST_CASE("ipc_dump: anim_state: happy path and paused flag") {
-    const vmt::Result<bridge::AnimState> running =
-        bridge::parse_anim_state_dump(dump_text("anim_state", {
-            "state\t2\t42.5\t0.35\t1.5\t120\t0",
-        }));
-    UT_CHECK(running.ok());
-    if (running.ok()) {
-        UT_CHECK_EQ(running.value().sequence, 2);
-        UT_CHECK_EQ(running.value().frame, 42.5f);
-        UT_CHECK_EQ(running.value().cycle, 0.35f);
-        UT_CHECK_EQ(running.value().speed, 1.5f);
-        UT_CHECK_EQ(running.value().ground_speed, 120.0f);
-        UT_CHECK(!running.value().paused);
-    }
-
-    const vmt::Result<bridge::AnimState> paused =
-        bridge::parse_anim_state_dump(dump_text("anim_state", {
-            "state\t0\t0\t0\t1\t0\t1",
-        }));
-    UT_CHECK(paused.ok());
-    if (paused.ok()) {
-        UT_CHECK(paused.value().paused);
-    }
-
-    // A dump without a state row keeps the neutral defaults (frame 0, running).
-    const vmt::Result<bridge::AnimState> empty =
-        bridge::parse_anim_state_dump("VMTStudio-IPC\t2\nkind\tanim_state\n");
-    UT_CHECK(empty.ok());
-    if (empty.ok()) {
-        UT_CHECK_EQ(empty.value().sequence, 0);
-        UT_CHECK_EQ(empty.value().speed, 1.0f);
-        UT_CHECK(!empty.value().paused);
-    }
-}
-
-UT_TEST_CASE("ipc_dump: anim_state: malformed rows fail with ParseError") {
-    const vmt::Result<bridge::AnimState> missing_column =
-        bridge::parse_anim_state_dump(dump_text("anim_state", {
-            "state\t0\t0\t0\t1\t0",
-        }));
-    UT_CHECK(!missing_column.ok());
-    UT_CHECK_EQ(missing_column.error().code, vmt::ErrorCode::ParseError);
-    UT_CHECK(contains(missing_column.error().message, "state"));
-
-    const vmt::Result<bridge::AnimState> bad_flag =
-        bridge::parse_anim_state_dump(dump_text("anim_state", {
-            "state\t0\t0\t0\t1\t0\tyes",
-        }));
-    UT_CHECK(!bad_flag.ok());
-    UT_CHECK_EQ(bad_flag.error().code, vmt::ErrorCode::ParseError);
-    UT_CHECK(contains(bad_flag.error().message, "paused"));
-}
-
 UT_TEST_CASE("ipc_dump: assets: loose and vpk entries parse") {
     const std::string text = dump_text("assets", {
         "asset\tmaterials/brick/brick001.vmt\tvpk",
@@ -592,10 +465,10 @@ UT_TEST_CASE("ipc_dump: assets: header and kind are validated") {
     UT_CHECK_EQ(missing_header.error().code, vmt::ErrorCode::ParseError);
 
     const vmt::Result<bridge::AssetList> wrong_kind =
-        bridge::parse_assets_dump("VMTStudio-IPC\t2\nkind\tmodels\n");
+        bridge::parse_assets_dump("VMTStudio-IPC\t2\nkind\tmodel_scene\n");
     UT_CHECK(!wrong_kind.ok());
     UT_CHECK_EQ(wrong_kind.error().code, vmt::ErrorCode::ParseError);
-    UT_CHECK(contains(wrong_kind.error().message, "models"));
+    UT_CHECK(contains(wrong_kind.error().message, "model_scene"));
 
     const vmt::Result<bridge::AssetList> newer =
         bridge::parse_assets_dump("VMTStudio-IPC\t3\nkind\tassets\n");
@@ -614,18 +487,6 @@ UT_TEST_CASE("ipc_dump: assets: an empty list is valid") {
 }
 
 UT_TEST_CASE("ipc_dump: CRLF line endings and names with spaces") {
-    const std::string text = with_crlf(dump_text("models", {
-        "model\tmodels/props c17/oil drum.mdl\tloose",
-    }));
-    const vmt::Result<bridge::ModelList> parsed = bridge::parse_models_dump(text);
-    UT_CHECK(parsed.ok());
-    if (!parsed.ok()) return;
-    UT_CHECK_EQ(parsed.value().entries.size(), std::size_t{1});
-    if (parsed.value().entries.size() == std::size_t{1}) {
-        // The \r of the CRLF ending must not leak into the last field.
-        UT_CHECK_EQ(parsed.value().entries[0].name, "models/props c17/oil drum.mdl");
-    }
-
     const std::string scene_text = with_crlf(dump_text("model_scene", {
         "info\tname\tmodels/rock wall/rock wall.mdl",
         "bone\t0\tleft arm\t-1",

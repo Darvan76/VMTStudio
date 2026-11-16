@@ -269,38 +269,6 @@ int dump_protocol_version(const std::string& text) {
     return version;
 }
 
-vmt::Result<ModelList> parse_models_dump(const std::string& text) {
-    vmt::Result<std::vector<DumpRow>> rows = dump_rows("models", text);
-    if (!rows.ok()) {
-        return vmt::Err<ModelList>(rows.error());
-    }
-
-    ModelList models;
-    for (const DumpRow& row : rows.value()) {
-        const std::vector<std::string> fields = split_tabs(row.text);
-        if (fields.empty()) continue;
-        if (fields[0] == "note") {
-            // The backend ends a capped scan with "note\ttruncated"; unknown
-            // note rows are ignored like any other unknown row.
-            if (fields.size() >= 2 && fields[1] == "truncated") {
-                models.truncated = true;
-            }
-            continue;
-        }
-        if (fields[0] != "model") continue;  // forward compatible: ignore unknown rows
-
-        vmt::Error error;
-        const RowReader reader("models", row.line, fields, error);
-        ModelEntry model;
-        if (!reader.expect(3) || !reader.as_source(2, model.loose)) {
-            return vmt::Err<ModelList>(std::move(error));
-        }
-        model.name = fields[1];
-        models.entries.push_back(std::move(model));
-    }
-    return vmt::Ok(std::move(models));
-}
-
 vmt::Result<AssetList> parse_assets_dump(const std::string& text) {
     vmt::Result<std::vector<DumpRow>> rows = dump_rows("assets", text);
     if (!rows.ok()) {
@@ -507,34 +475,6 @@ vmt::Result<BinaryPrefix> parse_binary_prefix(
     }
     result.bytes.assign(payload.begin() + header_size, payload.end());
     return vmt::Ok(std::move(result));
-}
-
-vmt::Result<AnimState> parse_anim_state_dump(const std::string& text) {
-    vmt::Result<std::vector<DumpRow>> rows = dump_rows("anim_state", text);
-    if (!rows.ok()) {
-        return vmt::Err<AnimState>(rows.error());
-    }
-
-    AnimState state;  // defaults: frame 0, paused
-    for (const DumpRow& row : rows.value()) {
-        const std::vector<std::string> fields = split_tabs(row.text);
-        if (fields.empty()) continue;
-        if (fields[0] != "state") continue;
-
-        vmt::Error error;
-        const RowReader reader("anim_state", row.line, fields, error);
-        AnimState parsed;
-        if (!reader.expect(7) || !reader.as_int(1, "sequence", parsed.sequence) ||
-            !reader.as_float(2, "frame", parsed.frame) ||
-            !reader.as_float(3, "cycle", parsed.cycle) ||
-            !reader.as_float(4, "speed", parsed.speed) ||
-            !reader.as_float(5, "ground speed", parsed.ground_speed) ||
-            !reader.as_flag(6, "paused", parsed.paused)) {
-            return vmt::Err<AnimState>(std::move(error));
-        }
-        state = parsed;
-    }
-    return vmt::Ok(std::move(state));
 }
 
 } // namespace bridge

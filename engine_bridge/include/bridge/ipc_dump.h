@@ -22,11 +22,6 @@ int dump_protocol_version(const std::string& text);
 vmt::Result<BinaryPrefix> parse_binary_prefix(
     const std::vector<unsigned char>& payload, std::uint32_t max_bytes);
 
-// Parses a "models" dump. Unknown rows are ignored; malformed rows fail the
-// whole parse (the backend is the only writer, so a broken row is a bug and
-// silent data loss would be worse).
-vmt::Result<ModelList> parse_models_dump(const std::string& text);
-
 // Parses an "assets" dump (files under the requested roots, loose or VPK).
 vmt::Result<AssetList> parse_assets_dump(const std::string& text);
 
@@ -36,8 +31,5 @@ vmt::Result<bool> parse_exists_dump(const std::string& text);
 
 // Parses a "model_scene" dump.
 vmt::Result<ModelScene> parse_model_scene_dump(const std::string& text);
-
-// Parses an "anim_state" dump.
-vmt::Result<AnimState> parse_anim_state_dump(const std::string& text);
 
 } // namespace bridge

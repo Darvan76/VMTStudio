@@ -101,8 +101,6 @@ public:
     // path leaves the browser with only user folders.
     void setGame(const std::filesystem::path& gameDir,
                  const std::filesystem::path& binDir = {});
-    std::filesystem::path gameDir() const { return m_gameDir; }
-    std::filesystem::path binDir() const { return m_binDir; }
 
     // Pick mode: locks the type chips to `kind`, shows the "Seleccionar"
     // button and makes double-click/Enter emit assetPicked() instead of
@@ -111,7 +109,6 @@ public:
     void beginPick(int kind);
     void endPick();
     bool pickMode() const noexcept { return m_pickKind >= 0; }
-    int pickKind() const noexcept { return m_pickKind; }
 
     // Reset the filters: All kinds/sources (showAll) or one kind (showKind).
     // Both leave the search text alone and end pick mode.
@@ -120,7 +117,6 @@ public:
 
     // User folders added with "Add folder…". W4 persists them; setFolders()
     // does not scan (the user's Refresh does).
-    QStringList folders() const { return m_folders; }
     void setFolders(const QStringList& folders);
 
     AssetBrowserState state() const;

@@ -26,12 +26,9 @@ public:
     explicit UpdateDialog(const ReleaseInfo& release, AppUpdater* updater, QWidget* parent = nullptr);
     ~UpdateDialog() override = default;
 
-    UserChoice userChoice() const { return m_choice; }
     void reject() override;
 
 signals:
-    void userChoseUpdate();
-    void userChoseLater();
     void userChoseSkip(const QString& versionTag);
 
 private slots:

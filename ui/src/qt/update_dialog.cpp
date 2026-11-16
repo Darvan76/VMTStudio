@@ -267,7 +267,6 @@ void UpdateDialog::onUpdateClicked() {
     }
 
     m_choice = UserChoice::UpdateNow;
-    emit userChoseUpdate();
 
     m_buttonContainer->hide();
     m_progressContainer->show();
@@ -282,7 +281,6 @@ void UpdateDialog::onUpdateClicked() {
 
 void UpdateDialog::onLaterClicked() {
     m_choice = UserChoice::Later;
-    emit userChoseLater();
     reject();
 }
 
