@@ -239,6 +239,15 @@ std::vector<TextureReference> texture_references_from_vmt_detailed(
     return result;
 }
 
+vmt::Result<TextureMetadata> TextureSource::metadata(const std::string& game_path) {
+    const auto bytes = read(game_path);
+    if (!bytes) return vmt::Err<TextureMetadata>(bytes.error());
+    return vmt::Ok(TextureMetadata{
+        static_cast<std::uint64_t>(bytes.value().size()),
+        vtf::open_vtf_info_from_memory(bytes.value().data(), bytes.value().size(),
+                                       std::filesystem::u8path(game_path))});
+}
+
 std::vector<std::string> texture_references_from_vmt(const std::string& vmt_text) {
     const std::vector<TextureReference> detailed = texture_references_from_vmt_detailed(vmt_text);
     std::vector<std::string> paths;

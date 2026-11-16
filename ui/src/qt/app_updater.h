@@ -9,6 +9,11 @@
 #include <QString>
 #include <QUrl>
 #include <memory>
+#include <atomic>
+#include <future>
+
+class QTimer;
+class QTemporaryDir;
 
 #include "ui/version.h"
 
@@ -42,6 +47,9 @@ struct ReleaseInfo {
                 continue;
             }
             if (a.name.endsWith(".zip", Qt::CaseInsensitive)) {
+                if (a.name.contains("debug", Qt::CaseInsensitive)) {
+                    continue;
+                }
                 if (a.name.contains("windows", Qt::CaseInsensitive) ||
                     a.name.contains("win64", Qt::CaseInsensitive) ||
                     a.name.contains("x64", Qt::CaseInsensitive)) {
@@ -79,9 +87,10 @@ public:
     // Cancels an ongoing download if one is active.
     void cancelDownload();
 
-    // Extracts the downloaded zip and launches the detached updater script,
-    // then schedules the application to terminate cleanly.
-    bool applyUpdate(const QString& zipFilePath, QString& errorMessage);
+    // Prepares the package in a cancellable worker. Only a completed, current
+    // preparation may launch the updater and schedule application shutdown.
+    void applyUpdate(const QString& zipFilePath);
+    bool isPreparing() const { return m_preparation.valid(); }
 
 signals:
     // Fired when a valid, newer release is found.
@@ -100,6 +109,8 @@ signals:
 
     // Update extraction / preparation status
     void extractionStatus(const QString& statusText);
+    void updateFailed(const QString& error);
+    void updateCancelled();
 
 private slots:
     void onCheckFinished();
@@ -109,6 +120,21 @@ private slots:
 private:
     void cleanupCheckReply();
     void cleanupDownloadReply();
+    bool prepareUpdate(const QString& zipFilePath,
+                       const std::shared_ptr<std::atomic<bool>>& cancelled,
+                       QString& payloadDir, QString& stagingDir, QString& errorMessage);
+    void finishPreparation();
+
+    struct PreparedUpdate {
+        QString payloadDir;
+        QString stagingDir;
+        QString error;
+    };
+    bool launchUpdate(const PreparedUpdate& update, QString& errorMessage);
+    std::future<PreparedUpdate> m_preparation;
+    std::shared_ptr<std::atomic<bool>> m_cancelPreparation;
+    QTimer* m_applyTimer = nullptr;
+    QString m_updateZip;
 
     QString m_owner = "Darvan76";
     QString m_repo = "VMTStudio";
@@ -120,6 +146,7 @@ private:
     QNetworkReply* m_downloadReply = nullptr;
 
     std::unique_ptr<QFile> m_downloadFile;
+    std::unique_ptr<QTemporaryDir> m_downloadDirectory;
     QString m_downloadPath;
     int m_redirectCount = 0;
     ReleaseInfo m_currentRelease;

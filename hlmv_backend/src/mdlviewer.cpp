@@ -22,6 +22,7 @@
 // email:          mete@swissquake.ch
 // web:            http://www.swissquake.ch/chumbalum-soft/
 //
+#include "bridge/engine_compatibility.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1767,6 +1768,11 @@ int main (int argc, char *argv[])
 
 	for (int i = 1; i < argc; ++i) {
 		if (strcmp(argv[i], "-bin") == 0 && i + 1 < argc) {
+			const auto compatibility = bridge::inspect_engine_compatibility(argv[i + 1]);
+			if (compatibility.requires_l4d2_backend) {
+				HLMV_Log("[HLMV] %s\n", compatibility.detail.c_str());
+				return 2;
+			}
 			SetDllDirectoryA(argv[i + 1]);
 			HLMV_Log("[HLMV] Early SetDllDirectoryA: %s\n", argv[i + 1]);
 			break;

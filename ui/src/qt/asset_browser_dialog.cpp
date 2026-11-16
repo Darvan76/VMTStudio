@@ -782,8 +782,9 @@ void AssetBrowserDialog::setEngine(bridge::EngineView* engine) {
         return;
     }
     m_engine = engine;
-    m_access->setEngine(engine);
     m_thumbnails->invalidate();
+    m_preview->clear();
+    m_access->setEngine(engine);
     updateRefreshState();
     updateStatus();
 }
@@ -1178,6 +1179,7 @@ void AssetBrowserDialog::applyScanOutcome(const AssetScanOutcome& outcome) {
         }
         m_scanRunning = false;
     }
+    m_pack = outcome.pack;
     updateRefreshState();
 
     if (!outcome.index) {
@@ -1209,7 +1211,7 @@ void AssetBrowserDialog::applyIndex(const std::shared_ptr<ui::AssetIndex>& index
         // previously failed thumbnail be attempted again.
         m_thumbnails->invalidate();
     }
-    // Packed assets key their BMP cache by the index's generation stamp: a
+    // Packed assets key their thumbnail cache by the index's generation stamp: a
     // rescan (or a cache load) selects the matching set of thumbnails.
     m_thumbnails->setGame(m_pack, generated);
     m_stale = stale;

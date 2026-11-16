@@ -6,7 +6,7 @@
 
 **A native, modern material studio powered by Valve's Source Engine renderer — pixel-perfect fidelity, right on your desktop.**
 
-![Release](https://img.shields.io/badge/release-v0.2.1-blue.svg)
+![Release](https://img.shields.io/github/v/release/Darvan76/VMTStudio)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![C++](https://img.shields.io/badge/standard-C%2B%2B17-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)
@@ -118,7 +118,7 @@ Unlike generic material viewers that try to replicate Source shaders through cus
 
 ### Dual-Process Architecture (x64 UI + Win32 HLMV)
 
-Valve's Source Engine 2013 and retail games (Half-Life 2, CS:S, TF2, Garry's Mod) are legacy 32-bit (`x86`) binaries. Qt 6 targets 64-bit (`x64`). Loading 32-bit DLLs into a 64-bit process is impossible on Windows.
+This backend requires compatible 32-bit (`x86`) Source engine DLLs, while the Qt 6 frontend targets 64-bit (`x64`). Select the game's x86 binaries when both architectures are available. An x64-only engine installation cannot be loaded by the current backend. Game names alone do not guarantee compatibility; use **Test Connection** to validate the selected installation.
 
 VMT-Studio solves this with an out-of-process client-server architecture:
 
@@ -156,7 +156,7 @@ VMT-Studio solves this with an out-of-process client-server architecture:
 
 1. **`vmtstudio` (Qt 6 x64)** — runs the modern UI, handles file I/O, parses schemas, provides syntax highlighting, and hosts a native Win32 child container (`ViewportWidget`).
 2. **`hlmv_backend` (Win32 x86)** — launched as a child process with `-embed <HWND> -game <dir> -bin <dir>`. Loads the game's native engine binaries, initializes Direct3D 9, and reparents its viewport into the Qt widget.
-3. **High-Speed IPC** — the frontend dispatches commands (`SET_MATERIAL`, `RELOAD_MATERIAL`, `SET_SHAPE`, `SET_LIGHTING`, `CAPTURE_THUMBNAIL`, etc.) via `WM_COPYDATA` messages with zero perceptible latency.
+3. **High-Speed IPC** — the frontend dispatches commands (`SET_MATERIAL`, `RELOAD_MATERIAL`, `SET_SHAPE`, `SET_LIGHTING`, etc.) via `WM_COPYDATA` messages with zero perceptible latency.
 
 ### Native Brush & Studio Model Rendering
 
@@ -177,13 +177,13 @@ Most material viewers can only display textures on a sphere. Source Engine mater
 | **`engine_bridge`** | IPC bridge, subprocess lifecycle, PE header inspection, and filesystem compatibility shims (runtime vtable fixups for Garry's Mod `VFileSystem022`). |
 | **`game_profiles`** | Steam library auto-detection, `gameinfo.txt` parsing, and comprehensive PE binary validation (architecture, DLLs, exports). |
 | **`ui`** | Qt 6 GUI: docks, property inspectors, syntax highlighter, and dialogs. |
-| **`data/schema`** | JSON shader definitions: `VertexLitGeneric`, `LightmappedGeneric`, `UnlitGeneric`, `WorldVertexTransition`, `Water`, `Refract`, `Sprite`. |
+| **`data/schema`** | JSON shader definitions: `VertexLitGeneric`, `LightmappedGeneric`, `UnlitGeneric`, `WorldVertexTransition`, `Water`, `Refract`, `Sprite`, `UnlitTwoTexture`. |
 
 ---
 
 ## Supported Games & Engines
 
-The engine bridge supports automatic connection to any Source Engine branch based on Source SDK 2013 / Alien Swarm, including:
+The engine bridge targets compatible x86 Source SDK 2013 / Alien Swarm branches. The game picker recognizes the installations below; each engine build still requires validation:
 
 | Game | Notes |
 | --- | --- |
@@ -192,6 +192,7 @@ The engine bridge supports automatic connection to any Source Engine branch base
 | **Counter-Strike: Source** | |
 | **Team Fortress 2** | |
 | **Source SDK Base 2013** (SP / MP) | |
+| **Left 4 Dead 2** | Detected as its own branch; native preview pending. See [compatibility research](docs/L4D2_COMPATIBILITY.md). |
 | **Garry's Mod** | Currently not working (authoritative engine modifications; support in development) |
 | **Custom Source Mods** | Requires valid `gameinfo.txt` + `/bin` folder (mods with authoritative engine modifications are not working at this time) |
 
@@ -204,7 +205,7 @@ The engine bridge supports automatic connection to any Source Engine branch base
 
 Don't want to build from source? A precompiled portable package is ready to use:
 
-1. **Download** — grab `vmtstudio-v0.2.1-win64.zip` from the [Releases](https://github.com/Darvan76/VMTStudio/releases) page.
+1. **Download** — grab `vmtstudio-v<version>-win64.zip` from the [Releases](https://github.com/Darvan76/VMTStudio/releases) page.
 2. **Extract** — unzip anywhere (e.g. `C:\Tools\VMT-Studio`). No installation or admin rights required.
 3. **Run** — launch `vmtstudio.exe`.
 4. **Connect to Source Engine**:
@@ -215,7 +216,7 @@ Don't want to build from source? A precompiled portable package is ready to use:
 5. **Start Editing** — open any `.vmt` via **File > Open** or the **Asset Browser (`F3`)**.
 
 > [!NOTE]
-> The portable ZIP bundles `vmtstudio.exe` (64-bit Qt 6 frontend), `hlmv_backend.exe` (32-bit renderer), `VTFLib.dll`, and all Qt 6 runtime dependencies. **No proprietary Valve assets are distributed** — engine DLLs are loaded dynamically from your local game installation.
+> The portable ZIP bundles the x64 frontend, x86 HLMV backend, VTFLib++, Qt runtimes, preview primitives and dependency notices. Retail game DLLs and content come from your local installation. SDK-derived backend code is covered by the notices in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
@@ -240,7 +241,7 @@ The rendering backend must be compiled for **Win32 (32-bit)** to load Valve's 32
 
 ```powershell
 git clone --recursive https://github.com/Darvan76/VMTStudio.git
-cd VMT-Studio
+cd VMTStudio
 ```
 
 If already cloned:
@@ -257,13 +258,13 @@ git submodule update --init --recursive
 
 2. Build 32-bit VTFLib++ (for `hlmv_backend`):
    ```powershell
-   cmake -B thirdparty/vtflib/build_vtflib -A Win32 -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
+   cmake -S thirdparty/vtflib -B thirdparty/vtflib/build_vtflib -A Win32 -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF -DCMAKE_DEBUG_POSTFIX=_d
    cmake --build thirdparty/vtflib/build_vtflib --config Release
    ```
 
 3. Build 64-bit VTFLib++ (for `vmtstudio`):
    ```powershell
-   cmake -B thirdparty/vtflib/build_vtflib64 -A x64 -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
+   cmake -S thirdparty/vtflib -B thirdparty/vtflib/build_vtflib64 -A x64 -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF -DCMAKE_DEBUG_POSTFIX=_d
    cmake --build thirdparty/vtflib/build_vtflib64 --config Release
    ```
 
@@ -331,10 +332,8 @@ VMT-Studio can load and inspect Source Engine studio models (`.mdl`) with the sa
 
 ```powershell
 # 64-bit tests (core parser, VTF decoder, UI)
+cmake --build build64 --config Release
 ctest --test-dir build64 -C Release --output-on-failure
-
-# 32-bit tests (engine bridge, system components)
-ctest --test-dir build -C Release --output-on-failure
 ```
 
 ---
@@ -343,7 +342,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 ### Valve Corporation Disclaimer
 
-- **VMT-Studio does NOT distribute any proprietary Valve binaries, textures, models, or copyrighted game assets.**
+- Release packages include SDK-derived HLMV code and project preview primitives. They do not include retail game DLLs or game content.
 - Engine DLLs, materials, and models are loaded dynamically at runtime from a user-supplied, legally acquired local Source Engine installation.
 - *Valve*, the *Valve logo*, *Half-Life*, *Source*, *Counter-Strike*, and *Team Fortress* are trademarks and/or registered trademarks of **Valve Corporation**.
 
@@ -351,13 +350,13 @@ ctest --test-dir build -C Release --output-on-failure
 
 | Library | License | Notes |
 | --- | --- | --- |
-| **VTFLib++** | LGPL-2.1 | Linked dynamically. Full source + patches in `thirdparty/`. Shout out to [@ficool2](https://github.com/nicknine) for this library and his contributions to the Source Engine community. |
+| **VTFLib++** | LGPL-2.1 | Linked dynamically. Full source + patches in `thirdparty/`. Shout out to [@ficool2](https://github.com/ficool2) for this library and his contributions to the Source Engine community. |
 | **Qt 6** | LGPLv3 / Commercial | © The Qt Company Ltd. |
 | **Source SDK 2013** | Valve Source SDK License | |
 
 ### VMT-Studio License
 
-This project is open-source software licensed under the **MIT License**. See [LICENSE](LICENSE) for details.
+Original VMT-Studio code is licensed under the **MIT License**. Third-party and SDK-derived components keep their own licenses; see [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
@@ -365,4 +364,21 @@ This project is open-source software licensed under the **MIT License**. See [LI
 
 Parts of this project were designed, written, refactored, and documented with the assistance of Artificial Intelligence (AI).
 
-If you have an issue with AI-assisted software development: **we genuinely do not care about your opinion**. The tool works, it renders Source engine materials natively with 100% fidelity, solves real problems, and is free and open-source. Use it or don't.
+Contributions are reviewed on their behavior, code quality and test evidence.
+
+## Preparing a release
+
+For Debug builds, build both VTFLib configurations with `--config Debug` too.
+After the documented dependencies and SDK headers are available, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Config Both -RunTests
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_single_exe.ps1
+```
+
+`dist/` contains the versioned ZIP, portable EXE and SHA-256 checksums. The ZIP
+supports replacing compatible Qt / VTFLib DLLs. Read the current verification
+status and publishing steps in [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.md).
+CI validates both configurations and publishes only a tag that exactly matches
+the CMake version. Pushes and pull requests build artifacts without publishing.

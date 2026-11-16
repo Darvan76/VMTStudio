@@ -3,12 +3,12 @@
     Automated Release Packaging Script for VMT-Studio.
 
 .DESCRIPTION
-    Packages VMT-Studio (x64) frontend, HLMV backend (x86), VTFLib runtimes,
-    deployed Qt 6 libraries and plugins, shader schemas, and documentation
+    Packages VMT-Studio (x64) frontend, HLMV backend (x86), the x64 VTFLib runtime,
+    deployed Qt 6 libraries and plugins, and documentation
     into a distributable directory and ZIP archive.
 
 .PARAMETER Version
-    Release version string (default: 0.2.0).
+    Release version string (must match CMakeLists.txt; detected automatically).
 
 .PARAMETER BuildDir
     Root build directory for 64-bit target (default: build64).
@@ -18,11 +18,13 @@
 
 .EXAMPLE
     .\scripts\package_release.ps1
-    .\scripts\package_release.ps1 -Version "0.2.0" -BuildDir "build64" -OutDir "dist"
+    .\scripts\package_release.ps1 -BuildDir "build64" -OutDir "dist"
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = "0.2.1",
+    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')]
+    [string]$Version,
+    [ValidateSet('Release', 'Debug')]
     [string]$Config = "Release",
     [string]$BuildDir = "build64",
     [string]$OutDir = "dist"
@@ -33,16 +35,16 @@ $ErrorActionPreference = "Stop"
 # Repository root (one level above this script)
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
-# Auto-detect version from root CMakeLists.txt if default or not specified
-if (-not $PSBoundParameters.ContainsKey('Version')) {
-    $CMakePath = Join-Path $RepoRoot "CMakeLists.txt"
-    if (Test-Path $CMakePath) {
-        $CMakeContent = Get-Content $CMakePath -Raw
-        if ($CMakeContent -match '(?ms)project\s*\([^)]*VERSION\s+([0-9]+(?:\.[0-9]+)*)') {
-            $Version = $matches[1]
-        }
-    }
+# Refuse to label a binary package with a version different from its source.
+$CMakeContent = Get-Content -LiteralPath (Join-Path $RepoRoot 'CMakeLists.txt') -Raw
+if ($CMakeContent -notmatch '(?ms)project\s*\([^)]*VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+    throw 'Cannot read the application version from CMakeLists.txt.'
 }
+$ProjectVersion = $Matches[1]
+if ($PSBoundParameters.ContainsKey('Version') -and $Version -ne $ProjectVersion) {
+    throw "Package version $Version does not match project version $ProjectVersion."
+}
+$Version = $ProjectVersion
 
 # Resolve BuildDir and OutDir against RepoRoot if relative
 if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
@@ -58,9 +60,15 @@ if (-not [System.IO.Path]::IsPathRooted($OutDir)) {
 }
 
 $ConfigSuffix = if ($Config -ieq "Debug") { "-Debug" } elseif ($Config -ine "Release") { "-$Config" } else { "" }
+$ResolvedBuildDir = [System.IO.Path]::GetFullPath($ResolvedBuildDir)
+$ResolvedOutDir = [System.IO.Path]::GetFullPath($ResolvedOutDir)
 $StagingDirName = "vmtstudio-v$Version-win64$ConfigSuffix"
-$StagingDir = Join-Path $ResolvedOutDir $StagingDirName
+$StagingDir = [System.IO.Path]::GetFullPath((Join-Path $ResolvedOutDir $StagingDirName))
 $ZipPath = Join-Path $ResolvedOutDir "$StagingDirName.zip"
+$outputPrefix = $ResolvedOutDir.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+if (-not $StagingDir.StartsWith($outputPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The staging directory must stay inside the selected output directory.'
+}
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host " Packaging VMT-Studio $Config v$Version" -ForegroundColor Cyan
@@ -81,7 +89,7 @@ if (-not (Test-Path $ResolvedOutDir)) {
 # Clean previous staging directory if present
 if (Test-Path $StagingDir) {
     Write-Host "Cleaning existing staging directory..."
-    Remove-Item -Recurse -Force $StagingDir
+    Remove-Item -LiteralPath $StagingDir -Recurse -Force
 }
 New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
 
@@ -90,8 +98,6 @@ New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
 # -----------------------------------------------------------------------------
 $VmtStudioCandidates = @(
     (Join-Path $ResolvedBuildDir "bin/$Config/vmtstudio.exe"),
-    (Join-Path $ResolvedBuildDir "bin/Release/vmtstudio.exe"),
-    (Join-Path $ResolvedBuildDir "bin/Debug/vmtstudio.exe"),
     (Join-Path $ResolvedBuildDir "bin/vmtstudio.exe")
 )
 $VmtStudioExe = $null
@@ -114,10 +120,6 @@ Copy-Item -Path $VmtStudioExe -Destination (Join-Path $StagingDir "vmtstudio.exe
 $HlmvCandidates = @(
     (Join-Path $RepoRoot "build/bin/$Config/hlmv_backend.exe"),
     (Join-Path $ResolvedBuildDir "bin/$Config/hlmv_backend.exe"),
-    (Join-Path $RepoRoot "build/bin/Release/hlmv_backend.exe"),
-    (Join-Path $ResolvedBuildDir "bin/Release/hlmv_backend.exe"),
-    (Join-Path $RepoRoot "build/bin/Debug/hlmv_backend.exe"),
-    (Join-Path $ResolvedBuildDir "bin/Debug/hlmv_backend.exe"),
     (Join-Path $RepoRoot "build/bin/hlmv_backend.exe"),
     (Join-Path $ResolvedBuildDir "bin/hlmv_backend.exe")
 )
@@ -136,7 +138,7 @@ Write-Host "Copying hlmv_backend.exe from $HlmvBackendExe..."
 Copy-Item -Path $HlmvBackendExe -Destination (Join-Path $StagingDir "hlmv_backend.exe") -Force
 
 # -----------------------------------------------------------------------------
-# 3. Copy VTFLib runtime DLLs (64-bit and 32-bit if applicable)
+# 3. Copy the 64-bit VTFLib runtime DLL
 # -----------------------------------------------------------------------------
 # 64-bit VTFLib next to vmtstudio.exe
 $Vtf64Candidates = @(
@@ -157,6 +159,9 @@ $Vtf64Candidates = @(
 )
 $Vtf64Dll = $null
 foreach ($cand in $Vtf64Candidates) {
+    if ($Config -ieq 'Release' -and ($cand -match '[/\\]Debug[/\\]' -or $cand -like '*_d.dll')) {
+        continue
+    }
     if (Test-Path $cand) {
         $Vtf64Dll = $cand
         break
@@ -175,46 +180,6 @@ if ($Vtf64BaseName -ne "VTFLib.dll") {
 }
 if ($Vtf64BaseName -ne "VTFLib++.dll" -and $Vtf64BaseName -ne "VTFLib++_d.dll") {
     Copy-Item -Path $Vtf64Dll -Destination (Join-Path $StagingDir "VTFLib++.dll") -Force
-}
-
-# 32-bit VTFLib (if present in build/ or thirdparty)
-$Vtf32Candidates = @(
-    (Join-Path $RepoRoot "build/bin/$Config/VTFLib++_d.dll"),
-    (Join-Path $RepoRoot "build/bin/$Config/VTFLib++.dll"),
-    (Join-Path $RepoRoot "build/bin/$Config/VTFLib.dll"),
-    (Join-Path $RepoRoot "build/bin/Release/VTFLib++.dll"),
-    (Join-Path $RepoRoot "build/bin/Release/VTFLib.dll"),
-    (Join-Path $RepoRoot "build/bin/Debug/VTFLib++_d.dll"),
-    (Join-Path $RepoRoot "build/bin/Debug/VTFLib++.dll"),
-    (Join-Path $RepoRoot "build/bin/Debug/VTFLib.dll"),
-    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/$Config/VTFLib++_d.dll"),
-    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/$Config/VTFLib++.dll"),
-    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/$Config/VTFLib.dll"),
-    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/VTFLib++_d.dll"),
-    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/VTFLib++.dll"),
-    (Join-Path $RepoRoot "thirdparty/vtflib/build_vtflib/bin/VTFLib.dll")
-)
-$Vtf32Dll = $null
-foreach ($cand in $Vtf32Candidates) {
-    if (Test-Path $cand) {
-        $Vtf32Dll = $cand
-        break
-    }
-}
-if ($Vtf32Dll) {
-    Write-Host "Copying 32-bit VTFLib runtime from $Vtf32Dll..."
-    $X86Dir = Join-Path $StagingDir "x86"
-    if (-not (Test-Path $X86Dir)) {
-        New-Item -ItemType Directory -Path $X86Dir -Force | Out-Null
-    }
-    $Vtf32BaseName = Split-Path -Leaf $Vtf32Dll
-    Copy-Item -Path $Vtf32Dll -Destination (Join-Path $X86Dir $Vtf32BaseName) -Force
-    if ($Vtf32BaseName -ne "VTFLib.dll") {
-        Copy-Item -Path $Vtf32Dll -Destination (Join-Path $X86Dir "VTFLib.dll") -Force
-    }
-    if ($Vtf32BaseName -ne "VTFLib++.dll" -and $Vtf32BaseName -ne "VTFLib++_d.dll") {
-        Copy-Item -Path $Vtf32Dll -Destination (Join-Path $X86Dir "VTFLib++.dll") -Force
-    }
 }
 
 # -----------------------------------------------------------------------------
@@ -252,20 +217,12 @@ if ($Config -ieq "Debug") {
         }
     }
 
-    # VTFLib PDBs if present
+    # 64-bit VTFLib PDB if present
     if ($Vtf64Dll) {
         $Vtf64Pdb = [System.IO.Path]::ChangeExtension($Vtf64Dll, ".pdb")
         if (Test-Path $Vtf64Pdb) {
             Write-Host "  Copying $(Split-Path -Leaf $Vtf64Pdb)..."
             Copy-Item -Path $Vtf64Pdb -Destination (Join-Path $StagingDir (Split-Path -Leaf $Vtf64Pdb)) -Force
-        }
-    }
-    if ($Vtf32Dll) {
-        $Vtf32Pdb = [System.IO.Path]::ChangeExtension($Vtf32Dll, ".pdb")
-        if (Test-Path $Vtf32Pdb) {
-            Write-Host "  Copying 32-bit $(Split-Path -Leaf $Vtf32Pdb)..."
-            $X86Dir = Join-Path $StagingDir "x86"
-            Copy-Item -Path $Vtf32Pdb -Destination (Join-Path $X86Dir (Split-Path -Leaf $Vtf32Pdb)) -Force
         }
     }
 }
@@ -303,6 +260,45 @@ if ($Windeployqt) {
 
 # Copy any additional runtime DLLs from build directory
 $ReleaseBinDir = Split-Path -Parent $VmtStudioExe
+
+# Ship the redistributable CRT app-locally: a portable package must not depend
+# on Visual Studio or a separately installed VC++ redistributable.
+if ($Config -ieq 'Release') {
+    $crtDirectory = $null
+    $redistRoots = @()
+    if ($env:VCToolsRedistDir) {
+        $redistRoots += $env:VCToolsRedistDir
+    }
+    foreach ($edition in @('Community', 'Professional', 'Enterprise')) {
+        $redistRoot = Join-Path $env:ProgramFiles "Microsoft Visual Studio/2022/$edition/VC/Redist/MSVC"
+        if (Test-Path -LiteralPath $redistRoot -PathType Container) {
+            $redistRoots += @(Get-ChildItem -LiteralPath $redistRoot -Directory |
+                Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
+                Sort-Object { [version]$_.Name } -Descending | ForEach-Object { $_.FullName })
+        }
+    }
+    foreach ($redistRoot in $redistRoots) {
+        $candidate = Join-Path $redistRoot 'x64/Microsoft.VC143.CRT'
+        if (Test-Path -LiteralPath (Join-Path $candidate 'vcruntime140.dll') -PathType Leaf) {
+            $crtDirectory = $candidate
+            break
+        }
+    }
+    if ($crtDirectory) {
+        Get-ChildItem -LiteralPath $crtDirectory -Filter '*.dll' -File | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $StagingDir -Force
+        }
+    } else {
+        foreach ($runtimeName in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
+            $runtimePath = Join-Path $ReleaseBinDir $runtimeName
+            if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
+                throw "Cannot package a portable release: missing VC++ runtime $runtimeName."
+            }
+            Copy-Item -LiteralPath $runtimePath -Destination $StagingDir -Force
+        }
+    }
+}
+
 $AdditionalDllPatterns = @(
     "Qt6*.dll",
     "D3Dcompiler_47.dll",
@@ -349,29 +345,7 @@ foreach ($folder in $PluginFolders) {
 }
 
 # -----------------------------------------------------------------------------
-# 5. Copy data/schema directory
-# -----------------------------------------------------------------------------
-$SchemaSrc = Join-Path $RepoRoot "data/schema"
-if (Test-Path $SchemaSrc) {
-    Write-Host "Copying schema definitions..."
-    $SchemaDstData = Join-Path $StagingDir "data/schema"
-    if (-not (Test-Path $SchemaDstData)) {
-        New-Item -ItemType Directory -Path $SchemaDstData -Force | Out-Null
-    }
-    Copy-Item -Path (Join-Path $SchemaSrc "*") -Destination $SchemaDstData -Recurse -Force
-
-    # Also provide materials/schema beside the executable
-    $SchemaDstMaterials = Join-Path $StagingDir "materials/schema"
-    if (-not (Test-Path $SchemaDstMaterials)) {
-        New-Item -ItemType Directory -Path $SchemaDstMaterials -Force | Out-Null
-    }
-    Copy-Item -Path (Join-Path $SchemaSrc "*") -Destination $SchemaDstMaterials -Recurse -Force
-} else {
-    Write-Warning "Schema directory not found at '$SchemaSrc'."
-}
-
-# -----------------------------------------------------------------------------
-# 5b. Copy models directory
+# 5. Copy models directory
 # -----------------------------------------------------------------------------
 $ModelsSrc = Join-Path $RepoRoot "models"
 if (Test-Path $ModelsSrc) {
@@ -389,13 +363,33 @@ if (Test-Path $ModelsSrc) {
 # 6. Copy LICENSE and README files
 # -----------------------------------------------------------------------------
 Write-Host "Copying documentation and license..."
-$DocFiles = @("LICENSE", "README.md", "README.es.md")
+$DocFiles = @("LICENSE", "README.md", "README.es.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md")
 foreach ($doc in $DocFiles) {
     $srcDoc = Join-Path $RepoRoot $doc
-    if (Test-Path $srcDoc) {
-        Copy-Item -Path $srcDoc -Destination (Join-Path $StagingDir $doc) -Force
+    if (-not (Test-Path -LiteralPath $srcDoc -PathType Leaf)) {
+        throw "Required release documentation is missing: $srcDoc"
     }
+    Copy-Item -LiteralPath $srcDoc -Destination (Join-Path $StagingDir $doc) -Force
 }
+
+# Keep the license texts with both the ZIP and the embedded portable payload.
+$LicenseDir = Join-Path $StagingDir 'licenses'
+New-Item -ItemType Directory -Path $LicenseDir -Force | Out-Null
+$LicenseSources = @{
+    'VTFLib-LGPL-2.1.txt' = 'thirdparty/vtflib/LGPL.txt'
+    'miniz-LICENSE.txt' = 'thirdparty/vtflib/thirdparty/miniz/LICENSE'
+    'zstd-LICENSE.txt' = 'thirdparty/vtflib/thirdparty/zstd/LICENSE'
+    'Compressonator-LICENSE.txt' = 'thirdparty/vtflib/thirdparty/compressonator/license/license.txt'
+}
+foreach ($name in $LicenseSources.Keys) {
+    Copy-Item -LiteralPath (Join-Path $RepoRoot $LicenseSources[$name]) -Destination (Join-Path $LicenseDir $name) -Force
+}
+$AdditionalLicenses = Join-Path $RepoRoot 'thirdparty/licenses'
+if (Test-Path -LiteralPath $AdditionalLicenses -PathType Container) {
+    Copy-Item -Path (Join-Path $AdditionalLicenses '*') -Destination $LicenseDir -Recurse -Force
+}
+$PatchDir = Join-Path $LicenseDir 'VTFLib-patches'
+Copy-Item -LiteralPath (Join-Path $RepoRoot 'thirdparty/patches') -Destination $PatchDir -Recurse -Force
 
 # -----------------------------------------------------------------------------
 # 6b. Staging directory hygiene cleanup
@@ -417,7 +411,9 @@ if (Test-Path $ZipPath) {
 }
 
 Write-Host "Compressing archive to $ZipPath..."
+& (Join-Path $PSScriptRoot 'verify_release_package.ps1') -PackageDir $StagingDir -Version $Version -Config $Config
 Compress-Archive -Path $StagingDir -DestinationPath $ZipPath -Force
+& (Join-Path $PSScriptRoot 'verify_release_package.ps1') -PackageDir $StagingDir -ArchivePath $ZipPath -Version $Version -Config $Config
 
 # -----------------------------------------------------------------------------
 # 8. Summary output

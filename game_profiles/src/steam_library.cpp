@@ -277,18 +277,20 @@ std::vector<fs::path> SteamDetector::parse_library_folders(
 }
 
 std::vector<GameProfile> SteamDetector::discover_all_in(
-    const fs::path& steam_root, int max_depth_per_library) noexcept {
+    const fs::path& steam_root, int max_depth_per_library,
+    const std::atomic<bool>* cancelled) noexcept {
     std::vector<GameProfile> merged;
     try {
         std::vector<std::wstring> seen;
         for (const fs::path& library : parse_library_folders(steam_root)) {
+            if (cancelled && cancelled->load()) return {};
             if (!directory_exists(library)) {
                 continue; // stale libraryfolders.vdf entry
             }
             // discover() resets the manager, so each library gets its own
             // instance and the union is merged here.
             GameManager manager;
-            manager.discover(library, max_depth_per_library);
+            manager.discover(library, max_depth_per_library, cancelled);
             for (GameProfile& profile : manager.profiles()) {
                 const std::wstring key = path_key(profile.game_dir);
                 if (std::find(seen.begin(), seen.end(), key) != seen.end()) {
@@ -313,16 +315,18 @@ std::vector<GameProfile> SteamDetector::discover_all_in(
     } catch (...) {
         // Return whatever was collected; discovery never throws.
     }
+    if (cancelled && cancelled->load()) return {};
     return merged;
 }
 
 std::vector<GameProfile> SteamDetector::discover_all(
-    int max_depth_per_library) noexcept {
+    int max_depth_per_library, const std::atomic<bool>* cancelled) noexcept {
+    if (cancelled && cancelled->load()) return {};
     const std::optional<fs::path> steam_root = find_steam_root();
     if (!steam_root.has_value()) {
         return {};
     }
-    return discover_all_in(*steam_root, max_depth_per_library);
+    return discover_all_in(*steam_root, max_depth_per_library, cancelled);
 }
 
 } // namespace profiles

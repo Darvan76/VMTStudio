@@ -4,14 +4,14 @@
 
 #include <windows.h>
 #include <sstream>
-#include <vector>
 #include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <system_error>
 
 #include "tier0/icommandline.h"
 #include "materialsystem/imaterialsystem.h"
 #include "materialsystem/imaterial.h"
-#include "bitmap/imageformat.h"
 #include "filesystem.h"
 #include "ViewerSettings.h"
 #include "StudioModel.h"
@@ -22,7 +22,6 @@
 #include "brush_render.h"
 
 #include <cstdio>
-#include <filesystem>
 
 #ifndef RM_SHADED
 #define RM_SHADED RM_TEXTURED
@@ -433,41 +432,6 @@ bool Backend_SetCamera(float pitch, float yaw, float dist, float tx, float ty, f
     return true;
 }
 
-static bool WriteTga32(const std::string& path, int width, int height, const unsigned char* bgra)
-{
-    if (width <= 0 || height <= 0 || width > 4096 || height > 4096 || !bgra)
-    {
-        return false;
-    }
-
-    FILE* f = fopen(path.c_str(), "wb");
-    if (!f) return false;
-
-    unsigned char header[18] = { 0 };
-    header[2] = 2; // uncompressed true-color
-    header[12] = (unsigned char)(width & 0xFF);
-    header[13] = (unsigned char)((width >> 8) & 0xFF);
-    header[14] = (unsigned char)(height & 0xFF);
-    header[15] = (unsigned char)((height >> 8) & 0xFF);
-    header[16] = 32; // 32 bits per pixel
-    header[17] = 0x20 | 0x08; // 0x28 = top-left origin, 8-bit alpha
-
-    size_t written = fwrite(header, 1, 18, f);
-    if (written == 18)
-    {
-        size_t pixelBytes = (size_t)width * height * 4;
-        written = fwrite(bgra, 1, pixelBytes, f);
-        if (written == pixelBytes)
-        {
-            fclose(f);
-            return true;
-        }
-    }
-
-    fclose(f);
-    return false;
-}
-
 static bool WriteBmp32(const std::string& path, int width, int height, const unsigned char* bgra)
 {
     if (width <= 0 || height <= 0 || width > 4096 || height > 4096 || !bgra)
@@ -507,133 +471,6 @@ static bool WriteBmp32(const std::string& path, int width, int height, const uns
 bool Backend_WriteBmp32(const std::string& path, int width, int height, const unsigned char* bgra)
 {
     return WriteBmp32(path, width, height, bgra);
-}
-
-static std::vector<std::string> TokenizeArgs(const std::string& str)
-{
-    std::vector<std::string> tokens;
-    std::string current;
-    bool inQuote = false;
-    bool hadQuote = false;
-    for (size_t i = 0; i < str.size(); ++i)
-    {
-        char c = str[i];
-        if (c == '\"')
-        {
-            inQuote = !inQuote;
-            hadQuote = true;
-        }
-        else if (isspace((unsigned char)c) && !inQuote)
-        {
-            if (!current.empty() || hadQuote)
-            {
-                tokens.push_back(current);
-                current.clear();
-                hadQuote = false;
-            }
-        }
-        else
-        {
-            current += c;
-        }
-    }
-    if (!current.empty() || hadQuote)
-    {
-        tokens.push_back(current);
-    }
-    return tokens;
-}
-
-bool Backend_CaptureThumbnail(const std::string& material_name, int size, const std::string& out_path)
-{
-    if (size <= 0 || size > 4096 || out_path.empty() || !g_pMaterialSystem || !g_MatSysWindow)
-    {
-        return false;
-    }
-
-    std::string savedMat = g_currentPreviewMaterialName;
-    bool matChanged = false;
-
-    if (!material_name.empty() && material_name != "-" && material_name != savedMat)
-    {
-        if (Backend_SetMaterial(material_name))
-        {
-            matChanged = true;
-        }
-    }
-
-    // Render the frame into the backbuffer without presenting it so the pixels
-    // below are the frame we just drew.
-    g_bSkipSwap = true;
-    g_MatSysWindow->draw();
-
-    CMatRenderContextPtr ctx(g_pMaterialSystem);
-    if (!ctx)
-    {
-        g_bSkipSwap = false;
-        if (matChanged)
-        {
-            Backend_SetMaterial(savedMat);
-        }
-        return false;
-    }
-
-    ctx->Flush(true);
-
-    std::vector<unsigned char> pixels;
-    try
-    {
-        pixels.resize((size_t)size * size * 4);
-    }
-    catch (...)
-    {
-        g_bSkipSwap = false;
-        if (matChanged)
-        {
-            Backend_SetMaterial(savedMat);
-        }
-        return false;
-    }
-
-    ctx->ReadPixels(0, 0, size, size, pixels.data(), IMAGE_FORMAT_BGRA8888);
-    g_bSkipSwap = false;
-
-    try
-    {
-        std::filesystem::path p(out_path);
-        if (p.has_parent_path())
-        {
-            std::filesystem::create_directories(p.parent_path());
-        }
-    }
-    catch (...)
-    {
-    }
-
-    std::string ext;
-    size_t dotPos = out_path.rfind('.');
-    if (dotPos != std::string::npos)
-    {
-        ext = out_path.substr(dotPos);
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    }
-
-    bool success = false;
-    if (ext == ".bmp")
-    {
-        success = WriteBmp32(out_path, size, size, pixels.data());
-    }
-    else
-    {
-        success = WriteTga32(out_path, size, size, pixels.data());
-    }
-
-    if (matChanged)
-    {
-        Backend_SetMaterial(savedMat);
-    }
-
-    return success;
 }
 
 bool Backend_SetRenderMode(const std::string& mode)
@@ -777,26 +614,6 @@ bool BackendIPC_ExecuteCommand(const std::string& cmd)
         std::string shape;
         iss >> shape;
         return Backend_SetShape(shape);
-    }
-    else if (verb == "CAPTURE_THUMBNAIL")
-    {
-        std::vector<std::string> args = TokenizeArgs(cmd);
-        if (args.size() >= 4)
-        {
-            std::string mat = args[1];
-            if (mat == "-" || mat == "\"\"" || mat == "none")
-            {
-                mat.clear();
-            }
-            int size = atoi(args[2].c_str());
-            std::string out_path = args[3];
-            for (size_t i = 4; i < args.size(); ++i)
-            {
-                out_path += " " + args[i];
-            }
-            return Backend_CaptureThumbnail(mat, size, out_path);
-        }
-        return false;
     }
     else if (verb == "SET_RENDER_MODE")
     {
@@ -1126,6 +943,19 @@ bool BackendIPC_ExecuteCommand(const std::string& cmd)
         std::getline(iss >> std::ws, args);
         IPC_TrimString(args);
         return BackendQuery_HandleDump(kind, token, args);
+    }
+    else if (verb == "RAW_PREFIX")
+    {
+        std::string token;
+        std::string count;
+        if (!(iss >> token >> count)) return false;
+        unsigned int limit = 0;
+        const auto parsed = std::from_chars(count.data(), count.data() + count.size(), limit);
+        if (parsed.ec != std::errc() || parsed.ptr != count.data() + count.size()) return false;
+        std::string path;
+        std::getline(iss >> std::ws, path);
+        IPC_TrimString(path);
+        return BackendQuery_HandleRawPrefix(token, limit, path);
     }
     else if (verb == "RAW")
     {

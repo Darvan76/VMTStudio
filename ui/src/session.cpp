@@ -2,6 +2,7 @@
 #include "ui/atomic_file.h"
 
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -12,11 +13,11 @@ namespace {
 
 vmt::Error io_error(std::string message, const std::filesystem::path& path) {
     return vmt::make_error(vmt::ErrorCode::IoError, std::move(message),
-                           "Check that the file exists and is writable", path.string());
+                           "Check that the file exists and is writable", path.u8string());
 }
 
 bool is_materials_folder_name(const std::filesystem::path& name) {
-    const std::string s = name.string();
+    const std::string s = name.u8string();
     if (s.size() != 9) {
         return false;
     }
@@ -49,7 +50,7 @@ std::string vtf_texture_path(const std::filesystem::path& path) {
     if (path.empty()) {
         return {};
     }
-    std::string generic = path.generic_string();
+    std::string generic = path.generic_u8string();
     std::string lower = generic;
     for (char& c : lower) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -63,7 +64,7 @@ std::string vtf_texture_path(const std::filesystem::path& path) {
     } else if (lower.rfind("materials/", 0) == 0) {
         rel = generic.substr(10);
     } else {
-        rel = path.stem().generic_string();
+        rel = path.stem().generic_u8string();
     }
 
     if (ends_with_ci(rel, ".vtf")) {
@@ -115,29 +116,35 @@ std::filesystem::path detect_material_root(const std::filesystem::path& path) {
 vmt::Result<void> EditorSession::open_file(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
-        vmt::Error error = io_error("cannot open the file: " + path.string(), path);
+        vmt::Error error = io_error("cannot open the file: " + path.u8string(), path);
         error.code = vmt::ErrorCode::NotFound;
         error.remediation = "Check the file path and that the file is readable";
         last_error_ = error;
         return vmt::Err<void>(error);
     }
 
-    std::string content((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
-    if (!stream.good() && !stream.eof()) {
-        vmt::Error error = io_error("failed to read the file: " + path.string(), path);
-        last_error_ = error;
-        return vmt::Err<void>(error);
+    const bool has_vtf_ext = ends_with_ci(path.extension().u8string(), ".vtf");
+    bool has_vtf_sig = false;
+    if (!has_vtf_ext) {
+        // A VTF can have an incorrect extension. Disable read-ahead so this
+        // four-byte sniff cannot accidentally fetch its pixel payload.
+        if (stream.rdbuf()->pubsetbuf(nullptr, 0) == nullptr) {
+            last_error_ = io_error("cannot inspect the file header: " + path.u8string(), path);
+            return vmt::Err<void>(last_error_);
+        }
+        char signature[4] = {};
+        stream.read(signature, static_cast<std::streamsize>(sizeof(signature)));
+        has_vtf_sig = stream.gcount() == static_cast<std::streamsize>(sizeof(signature)) &&
+                      std::memcmp(signature, "VTF\0", sizeof(signature)) == 0;
+        if (!stream.good() && !stream.eof()) {
+            last_error_ = io_error("failed to read the file: " + path.u8string(), path);
+            return vmt::Err<void>(last_error_);
+        }
     }
-
-    const bool has_vtf_sig = content.size() >= 4 &&
-                             content[0] == 'V' && content[1] == 'T' &&
-                             content[2] == 'F' && content[3] == '\0';
-    const bool has_vtf_ext = ends_with_ci(path.string(), ".vtf");
+    stream.close();
 
     if (has_vtf_sig || has_vtf_ext) {
-        vmt::Result<vtf::VtfInfo> info =
-            vtf::open_vtf_info_from_memory(reinterpret_cast<const std::uint8_t*>(content.data()),
-                                           content.size(), path);
+        vmt::Result<vtf::VtfInfo> info = vtf::open_vtf_info(path);
         if (!info) {
             last_error_ = info.error();
             return vmt::Err<void>(info.error());
@@ -146,7 +153,7 @@ vmt::Result<void> EditorSession::open_file(const std::filesystem::path& path) {
         const std::string tex_path = vtf_texture_path(path);
         std::string vmt_text = "\"UnlitGeneric\"\n{\n\t\"$basetexture\" \"" + tex_path + "\"\n}\n";
 
-        const std::string name = path.filename().string();
+        const std::string name = path.filename().u8string();
         vmt::Result<void> result = apply_parsed(std::move(vmt_text), name, /*keep_text_on_error=*/false);
         if (!result) {
             return result;
@@ -162,7 +169,21 @@ vmt::Result<void> EditorSession::open_file(const std::filesystem::path& path) {
         return vmt::Ok();
     }
 
-    const std::string name = path.filename().string();
+    // Reopen with normal buffering for text; byte-at-a-time unbuffered reads
+    // would make large VMT documents unnecessarily expensive.
+    stream.clear();
+    stream.open(path, std::ios::binary);
+    if (!stream) {
+        last_error_ = io_error("cannot reopen the file: " + path.u8string(), path);
+        return vmt::Err<void>(last_error_);
+    }
+    std::string content((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    if (!stream.good() && !stream.eof()) {
+        last_error_ = io_error("failed to read the file: " + path.u8string(), path);
+        return vmt::Err<void>(last_error_);
+    }
+
+    const std::string name = path.filename().u8string();
     vmt::Result<void> result = apply_parsed(std::move(content), name, /*keep_text_on_error=*/false);
     if (!result) {
         return result;
@@ -379,7 +400,7 @@ vmt::Result<void> EditorSession::save_as(const std::filesystem::path& path) {
         return vmt::Err<void>(error);
     }
 
-    if (ends_with_ci(path.string(), ".vtf")) {
+    if (ends_with_ci(path.u8string(), ".vtf")) {
         vmt::Error error = vmt::make_error(
             vmt::ErrorCode::InvalidArgument,
             "cannot save VMT text with a .vtf extension",
@@ -406,7 +427,7 @@ vmt::Result<void> EditorSession::save_as(const std::filesystem::path& path) {
 
 std::string EditorSession::display_name() const {
     if (!path_.empty()) {
-        return path_.filename().string();
+        return path_.filename().u8string();
     }
     if (!virtual_name_.empty()) {
         return virtual_name_;

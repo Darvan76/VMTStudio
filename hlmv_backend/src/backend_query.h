@@ -24,6 +24,9 @@ void BackendQuery_SetMainWindow(HWND hWnd);
 // failures are reported through <token>.err.
 bool BackendQuery_HandleDump(const std::string& kind, const std::string& token, const std::string& args);
 bool BackendQuery_HandleRaw(const std::string& token, const std::string& path);
+// Prefix reads include the original file size and accept a 1..4096-byte limit.
+bool BackendQuery_HandleRawPrefix(const std::string& token, unsigned int maxBytes,
+                                 const std::string& path);
 
 // Runs the job carried by a VMTIPC_QUERY_JOB_MESSAGE and frees it.
 void BackendQuery_RunJob(WPARAM wParam, LPARAM lParam);

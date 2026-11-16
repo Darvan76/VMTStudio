@@ -218,6 +218,7 @@ private:
     // Owned jobs are drained before EngineView and its host window are destroyed.
     // Workers return values; only the UI thread touches widgets or adopts results.
     std::future<vmt::Result<std::unique_ptr<bridge::EngineView>>> m_engineFuture;
+    std::shared_ptr<std::atomic<bool>> m_engineCancelled;
     std::future<vmt::Result<bridge::ModelScene>> m_modelSceneFuture;
     QTimer* m_enginePollTimer = nullptr;
     QTimer* m_modelScenePollTimer = nullptr;

@@ -8,6 +8,8 @@
 #include <QGroupBox>
 #include <QFileDialog>
 #include <QMessageBox>
+#include <QTimer>
+#include <chrono>
 
 namespace ui {
 namespace qt {
@@ -105,29 +107,78 @@ ConnectionDialog::ConnectionDialog(ui::UISettings& settings, QWidget* parent)
     connect(m_saveBtn, &QPushButton::clicked, this, &ConnectionDialog::onSaveAndConnect);
     connect(m_cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
 
-    // Discover games from the last known location, then test right away.
+    m_discoveryTimer = new QTimer(this);
+    m_discoveryTimer->setInterval(25);
+    connect(m_discoveryTimer, &QTimer::timeout, this, &ConnectionDialog::finishDiscovery);
+    connect(this, &QDialog::finished, this, [this]() {
+        if (m_discoveryCancelled) m_discoveryCancelled->store(true);
+    });
+
+    // Let the dialog paint while discovery walks the remembered or Steam roots.
     if (!m_settings.last_bin_dir.empty()) {
         std::filesystem::path bin(m_settings.last_bin_dir);
         std::filesystem::path root = bin.parent_path().parent_path();
         if (root.empty()) {
             root = bin;
         }
-        m_gameManager.discover(root, 6);
-        populateGameCombo();
-        onTestConnection();
+        startDiscovery(root, false);
+        QTimer::singleShot(0, this, &ConnectionDialog::onTestConnection);
     } else {
         // First run without a remembered /bin folder: auto-discover Source
         // games across every Steam library (Crowbar-style) so the combo
         // starts populated. SteamDetector::discover_all already merges the
         // per-library scans (GameManager::discover clears its catalogue on
         // each call) and de-duplicates the union.
-        try {
-            m_gameManager.profiles() = profiles::SteamDetector::discover_all(6);
-        } catch (...) {
-            // Discovery must never crash the dialog; an empty list is fine.
-        }
-        populateGameCombo();
+        startDiscovery({}, true);
     }
+}
+
+ConnectionDialog::~ConnectionDialog() {
+    if (m_discoveryCancelled) m_discoveryCancelled->store(true);
+    // The worker owns its catalogue and only checks the shared cancellation flag.
+    // The future drains before that flag is released.
+    if (m_discoveryFuture.valid()) m_discoveryFuture.wait();
+}
+
+void ConnectionDialog::startDiscovery(const std::filesystem::path& root, bool steamFallback) {
+    if (m_discoveryFuture.valid()) return;
+    m_discoveryCancelled = std::make_shared<std::atomic<bool>>(false);
+    const auto cancelled = m_discoveryCancelled;
+    m_discoverBtn->setText(tr("Cancel discovery"));
+    m_gameCombo->setEnabled(false);
+    try {
+        m_discoveryFuture = std::async(std::launch::async, [root, steamFallback, cancelled]() {
+            profiles::GameManager games;
+            if (!root.empty()) games.discover(root, 6, cancelled.get());
+            if (games.profiles().empty() && steamFallback && !cancelled->load()) {
+                games.profiles() = profiles::SteamDetector::discover_all(6, cancelled.get());
+            }
+            return std::move(games.profiles());
+        });
+        m_discoveryTimer->start();
+    } catch (const std::exception& error) {
+        m_summaryLabel->setText(tr("Discovery failed: %1").arg(QString::fromUtf8(error.what())));
+        m_discoverBtn->setText(tr("Discover..."));
+        m_gameCombo->setEnabled(true);
+    }
+}
+
+void ConnectionDialog::finishDiscovery() {
+    if (!m_discoveryFuture.valid() ||
+        m_discoveryFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
+    m_discoveryTimer->stop();
+    try {
+        auto games = m_discoveryFuture.get();
+        if (!m_discoveryCancelled->load()) {
+            m_gameManager.profiles() = std::move(games);
+            populateGameCombo();
+        }
+    } catch (const std::exception& error) {
+        m_summaryLabel->setText(tr("Discovery failed: %1").arg(QString::fromUtf8(error.what())));
+    }
+    m_discoverBtn->setEnabled(true);
+    m_discoverBtn->setText(tr("Discover..."));
+    m_gameCombo->setEnabled(true);
 }
 
 void ConnectionDialog::onBrowseBin() {
@@ -170,6 +221,12 @@ void ConnectionDialog::onAutoDetectGame() {
 }
 
 void ConnectionDialog::onDiscoverGames() {
+    if (m_discoveryFuture.valid()) {
+        m_discoveryCancelled->store(true);
+        m_discoverBtn->setText(tr("Cancelling..."));
+        m_discoverBtn->setEnabled(false);
+        return;
+    }
     QString root = QFileDialog::getExistingDirectory(
         this, tr("Select a Steam library or Source SDK root to scan for games"),
         m_binEdit->text().isEmpty() ? QString() : m_binEdit->text());
@@ -177,17 +234,7 @@ void ConnectionDialog::onDiscoverGames() {
         return;
     }
 
-    m_gameManager.discover(std::filesystem::path(root.toStdWString()), 6);
-    if (m_gameManager.profiles().empty()) {
-        // The chosen root held no Source games; fall back to the Steam
-        // libraries before showing "(no games discovered)".
-        try {
-            m_gameManager.profiles() = profiles::SteamDetector::discover_all(6);
-        } catch (...) {
-            // Discovery must never crash the dialog; an empty list is fine.
-        }
-    }
-    populateGameCombo();
+    startDiscovery(std::filesystem::path(root.toStdWString()), true);
 }
 
 void ConnectionDialog::onGameSelected(int index) {

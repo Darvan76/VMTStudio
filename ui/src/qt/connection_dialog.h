@@ -6,6 +6,11 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QComboBox>
+#include <atomic>
+#include <future>
+#include <memory>
+
+class QTimer;
 
 #include "ui/settings.h"
 #include "ui/connection_model.h"
@@ -19,7 +24,7 @@ class ConnectionDialog : public QDialog {
 
 public:
     explicit ConnectionDialog(ui::UISettings& settings, QWidget* parent = nullptr);
-    ~ConnectionDialog() override = default;
+    ~ConnectionDialog() override;
 
 private slots:
     void onBrowseBin();
@@ -32,6 +37,11 @@ private slots:
     void onSaveAndConnect();
 
 private:
+    void startDiscovery(const std::filesystem::path& root, bool steamFallback);
+    void finishDiscovery();
+    std::future<std::vector<profiles::GameProfile>> m_discoveryFuture;
+    std::shared_ptr<std::atomic<bool>> m_discoveryCancelled;
+    QTimer* m_discoveryTimer = nullptr;
     ui::UISettings& m_settings;
     profiles::GameManager m_gameManager;
 

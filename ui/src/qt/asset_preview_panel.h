@@ -10,16 +10,18 @@
 //   - MDL: path, source and size plus the action that loads it.
 //
 // Threading contract:
-//   - showAsset() starts at most one worker thread (std::thread, detached). A
-//     newer request bumps a generation counter, so a slow decode from a
-//     previous selection is dropped when it finishes.
+//   - One pool worker consumes the latest pending request. New selections
+//     replace that request rather than adding threads or a queue of raw data.
+//     The shared asset-load gate is acquired before I/O; generation checks
+//     skip obsolete work both before and after waiting for that gate.
 //   - The worker reaches the engine through GameTextureSource in Blocking
 //     mode: the preview is the one consumer that may wait for the scan gate,
 //     because the user is looking at this asset and a "busy" answer would only
 //     produce a broken panel.
 //   - Results travel back through a small QObject delivery (shared_ptr kept by
 //     the job), never through `this`. Closing the browser mid-decode clears the
-//     callback; the job then finishes into nothing.
+//     callback and pending work; an active job then finishes into nothing.
+//     Completed images share one latest-result slot and one queued notification.
 //
 // The panel knows nothing about MainWindow: activation is a signal, and the
 // dialog (or W4) decides what opening a VMT or loading an MDL means.

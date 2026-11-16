@@ -19,12 +19,20 @@
 #include "vmt/error.h"
 #include "vmt/result.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 namespace vtf {
+
+// Read this prefix first, then the returned number of bytes to query metadata
+// without fetching pixels (including textures that live in a VPK).
+inline constexpr std::size_t kVtfHeaderProbeSize = 16;
+vmt::Result<std::uint32_t> vtf_header_size(const std::uint8_t* data,
+                                         std::size_t size,
+                                         const std::filesystem::path& origin = {});
 
 // Metadata read from a VTF file. All values are copied out of the library;
 // no library handle is kept.
@@ -72,8 +80,7 @@ struct FormatSupport {
 // vtf_reader rejects by policy (HDR, depth/stencil).
 std::vector<FormatSupport> list_formats();
 
-// Reads VTF metadata. The file is parsed header-only; no pixel decoding
-// happens here.
+// Reads only the VTF header for metadata; no pixel bytes are read or decoded.
 //
 // Errors:
 //  - NotFound / PermissionDenied / IoError: file access.
@@ -118,8 +125,5 @@ vmt::Result<RgbaImage> decode_vtf_preview_from_memory(const std::uint8_t* data,
                                                       std::uint32_t frame,
                                                       std::uint32_t max_size,
                                                       const std::filesystem::path& origin = {});
-
-// Module identity; also gives the static library a guaranteed symbol.
-const char* vtf_reader_version_string() noexcept;
 
 } // namespace vtf

@@ -16,15 +16,19 @@
 #include <QMetaObject>
 #include <QObject>
 #include <QPushButton>
+#include <QRunnable>
 #include <QScrollArea>
 #include <QStringList>
+#include <QThreadPool>
 #include <QVBoxLayout>
 
+#include <atomic>
 #include <cctype>
 #include <functional>
+#include <mutex>
+#include <optional>
 #include <set>
 #include <string>
-#include <thread>
 #include <utility>
 
 namespace ui {
@@ -140,12 +144,35 @@ struct PreviewResult {
     QString text;   // metadata/errors; always filled
 };
 
-// Lives on the UI thread. A job keeps it alive with a shared_ptr and posts a
-// queued call to it, so a panel that goes away only leaves a disconnected (and
-// then cleared) handler behind.
+struct PreviewRequest {
+    QString virtualPath;
+    int kind;
+    QString diskPath;
+    int sources;
+    quint64 size;
+    std::shared_ptr<EngineAccess> access;
+    std::vector<std::filesystem::path> roots;
+    int generation;
+};
+
+// The QObject and handler live on the UI thread. Workers only access the
+// atomic generation and mutex-protected latest request/result slots.
 class PreviewDelivery : public QObject {
 public:
     std::function<void(const PreviewResult&)> handler;
+    std::atomic<int> generation{0};
+    std::mutex mutex;
+    std::optional<PreviewRequest> pending;
+    std::optional<PreviewResult> ready;
+    bool running = false;
+    bool notificationPending = false;
+
+    void invalidate(int next_generation) {
+        generation.store(next_generation);
+        const std::lock_guard<std::mutex> lock(mutex);
+        pending.reset();
+        ready.reset();
+    }
 };
 
 namespace {
@@ -154,7 +181,7 @@ PreviewResult build_preview(const QString& virtual_path, int kind, const QString
                             int sources, quint64 size,
                             const std::shared_ptr<EngineAccess>& access,
                             const std::vector<std::filesystem::path>& roots,
-                            int generation) {
+                            int generation, const std::shared_ptr<PreviewDelivery>& delivery) {
     PreviewResult result;
     result.virtualPath = virtual_path;
     result.generation = generation;
@@ -172,20 +199,17 @@ PreviewResult build_preview(const QString& virtual_path, int kind, const QString
 
     // Disk first, then the engine. Blocking because the user is looking at
     // this asset; waiting for a scan in flight is preferable to an empty panel.
-    GameTextureSource source(access, roots, GameTextureSource::LockMode::Blocking);
+    GameTextureSource source(access, roots, GameTextureSource::LockMode::Blocking,
+        [delivery, generation]() { return delivery->generation.load() == generation; });
 
     if (kind == static_cast<int>(ui::AssetKind::Texture)) {
-        const vmt::Result<std::vector<unsigned char>> bytes =
-            source.read(virtual_path.toStdString());
-        if (!bytes) {
+        const auto metadata = source.metadata(virtual_path.toStdString());
+        if (!metadata) {
             lines.append(QString());
             lines.append(WorkerText::tr("No se pudo leer la textura: %1")
-                             .arg(QString::fromStdString(bytes.error().message)));
+                             .arg(QString::fromStdString(metadata.error().message)));
         } else {
-            const std::vector<unsigned char>& data = bytes.value();
-            const std::filesystem::path origin(virtual_path.toStdWString());
-            const vmt::Result<vtf::VtfInfo> meta =
-                vtf::open_vtf_info_from_memory(data.data(), data.size(), origin);
+            const auto& meta = metadata.value().info;
             if (!meta) {
                 lines.append(QString());
                 lines.append(WorkerText::tr("No es un VTF válido: %1")
@@ -199,22 +223,28 @@ PreviewResult build_preview(const QString& virtual_path, int kind, const QString
                     lines.append(WorkerText::tr(
                         "Este formato no tiene preview de 8 bits (HDR, profundidad o volumen)."));
                 } else {
-                    const vmt::Result<vtf::RgbaImage> decoded =
-                        vtf::decode_vtf_preview_from_memory(data.data(), data.size(), 0,
-                                                            kPreviewMaxEdge, origin);
-                    if (!decoded) {
+                    const auto bytes = source.read(virtual_path.toStdString());
+                    if (!bytes) {
                         lines.append(QString());
-                        lines.append(WorkerText::tr("No se pudo decodificar la imagen: %1")
-                                         .arg(QString::fromStdString(decoded.error().message)));
+                        lines.append(WorkerText::tr("No se pudo leer la textura: %1")
+                                         .arg(QString::fromStdString(bytes.error().message)));
                     } else {
-                        const vtf::RgbaImage& image = decoded.value();
-                        // copy(): the QImage must own its pixels before the
-                        // RgbaImage goes out of scope.
-                        result.image = QImage(image.pixels.data(),
-                                              static_cast<int>(image.width),
-                                              static_cast<int>(image.height),
-                                              QImage::Format_RGBA8888)
-                                           .copy();
+                        const auto& data = bytes.value();
+                        if (delivery->generation.load() != generation) return result;
+                        const auto decoded = vtf::decode_vtf_preview_from_memory(
+                            data.data(), data.size(), 0, kPreviewMaxEdge,
+                            std::filesystem::path(virtual_path.toStdWString()));
+                        if (!decoded) {
+                            lines.append(QString());
+                            lines.append(WorkerText::tr("No se pudo decodificar la imagen: %1")
+                                .arg(QString::fromStdString(decoded.error().message)));
+                        } else {
+                            const auto& image = decoded.value();
+                            // The QImage owns its pixels after decoder cleanup.
+                            result.image = QImage(image.pixels.data(),
+                                static_cast<int>(image.width), static_cast<int>(image.height),
+                                QImage::Format_RGBA8888).copy();
+                        }
                     }
                 }
             }
@@ -228,6 +258,7 @@ PreviewResult build_preview(const QString& virtual_path, int kind, const QString
                              .arg(QString::fromStdString(bytes.error().message)));
         } else {
             const std::vector<unsigned char>& data = bytes.value();
+            if (delivery->generation.load() != generation) return result;
             const std::string text(data.begin(), data.end());
 
             // The schema decides which parameters are textures beyond the
@@ -271,6 +302,64 @@ PreviewResult build_preview(const QString& virtual_path, int kind, const QString
     return result;
 }
 
+void run_preview_requests(const std::shared_ptr<PreviewDelivery>& delivery) {
+    for (;;) {
+        std::optional<PreviewRequest> request;
+        {
+            const std::lock_guard<std::mutex> lock(delivery->mutex);
+            if (!delivery->pending) {
+                delivery->running = false;
+                return;
+            }
+            request = std::move(delivery->pending);
+            delivery->pending.reset();
+        }
+        if (delivery->generation.load() != request->generation) continue;
+
+        PreviewResult result;
+        {
+            const std::lock_guard<std::mutex> work(asset_load_mutex());
+            // Waiting requests must not read bytes after a newer selection or
+            // a closed panel has superseded them.
+            if (delivery->generation.load() != request->generation) continue;
+            try {
+                result = build_preview(request->virtualPath, request->kind, request->diskPath,
+                    request->sources, request->size, request->access, request->roots,
+                    request->generation, delivery);
+            } catch (...) {
+                result.virtualPath = request->virtualPath;
+                result.generation = request->generation;
+                result.text = WorkerText::tr("No se pudo cargar el asset.");
+            }
+        }
+
+        bool notify = false;
+        {
+            const std::lock_guard<std::mutex> lock(delivery->mutex);
+            if (delivery->generation.load() != request->generation) continue;
+            // Coalesce completed images too: a busy UI must not retain one
+            // decoded image per obsolete queued selection.
+            delivery->ready = std::move(result);
+            if (!delivery->notificationPending) {
+                delivery->notificationPending = true;
+                notify = true;
+            }
+        }
+        if (notify) {
+            QMetaObject::invokeMethod(delivery.get(), [delivery]() {
+                std::optional<PreviewResult> ready;
+                {
+                    const std::lock_guard<std::mutex> lock(delivery->mutex);
+                    ready = std::move(delivery->ready);
+                    delivery->ready.reset();
+                    delivery->notificationPending = false;
+                }
+                if (ready && delivery->handler) delivery->handler(*ready);
+            }, Qt::QueuedConnection);
+        }
+    }
+}
+
 } // namespace
 
 // --- AssetPreviewPanel --------------------------------------------------------
@@ -278,7 +367,8 @@ PreviewResult build_preview(const QString& virtual_path, int kind, const QString
 AssetPreviewPanel::AssetPreviewPanel(std::shared_ptr<EngineAccess> access, QWidget* parent)
     : QWidget(parent),
       m_access(std::move(access)),
-      m_delivery(std::make_shared<PreviewDelivery>()) {
+      m_delivery(new PreviewDelivery, [](PreviewDelivery* delivery) { delivery->deleteLater(); }) {
+    m_delivery->setObjectName(QStringLiteral("assetPreviewDelivery"));
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(4, 0, 0, 0);
     layout->setSpacing(6);
@@ -327,6 +417,7 @@ AssetPreviewPanel::AssetPreviewPanel(std::shared_ptr<EngineAccess> access, QWidg
     content_layout->addWidget(m_image);
 
     m_info = new QLabel(content);
+    m_info->setObjectName(QStringLiteral("assetPreviewInfo"));
     m_info->setTextFormat(Qt::PlainText);
     m_info->setWordWrap(true);
     m_info->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -361,8 +452,8 @@ AssetPreviewPanel::~AssetPreviewPanel() {
     // A decode still running finishes into nothing: the queued delivery sees
     // no handler. The generation bump also covers a handler already captured
     // by an event that has not been dispatched yet.
-    ++m_generation;
     if (m_delivery) {
+        m_delivery->invalidate(++m_generation);
         m_delivery->handler = {};
     }
 }
@@ -395,29 +486,26 @@ void AssetPreviewPanel::showAsset(const QString& virtualPath, int kind, const QS
 
     const int generation = ++m_generation;
     const std::shared_ptr<PreviewDelivery> delivery = m_delivery;
-    const std::shared_ptr<EngineAccess> access = m_access;
-    std::vector<std::filesystem::path> roots = m_roots;
-
-    // A thread per selection: at most one preview is
-    // in flight (the newer request bumps the generation), and a thread waiting
-    // on the engine gate must not keep the process alive at shutdown.
-    std::thread([delivery, generation, access, roots = std::move(roots), virtualPath, kind,
-                 diskPath, sources, size]() {
-        PreviewResult result = build_preview(virtualPath, kind, diskPath, sources, size,
-                                             access, roots, generation);
-        QMetaObject::invokeMethod(
-            delivery.get(),
-            [delivery, result]() {
-                if (delivery->handler) {
-                    delivery->handler(result);
-                }
-            },
-            Qt::QueuedConnection);
-    }).detach();
+    bool start = false;
+    {
+        const std::lock_guard<std::mutex> lock(delivery->mutex);
+        delivery->generation.store(generation);
+        delivery->pending = PreviewRequest{virtualPath, kind, diskPath, sources, size,
+                                           m_access, m_roots, generation};
+        delivery->ready.reset();
+        if (!delivery->running) {
+            delivery->running = true;
+            start = true;
+        }
+    }
+    if (start) {
+        QThreadPool::globalInstance()->start(QRunnable::create(
+            [delivery]() { run_preview_requests(delivery); }));
+    }
 }
 
 void AssetPreviewPanel::clear() {
-    ++m_generation;
+    m_delivery->invalidate(++m_generation);
     m_loading = false;
     m_hasResult = false;
     m_path.clear();

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-16
+
+### Fixed
+- Keep asset previews, thumbnails, connection discovery and material exports responsive; cancel outstanding work safely when closing or reconnecting.
+- Preserve the last valid material preview and drain engine access before destroying the backend.
+- Require the embedded renderer to answer its readiness ping before reporting a successful connection.
+- Apply downloaded updates safely from Windows paths containing spaces, punctuation and apostrophes; isolate simultaneous update downloads and preserve recovery files after an apply failure.
+- Forward portable command-line arguments correctly and serialize first-launch extraction.
+- Build VTFLib Debug dependencies with the suffix expected by the application.
+
+### Release engineering
+- Prepare version 0.2.2 with CMake-generated Windows version information and manifest.
+- Stop local and CI builds on compilation or test failures, and pin the Source SDK headers used by CI.
+- Verify package versions, binary architectures, runtime dependencies and ZIP contents before publishing.
+- Produce ZIP, portable EXE and SHA-256 checksums; publish only a matching version tag after successful builds.
+- Include dependency license texts and notices, and correct the English and Spanish build instructions.
+
+### Tests
+- Add Qt regressions for asynchronous asset loading, inspector behavior, update cancellation and special-character update paths.
+- Add IPC, texture decoding and Steam discovery regressions and a separate manual performance benchmark target.
+
 ## [0.2.1] - 2026-11-13
 
 ### Fixed

@@ -84,20 +84,18 @@ MaterialInfo collect_material_info(const std::string& material_vmt_text,
         texture.parameter = reference.parameter;
         texture.game_path = reference.game_path;
 
-        const vmt::Result<std::vector<unsigned char>> bytes = source.read(reference.game_path);
-        if (!bytes) {
-            texture.note = bytes.error().message;
+        const auto metadata = source.metadata(reference.game_path);
+        if (!metadata) {
+            texture.note = metadata.error().message;
             info.any_texture_missing = true;
             info.textures.push_back(std::move(texture));
             continue;
         }
 
-        const std::vector<unsigned char>& data = bytes.value();
         texture.found = true;
-        texture.file_size = data.size();
+        texture.file_size = metadata.value().file_size;
 
-        const vmt::Result<vtf::VtfInfo> meta =
-            vtf::open_vtf_info_from_memory(data.data(), data.size(), reference.game_path);
+        const auto& meta = metadata.value().info;
         if (!meta) {
             texture.note = meta.error().message;
             info.any_texture_undecodable = true;

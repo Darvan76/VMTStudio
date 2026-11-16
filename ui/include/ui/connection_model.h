@@ -24,7 +24,8 @@ struct ConnectionCheck {
     std::vector<std::string> lines;  // "[OK] name (arch, export)" / "[FAIL] name: error"
 };
 
-// Runs bridge::DllLoader against bin_dir using the DLL set the Phase 3 spike
+// Rejects recognized incompatible L4D2 binaries without loading them, then
+// runs bridge::DllLoader against bin_dir using the DLL set the Phase 3 spike
 // requires. A missing directory yields present=false reports for every DLL.
 ConnectionCheck test_connection(const std::filesystem::path& bin_dir);
 

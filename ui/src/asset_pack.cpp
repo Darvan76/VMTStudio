@@ -1,9 +1,18 @@
 #include "ui/asset_pack.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <system_error>
 #include <utility>
 
@@ -136,6 +145,20 @@ bool AssetPack::open(const std::filesystem::path& file, bool create_if_missing) 
         }
     }
 
+    // Keep ownership across appends, tail recovery and compaction. A sidecar
+    // stays locked even while the archive itself is closed for replacement.
+    // The file may remain after a crash; the open handle is the lock.
+    // ponytail: one owner per pack; add shared readers if cross-instance cache hits matter.
+    std::filesystem::path lock_file = file;
+    lock_file += L".lock";
+    std::unique_ptr<void, decltype(&CloseHandle)> archive_lock(
+        CreateFileW(lock_file.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                    OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr), &CloseHandle);
+    if (archive_lock.get() == INVALID_HANDLE_VALUE) {
+        (void)archive_lock.release();
+        return false;
+    }
+
     const bool exists = std::filesystem::exists(file, ec);
     if (!exists) {
         if (!create_if_missing) {
@@ -248,6 +271,7 @@ bool AssetPack::open(const std::filesystem::path& file, bool create_if_missing) 
         m_live_bytes += kRecordHeaderSize + item.first.size() + item.second.stored_size;
     }
     m_open = true;
+    m_lock_handle = archive_lock.release();
     return true;
 }
 
@@ -414,19 +438,12 @@ bool AssetPack::remove_tag(std::string_view tag) {
     }
     std::string prefix(tag);
     prefix.push_back('\x1f');
-    bool removed = false;
-    for (auto it = m_index.begin(); it != m_index.end();) {
-        if (it->first.compare(0, prefix.size(), prefix) == 0) {
-            it = m_index.erase(it);
-            removed = true;
-        } else {
-            ++it;
-        }
-    }
-    if (!removed) {
+    if (std::none_of(m_index.begin(), m_index.end(), [&prefix](const auto& item) {
+            return item.first.compare(0, prefix.size(), prefix) == 0;
+        })) {
         return true;
     }
-    return compact_locked();
+    return compact_locked(prefix);
 }
 
 bool AssetPack::compact() {
@@ -434,7 +451,7 @@ bool AssetPack::compact() {
     return compact_locked();
 }
 
-bool AssetPack::compact_locked() {
+bool AssetPack::compact_locked(std::string_view removed_prefix) {
     if (!m_open) {
         return false;
     }
@@ -456,6 +473,10 @@ bool AssetPack::compact_locked() {
 
     for (const auto& item : m_index) {
         const std::string& key = item.first;
+        if (!removed_prefix.empty() &&
+            key.compare(0, removed_prefix.size(), removed_prefix) == 0) {
+            continue;
+        }
         const Entry& old = item.second;
         if (old.offset + kRecordHeaderSize + key.size() + old.stored_size >
             std::filesystem::file_size(m_path, ec)) {
@@ -529,14 +550,9 @@ bool AssetPack::compact_locked() {
     m_file.close();
     m_file.clear();
 
-    std::filesystem::rename(temp, m_path, ec);
-    if (ec) {
-        std::error_code ignored;
-        std::filesystem::remove(m_path, ignored);
-        ec.clear();
-        std::filesystem::rename(temp, m_path, ec);
-    }
-    if (ec) {
+    // Replace in one operation. Never remove the previous archive on failure.
+    if (!MoveFileExW(temp.c_str(), m_path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         std::filesystem::remove(temp, ec);
         reopen_locked();
         return false;
@@ -589,6 +605,10 @@ void AssetPack::close_locked() {
         m_file.close();
     }
     m_file.clear();
+    if (m_lock_handle != nullptr) {
+        CloseHandle(m_lock_handle);
+        m_lock_handle = nullptr;
+    }
     m_index.clear();
     m_live_bytes = 0;
     m_open = false;

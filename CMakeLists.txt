@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(VMTStudio
-    VERSION 0.2.1
+    VERSION 0.2.2
     DESCRIPTION "Native Windows material studio for Source Engine VMT/VTF"
     LANGUAGES CXX
 )
@@ -66,8 +66,6 @@ if(DEFINED ENV{SOURCE_SDK_PUBLIC})
     set(DEFAULT_SOURCE_SDK_PUBLIC "$ENV{SOURCE_SDK_PUBLIC}")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/source-sdk-2013/src/public")
     set(DEFAULT_SOURCE_SDK_PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/source-sdk-2013/src/public")
-elseif(EXISTS "C:/Users/Dario/Documents/source-sdk-2013/source-sdk-2013/src/public")
-    set(DEFAULT_SOURCE_SDK_PUBLIC "C:/Users/Dario/Documents/source-sdk-2013/source-sdk-2013/src/public")
 else()
     set(DEFAULT_SOURCE_SDK_PUBLIC "")
 endif()
@@ -77,7 +75,6 @@ enable_testing()
 
 add_subdirectory(vmt_core)
 add_subdirectory(vtf_reader)
-add_subdirectory(renderer)
 if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     add_subdirectory(hlmv_backend)
 endif()

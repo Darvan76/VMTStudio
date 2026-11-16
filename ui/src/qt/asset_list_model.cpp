@@ -13,7 +13,6 @@
 #include <QUrl>
 
 #include <algorithm>
-#include <cctype>
 #include <string>
 #include <string_view>
 
@@ -29,28 +28,6 @@ constexpr int kCellHeight = 158;
 
 // Table decoration size (the icon rebuilt from a grid thumbnail).
 constexpr int kIconSize = 18;
-
-char lower_char(char c) {
-    return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-}
-
-// Case-insensitive comparison over the raw bytes, which is how the index
-// orders paths. Done on std::string (not QString) because sorting 150k rows
-// would otherwise allocate a temporary string per comparison.
-int compare_ci(std::string_view a, std::string_view b) {
-    const std::size_t shared = std::min(a.size(), b.size());
-    for (std::size_t i = 0; i < shared; ++i) {
-        const char ca = lower_char(a[i]);
-        const char cb = lower_char(b[i]);
-        if (ca != cb) {
-            return ca < cb ? -1 : 1;
-        }
-    }
-    if (a.size() == b.size()) {
-        return 0;
-    }
-    return a.size() < b.size() ? -1 : 1;
-}
 
 std::string_view filename_of(std::string_view path) {
     const std::size_t slash = path.find_last_of('/');
@@ -75,9 +52,9 @@ int compare_entries(int column, const ui::AssetEntry& a, const ui::AssetEntry& b
         }
         break;
     case AssetListModel::FolderColumn:
-        cmp = compare_ci(folder_of(a.virtual_path), folder_of(b.virtual_path));
+        cmp = folder_of(a.path_lower).compare(folder_of(b.path_lower));
         if (cmp == 0) {
-            cmp = compare_ci(filename_of(a.virtual_path), filename_of(b.virtual_path));
+            cmp = filename_of(a.path_lower).compare(filename_of(b.path_lower));
         }
         break;
     case AssetListModel::SourceColumn:
@@ -94,7 +71,9 @@ int compare_entries(int column, const ui::AssetEntry& a, const ui::AssetEntry& b
         break;
     }
     if (cmp == 0) {
-        cmp = compare_ci(a.virtual_path, b.virtual_path);
+        // The index already case-folds paths. Comparing those bytes avoids
+        // repeating locale-dependent tolower calls for every sort comparison.
+        cmp = a.path_lower.compare(b.path_lower);
     }
     if (cmp == 0) {
         // Plain byte order as the last tie-break: mixed-case paths with the
@@ -212,6 +191,14 @@ void AssetListModel::sortRows() {
     const std::vector<ui::AssetEntry>& entries = m_index->entries();
     const int column = m_sortColumn;
     const bool ascending = m_sortOrder == Qt::AscendingOrder;
+    if (column == NameColumn) {
+        // Index order is already the canonical name order. Restore it with
+        // integer keys, including after filtering or sorting another column.
+        std::sort(m_rows.begin(), m_rows.end(), [ascending](std::size_t a, std::size_t b) {
+            return ascending ? a < b : a > b;
+        });
+        return;
+    }
     std::stable_sort(m_rows.begin(), m_rows.end(),
                      [&entries, column, ascending](std::size_t a, std::size_t b) {
                          const int cmp = compare_entries(column, entries[a], entries[b]);

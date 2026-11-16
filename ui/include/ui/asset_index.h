@@ -99,8 +99,6 @@ public:
     bool truncated() const noexcept { return truncated_; }
 
 private:
-    friend AssetCacheLoad load_asset_cache(const std::filesystem::path& file,
-                                           const std::string& expected_game_dir);
     friend AssetCacheLoad parse_asset_cache(std::string_view text,
                                             const std::string& expected_game_dir);
 

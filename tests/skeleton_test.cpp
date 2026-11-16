@@ -1,28 +1,27 @@
 #include "ut.h"
 
-// Including every module's public header here verifies that all of them
-// compile and that their static libraries link. Phase 1 has exactly one test.
+// Compile the public headers and link real entry points from each module.
 #include "vmt/vmt_core.h"
 #include "vtf/vtf_reader.h"
-#include "render/renderer.h"
-#include "bridge/engine_bridge.h"
-#include "profiles/game_profiles.h"
+#include "bridge/engine_view.h"
+#include "bridge/pe.h"
+#include "profiles/game_manager.h"
 #include "ui/ui.h"
 
-#include <cstring>
+#include <string>
 
-UT_TEST_CASE("skeleton: all module public headers compile and link") {
-    UT_CHECK(std::strlen(vmt::vmt_core_version_string()) > 0);
-    UT_CHECK(std::strlen(vtf::vtf_reader_version_string()) > 0);
-    UT_CHECK(std::strlen(render::renderer_version_string()) > 0);
-    UT_CHECK(std::strlen(bridge::engine_bridge_version_string()) > 0);
-    UT_CHECK(std::strlen(profiles::game_profiles_version_string()) > 0);
-    UT_CHECK(std::strlen(ui::ui_version_string()) > 0);
+UT_TEST_CASE("modules: public headers compile and real entry points link") {
+    UT_CHECK(vmt::Document::parse("UnlitGeneric {}\n").ok());
+    UT_CHECK(!vtf::list_formats().empty());
+    UT_CHECK_EQ(std::string(bridge::to_string(bridge::PeArch::X86)), "x86");
+    profiles::GameManager games;
+    games.clear();
+    UT_CHECK(games.profiles().empty());
+    ui::EditorSession session;
+    UT_CHECK(session.set_text("UnlitGeneric {}\n").ok());
 }
 
-#include "bridge/engine_view.h"
-
-UT_TEST_CASE("engine_view: interface methods for render mode, animation, speed, and thumbnails") {
+UT_TEST_CASE("engine_view: render mode, animation and speed reject uninitialized calls") {
     auto view_res = bridge::EngineView::create();
     UT_CHECK(view_res.ok());
     auto view = std::move(view_res.value());
@@ -30,9 +29,6 @@ UT_TEST_CASE("engine_view: interface methods for render mode, animation, speed, 
     UT_CHECK(!view->initialized());
 
     // Calling before initialization should report errors cleanly without crashing
-    auto thumb_res = view->render_material_thumbnail("test_mat", 128, false);
-    UT_CHECK(!thumb_res.ok());
-
     auto mode_res = view->set_render_mode("wireframe");
     UT_CHECK(!mode_res.ok());
 
@@ -41,4 +37,21 @@ UT_TEST_CASE("engine_view: interface methods for render mode, animation, speed, 
 
     auto speed_res = view->set_speed(0.5f);
     UT_CHECK(!speed_res.ok());
+}
+
+UT_TEST_CASE("engine_view: cancelled startup never launches the backend") {
+    auto result = bridge::EngineView::create();
+    UT_CHECK(result.ok());
+    if (!result) return;
+    bridge::EngineViewConfig config;
+    config.bin_dir = "cancelled/bin";
+    config.game_dir = "cancelled/game";
+    config.cancelled = std::make_shared<std::atomic<bool>>(true);
+    const auto initialized = result.value()->initialize(config);
+    UT_CHECK(!initialized);
+    if (!initialized) {
+        UT_CHECK(initialized.error().code == vmt::ErrorCode::Internal);
+        UT_CHECK(initialized.error().message.find("cancelled") != std::string::npos);
+    }
+    UT_CHECK(!result.value()->initialized());
 }

@@ -1,11 +1,9 @@
 #pragma once
 
-// ui asset_cache - on-disk cache for AssetIndex.
+// ui asset_cache - TSV index serialization for the Asset Browser pack.
 //
-// Opening the asset browser must not rescan a large game every time, so the
-// index is serialized as a small TSV (UTF-8, LF). The Qt layer chooses the
-// file (one per game, e.g. %LOCALAPPDATA%\VMTStudio\cache\<game_key>\
-// assets-v1.tsv); this module only writes and validates the format.
+// The index is stored as UTF-8 TSV with LF line endings. File I/O belongs to
+// the pack and legacy-cache migration code; this module owns the format.
 //
 // What is stored: game paths plus their source flags (d/v/f). What is not:
 //   - disk_path: it points into a user folder that may have moved and is only
@@ -20,7 +18,6 @@
 #include "ui/asset_index.h"
 
 #include <cstdint>
-#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -39,12 +36,6 @@ struct AssetCacheMeta {
 // materializing assets-v1.tsv.
 std::string serialize_asset_cache(const AssetIndex& index, const AssetCacheMeta& meta);
 
-// Writes atomically: a sibling ".tmp" file is completed first and then renamed
-// over the target, so a crash cannot leave a half-written cache. Creates the
-// parent directory. Returns false on any I/O failure (the temp file is removed).
-bool save_asset_cache(const std::filesystem::path& file, const AssetIndex& index,
-                      const AssetCacheMeta& meta);
-
 struct AssetCacheLoad {
     bool loaded = false;
     AssetIndex index;
@@ -57,9 +48,5 @@ struct AssetCacheLoad {
 // ignored so newer writers can add metadata safely.
 AssetCacheLoad parse_asset_cache(std::string_view text,
                                  const std::string& expected_game_dir);
-
-// File-based convenience wrappers; the pack uses the string versions.
-AssetCacheLoad load_asset_cache(const std::filesystem::path& file,
-                                const std::string& expected_game_dir);
 
 } // namespace ui

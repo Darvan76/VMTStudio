@@ -5,6 +5,7 @@
 #include "VTFLib.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <exception>
 #include <fstream>
@@ -46,6 +47,12 @@ bool ensure_vtflib_ready() {
     return ready;
 }
 
+// The bound image object is reusable, but its last pixel/header allocation must
+// not outlive a query. These guards are always destroyed while the mutex is held.
+struct ImageContents {
+    ~ImageContents() { vlImageDestroy(); }
+};
+
 std::string vtflib_last_error() {
     const vlChar* text = vlGetLastError();
     return text != nullptr ? std::string(text) : std::string();
@@ -54,8 +61,8 @@ std::string vtflib_last_error() {
 vmt::Error unexpected_error(const std::filesystem::path& path, std::string_view detail) {
     vmt::Error error = vmt::make_error(
         vmt::ErrorCode::Internal,
-        "unexpected error while reading the VTF file: " + path.filename().string(),
-        "Try again; if the problem persists, the file may be corrupt", path.string());
+        "unexpected error while reading the VTF file: " + path.filename().u8string(),
+        "Try again; if the problem persists, the file may be corrupt", path.u8string());
     error.detail = std::string(detail);
     return error;
 }
@@ -65,23 +72,29 @@ vmt::Error unexpected_error(const std::filesystem::path& path, std::string_view 
 // VTFLib++ addresses image buffers with 32-bit sizes.
 constexpr std::uint64_t kMaxVtfFileSize = 0xFFFFFFFFull;
 
-bool read_file(const std::filesystem::path& path, std::vector<std::uint8_t>& bytes, vmt::Error& error) {
+bool read_file(const std::filesystem::path& path, std::vector<std::uint8_t>& bytes,
+                vmt::Error& error, bool header_only = false) {
     std::error_code ec;
     const bool exists = std::filesystem::exists(path, ec);
     if (ec || !exists) {
         error = vmt::make_error(vmt::ErrorCode::NotFound,
-                                "the VTF file does not exist: " + path.string(),
+                                "the VTF file does not exist: " + path.u8string(),
                                 "Check the material's texture path or pick another file",
-                                path.string());
+                                path.u8string());
         return false;
     }
 
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
         error = vmt::make_error(vmt::ErrorCode::PermissionDenied,
-                                "the VTF file could not be opened: " + path.string(),
+                                "the VTF file could not be opened: " + path.u8string(),
                                 "Check that the file is readable and not locked by another program",
-                                path.string());
+                                path.u8string());
+        return false;
+    }
+    if (header_only && stream.rdbuf()->pubsetbuf(nullptr, 0) == nullptr) {
+        error = vmt::make_error(vmt::ErrorCode::IoError,
+                                "could not disable VTF header read-ahead", {}, path.u8string());
         return false;
     }
 
@@ -89,9 +102,9 @@ bool read_file(const std::filesystem::path& path, std::vector<std::uint8_t>& byt
     const std::streamoff end = stream.tellg();
     if (end < 0) {
         error = vmt::make_error(vmt::ErrorCode::IoError,
-                                "the VTF file size could not be determined: " + path.string(),
+                                "the VTF file size could not be determined: " + path.u8string(),
                                 "Check that the file is readable",
-                                path.string());
+                                path.u8string());
         return false;
     }
 
@@ -100,26 +113,51 @@ bool read_file(const std::filesystem::path& path, std::vector<std::uint8_t>& byt
         error = vmt::make_error(vmt::ErrorCode::OutOfMemory,
                                 "the VTF file is larger than 4 GiB, which VTFLib++ cannot load",
                                 "Re-export the texture at a lower resolution",
-                                path.string());
+                                path.u8string());
         return false;
     }
 
+    std::uint64_t read_size = size;
+    if (header_only) {
+        std::array<std::uint8_t, kVtfHeaderProbeSize> prefix{};
+        const auto prefix_size = static_cast<std::streamsize>(
+            std::min<std::uint64_t>(size, prefix.size()));
+        stream.seekg(0, std::ios::beg);
+        if (prefix_size != 0 &&
+            !stream.read(reinterpret_cast<char*>(prefix.data()), prefix_size)) {
+            error = vmt::make_error(vmt::ErrorCode::IoError,
+                "failed to read the VTF header: " + path.u8string(), {}, path.u8string());
+            return false;
+        }
+        const auto required = vtf_header_size(prefix.data(), static_cast<std::size_t>(prefix_size), path);
+        if (!required) {
+            error = required.error();
+            return false;
+        }
+        if (size < required.value()) {
+            error = vmt::make_error(vmt::ErrorCode::VtfTruncated,
+                "the file is shorter than its declared VTF header", {}, path.u8string());
+            return false;
+        }
+        read_size = required.value();
+    }
+
     try {
-        bytes.resize(static_cast<std::size_t>(size));
+        bytes.resize(static_cast<std::size_t>(read_size));
     } catch (const std::exception&) {
         error = vmt::make_error(vmt::ErrorCode::OutOfMemory,
-                                "not enough memory to read the VTF file: " + path.string(),
+                                "not enough memory to read the VTF file: " + path.u8string(),
                                 "Close other applications or re-export the texture at a lower resolution",
-                                path.string());
+                                path.u8string());
         return false;
     }
 
     stream.seekg(0, std::ios::beg);
-    if (size > 0 && !stream.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size))) {
+    if (read_size > 0 && !stream.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(read_size))) {
         error = vmt::make_error(vmt::ErrorCode::IoError,
-                                "failed to read the VTF file: " + path.string(),
+                                "failed to read the VTF file: " + path.u8string(),
                                 "Check that the file is readable and not locked by another program",
-                                path.string());
+                                path.u8string());
         return false;
     }
     return true;
@@ -131,7 +169,11 @@ bool read_file(const std::filesystem::path& path, std::vector<std::uint8_t>& byt
 // each) and header size (u32 LE). This pre-check exists only to classify
 // errors deterministically; VTFLib++ still performs its own full validation.
 
-constexpr std::size_t kFileHeaderProbeSize = 16;
+// CVTFFile::Load accepts sizeof(SVTFHeader_76_A) (80) plus 32 eight-byte
+// resource entries. Keep this bound tied to the pinned library version.
+static_assert(VTF_MAJOR_VERSION == 7 && VTF_MINOR_VERSION == 6,
+              "Recheck the header bound when updating VTFLib");
+constexpr std::uint32_t kMaxVtfHeaderSize = 80u + VTF_RSRC_MAX_DICTIONARY_ENTRIES * 8u;
 
 inline std::uint32_t read_u32_le(const std::uint8_t* data) noexcept {
     std::uint32_t val = 0;
@@ -139,53 +181,71 @@ inline std::uint32_t read_u32_le(const std::uint8_t* data) noexcept {
     return val;
 }
 
-vmt::Result<void> probe_vtf_header(const std::uint8_t* data, std::size_t size,
-                                   const std::filesystem::path& path) {
-    if (size < kFileHeaderProbeSize) {
-        return vmt::Err<void>(vmt::make_error(
+vmt::Result<std::uint32_t> checked_header_size(const std::uint8_t* data, std::size_t size,
+                                               const std::filesystem::path& path) {
+    if (data == nullptr) {
+        return vmt::Err<std::uint32_t>(vmt::make_error(
+            vmt::ErrorCode::InvalidArgument, "no VTF header data was supplied", {}, path.u8string()));
+    }
+    if (size < kVtfHeaderProbeSize) {
+        return vmt::Err<std::uint32_t>(vmt::make_error(
             vmt::ErrorCode::VtfTruncated,
             "the file is too small to hold a VTF header (" + std::to_string(size) + " bytes)",
             "Re-export or re-download the texture; the file is truncated",
-            path.string()));
+            path.u8string()));
     }
 
     if (std::memcmp(data, "VTF\0", 4) != 0) {
-        return vmt::Err<void>(vmt::make_error(
+        return vmt::Err<std::uint32_t>(vmt::make_error(
             vmt::ErrorCode::VtfInvalidHeader,
             "the file does not start with the 'VTF' signature",
             "Pick a .vtf texture file; other file types are not supported",
-            path.string()));
+            path.u8string()));
     }
 
     const std::uint32_t major = read_u32_le(data + 4);
     const std::uint32_t minor = read_u32_le(data + 8);
     if (major != static_cast<std::uint32_t>(VTF_MAJOR_VERSION) ||
         minor > static_cast<std::uint32_t>(VTF_MINOR_VERSION)) {
-        return vmt::Err<void>(vmt::make_error(
+        return vmt::Err<std::uint32_t>(vmt::make_error(
             vmt::ErrorCode::VtfUnsupportedVersion,
             "VTF version " + std::to_string(major) + "." + std::to_string(minor) +
                 " is not supported (supported: " + std::to_string(VTF_MAJOR_VERSION) + ".0 to " +
                 std::to_string(VTF_MAJOR_VERSION) + "." + std::to_string(VTF_MINOR_VERSION) + ")",
             "Re-export the texture with a supported VTF version",
-            path.string()));
+            path.u8string()));
     }
 
     const std::uint32_t declared_header_size = read_u32_le(data + 12);
-    if (declared_header_size < kFileHeaderProbeSize) {
-        return vmt::Err<void>(vmt::make_error(
+    if (declared_header_size < kVtfHeaderProbeSize) {
+        return vmt::Err<std::uint32_t>(vmt::make_error(
             vmt::ErrorCode::VtfInvalidHeader,
             "the VTF header size " + std::to_string(declared_header_size) +
-                " is smaller than the " + std::to_string(kFileHeaderProbeSize) + "-byte minimum",
+                " is smaller than the " + std::to_string(kVtfHeaderProbeSize) + "-byte minimum",
             "Re-export or re-download the texture; the file looks corrupt",
-            path.string()));
+            path.u8string()));
     }
-    if (size < declared_header_size) {
+    if (declared_header_size > kMaxVtfHeaderSize) {
+        // VTFLib rejects this as a corrupt load, which this module has always
+        // classified as VtfTruncated. Reject before allocating an input buffer.
+        return vmt::Err<std::uint32_t>(vmt::make_error(
+            vmt::ErrorCode::VtfTruncated, "the declared VTF header exceeds the supported header size",
+            "Re-export or re-download the texture; the file looks corrupt", path.u8string()));
+    }
+    return vmt::Ok(declared_header_size);
+}
+
+vmt::Result<void> probe_vtf_header(const std::uint8_t* data, std::size_t size,
+                                   const std::filesystem::path& path) {
+    const auto declared = checked_header_size(data, size, path);
+    if (!declared) return vmt::Err<void>(declared.error());
+    if (size < declared.value()) {
         return vmt::Err<void>(vmt::make_error(
             vmt::ErrorCode::VtfTruncated,
-            "the file declares a " + std::to_string(declared_header_size) + "-byte header but only " +
+            "the file declares a " + std::to_string(declared.value()) + "-byte header but only " +
                 std::to_string(size) + " bytes are present",
             "Re-export or re-download the texture; the file is truncated",
-            path.string()));
+            path.u8string()));
     }
 
     return vmt::Ok();
@@ -282,14 +342,14 @@ VtfInfo read_info() {
 
 vmt::Error load_failure_error(const std::filesystem::path& path) {
     const std::string library_error = vtflib_last_error();
-    std::string message = "VTFLib++ could not load the VTF file: " + path.filename().string();
+    std::string message = "VTFLib++ could not load the VTF file: " + path.filename().u8string();
     if (!library_error.empty()) {
         message += " (" + library_error + ")";
     }
     vmt::Error error = vmt::make_error(
         vmt::ErrorCode::VtfTruncated, std::move(message),
         "Re-export or re-download the texture; the file looks truncated or corrupt",
-        path.string());
+        path.u8string());
     error.detail = library_error;
     return error;
 }
@@ -340,7 +400,7 @@ vmt::Result<void> check_memory_input(const std::uint8_t* data, std::size_t size,
     if (data == nullptr) {
         return vmt::Err<void>(vmt::make_error(
             vmt::ErrorCode::InvalidArgument,
-            "no VTF data was supplied for '" + origin.string() + "'",
+            "no VTF data was supplied for '" + origin.u8string() + "'",
             "The texture could not be read from the game files"));
     }
     if (size > kMaxVtfFileSize) {
@@ -348,7 +408,7 @@ vmt::Result<void> check_memory_input(const std::uint8_t* data, std::size_t size,
             vmt::ErrorCode::OutOfMemory,
             "the VTF data is larger than 4 GiB, which VTFLib++ cannot load",
             "Re-export the texture at a lower resolution",
-            origin.string()));
+            origin.u8string()));
     }
     return vmt::Ok();
 }
@@ -364,6 +424,7 @@ vmt::Result<VtfInfo> open_vtf_info_bytes_locked(const std::uint8_t* data, std::s
     if (!ensure_vtflib_ready()) {
         return vmt::Err<VtfInfo>(vtflib_not_ready_error());
     }
+    const ImageContents contents;
     if (vlImageLoadLump(data, static_cast<vlUInt>(size), vlTrue) == vlFalse) {
         return vmt::Err<VtfInfo>(load_failure_error(origin));
     }
@@ -382,6 +443,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
     if (!ensure_vtflib_ready()) {
         return vmt::Err<RgbaImage>(vtflib_not_ready_error());
     }
+    const ImageContents contents;
     if (vlImageLoadLump(data, static_cast<vlUInt>(size), vlFalse) == vlFalse) {
         return vmt::Err<RgbaImage>(load_failure_error(origin));
     }
@@ -394,21 +456,21 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
             vmt::ErrorCode::VtfUnsupportedFormat,
             "the texture uses the HDR format '" + format_name_of(format_info) + "', which cannot be previewed as 8-bit RGBA",
             "Preview is unavailable for HDR textures",
-            origin.string()));
+            origin.u8string()));
     }
     if (is_depth_stencil_format(format)) {
         return vmt::Err<RgbaImage>(vmt::make_error(
             vmt::ErrorCode::VtfUnsupportedFormat,
             "the texture uses the depth/stencil format '" + format_name_of(format_info) + "', which cannot be previewed",
             "Preview is unavailable for depth/stencil textures",
-            origin.string()));
+            origin.u8string()));
     }
     if (format_info == nullptr || format_info->bIsSupported == vlFalse) {
         return vmt::Err<RgbaImage>(vmt::make_error(
             vmt::ErrorCode::VtfUnsupportedFormat,
             "the texture format '" + format_name_of(format_info) + "' is not supported by VTFLib++",
             "Re-export the texture with a standard format such as DXT1, DXT5 or RGBA8888",
-            origin.string()));
+            origin.u8string()));
     }
 
     const std::uint32_t frame_count = static_cast<std::uint32_t>(vlImageGetFrameCount());
@@ -418,7 +480,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
             "frame " + std::to_string(frame) + " is out of range (the texture has " +
                 std::to_string(frame_count) + " frame(s))",
             "Choose a frame between 0 and " + std::to_string(frame_count - 1),
-            origin.string()));
+            origin.u8string()));
     }
 
     const std::uint32_t depth = static_cast<std::uint32_t>(vlImageGetDepth());
@@ -427,7 +489,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
             vmt::ErrorCode::VtfUnsupportedFormat,
             "volume textures cannot be previewed (depth " + std::to_string(depth) + ")",
             "Preview is available for 2D textures only",
-            origin.string()));
+            origin.u8string()));
     }
 
     const std::uint32_t width = static_cast<std::uint32_t>(vlImageGetWidth());
@@ -437,7 +499,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
             vmt::ErrorCode::VtfInvalidHeader,
             "invalid texture dimensions: " + std::to_string(width) + "x" + std::to_string(height),
             "The VTF file has corrupted image dimensions",
-            origin.string()));
+            origin.u8string()));
     }
     const bool needs_downscale = (max_size != 0 && (width > max_size || height > max_size));
     const std::uint32_t longest = std::max(width, height);
@@ -477,7 +539,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
             vmt::ErrorCode::Internal,
             "VTFLib++ returned no image data for frame " + std::to_string(frame),
             "Re-export the texture; the file may be corrupt",
-            origin.string()));
+            origin.u8string()));
     }
 
     vmt::Error error;
@@ -493,7 +555,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
                 "the texture format '" + format_name_of(format_info) + "' could not be converted to RGBA8 (" +
                     vtflib_last_error() + ")",
                 "Preview is unavailable for this texture format",
-                origin.string()));
+                origin.u8string()));
         }
         image.width = target_width;
         image.height = target_height;
@@ -513,7 +575,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
                 "failed to downscale the preview to " + std::to_string(target_width) + "x" +
                     std::to_string(target_height) + " (" + vtflib_last_error() + ")",
                 "Try a different preview size",
-                origin.string()));
+                origin.u8string()));
         }
     } else {
         std::vector<std::uint8_t> rgba;
@@ -526,7 +588,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
                 "the texture format '" + format_name_of(format_info) + "' could not be converted to RGBA8 (" +
                     vtflib_last_error() + ")",
                 "Preview is unavailable for this texture format",
-                origin.string()));
+                origin.u8string()));
         }
         if (vlImageResize(rgba.data(), image.pixels.data(), source_width, source_height, target_width, target_height,
                           MIPMAP_FILTER_NICE, vlFalse) == vlFalse) {
@@ -535,7 +597,7 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
                 "failed to downscale the preview to " + std::to_string(target_width) + "x" +
                     std::to_string(target_height) + " (" + vtflib_last_error() + ")",
                 "Try a different preview size",
-                origin.string()));
+                origin.u8string()));
         }
         // Release the decoded mip buffer as soon as resizing is complete.
         std::vector<std::uint8_t>().swap(rgba);
@@ -547,6 +609,17 @@ vmt::Result<RgbaImage> decode_vtf_preview_bytes_locked(const std::uint8_t* data,
 }
 
 } // namespace
+
+vmt::Result<std::uint32_t> vtf_header_size(const std::uint8_t* data, std::size_t size,
+                                         const std::filesystem::path& origin) {
+    try {
+        return checked_header_size(data, size, origin);
+    } catch (const std::exception& exception) {
+        return vmt::Err<std::uint32_t>(unexpected_error(origin, exception.what()));
+    } catch (...) {
+        return vmt::Err<std::uint32_t>(unexpected_error(origin, "unknown exception"));
+    }
+}
 
 std::vector<FormatSupport> list_formats() {
     std::vector<FormatSupport> formats;
@@ -586,12 +659,12 @@ std::vector<FormatSupport> list_formats() {
 }
 
 vmt::Result<VtfInfo> open_vtf_info(const std::filesystem::path& path) {
-    std::vector<std::uint8_t> bytes;
-    vmt::Error error;
-    if (!read_file(path, bytes, error)) {
-        return vmt::Err<VtfInfo>(std::move(error));
-    }
     try {
+        std::vector<std::uint8_t> bytes;
+        vmt::Error error;
+        if (!read_file(path, bytes, error, true)) {
+            return vmt::Err<VtfInfo>(std::move(error));
+        }
         std::scoped_lock lock(vtflib_mutex());
         return open_vtf_info_bytes_locked(bytes.data(), bytes.size(), path);
     } catch (const std::exception& exception) {
@@ -604,13 +677,13 @@ vmt::Result<VtfInfo> open_vtf_info(const std::filesystem::path& path) {
 vmt::Result<RgbaImage> decode_vtf_preview(const std::filesystem::path& path,
                                           std::uint32_t frame,
                                           std::uint32_t max_size) {
-    std::vector<std::uint8_t> bytes;
-    vmt::Error error;
-    if (!read_file(path, bytes, error)) {
-        return vmt::Err<RgbaImage>(std::move(error));
-    }
     try {
         std::scoped_lock lock(vtflib_mutex());
+        std::vector<std::uint8_t> bytes;
+        vmt::Error error;
+        if (!read_file(path, bytes, error)) {
+            return vmt::Err<RgbaImage>(std::move(error));
+        }
         return decode_vtf_preview_bytes_locked(bytes.data(), bytes.size(), frame, max_size, path);
     } catch (const std::exception& exception) {
         return vmt::Err<RgbaImage>(unexpected_error(path, exception.what()));
@@ -642,10 +715,6 @@ vmt::Result<RgbaImage> decode_vtf_preview_from_memory(const std::uint8_t* data, 
     } catch (...) {
         return vmt::Err<RgbaImage>(unexpected_error(origin, "unknown exception"));
     }
-}
-
-const char* vtf_reader_version_string() noexcept {
-    return "vtf_reader 0.1.0 (VTFLib++ 2.3.0)";
 }
 
 } // namespace vtf

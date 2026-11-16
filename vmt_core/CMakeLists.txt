@@ -1,5 +1,4 @@
 add_library(vmt_core STATIC
-    src/vmt_core.cpp
     src/value.cpp
     src/document.cpp
     src/json.cpp

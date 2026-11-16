@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <cstddef>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -190,6 +191,75 @@ UT_TEST_CASE("steam: parse_library_folders falls back to the steam root") {
 
 // --- discover_all_in -----------------------------------------------------------
 
+UT_TEST_CASE("steam: discovers retail L4D2 with unquoted gameinfo keys and sibling bin") {
+    const fs::path root = fresh_temp_dir("l4d2_retail");
+    const fs::path install = root / "steamapps" / "common" / "Left 4 Dead 2";
+    const fs::path game = install / "left4dead2";
+    make_source_game(install, "Temporary engine marker");
+    std::error_code ec;
+    fs::remove(install / "gameinfo.txt", ec);
+    write_text_file(game / "gameinfo.txt",
+        "\"GameInfo\"\n{\n"
+        "\tgame \"Left 4 Dead 2\" // Valve uses unquoted keys\n"
+        "\tFileSystem\n\t{\n"
+        "\t\t// SteamAppId 4000 is only a comment\n"
+        "\t\tSteamAppId 550\n"
+        "\t\tToolsAppId 563\n"
+        "\t\tSearchPaths\n\t\t{\n\t\t\tGame update\n\t\t\tGame |gameinfo_path|.\n\t\t}\n"
+        "\t}\n}\n");
+
+    UT_CHECK(profiles::GameManager::detect_bin_dir(install) == install / "bin");
+    UT_CHECK(profiles::GameManager::detect_bin_dir(game) == install / "bin");
+    UT_CHECK(profiles::GameManager::detect_game_dir(install / "bin") == game);
+
+    const auto discovered = profiles::SteamDetector::discover_all_in(root);
+    UT_CHECK_EQ(discovered.size(), std::size_t(1));
+    if (discovered.size() != 1u) return;
+    UT_CHECK(discovered[0].game_dir == game);
+    UT_CHECK(discovered[0].bin_dir == install / "bin");
+    UT_CHECK(discovered[0].name == "Left 4 Dead 2");
+    UT_CHECK(discovered[0].engine_branch == "left4dead2");
+    UT_CHECK(discovered[0].is_valid);
+}
+
+UT_TEST_CASE("steam: identifies L4D2 mods by quoted SteamAppId independent of name") {
+    const fs::path root = fresh_temp_dir("l4d2_mod");
+    const fs::path game = root / "survivors_mod";
+    make_source_game(game, "Survivors Custom Campaign");
+    write_text_file(game / "gameinfo.txt",
+        "\"GameInfo\"\n{\n"
+        "\t\"game\" \"Survivors Custom Campaign\"\n"
+        "\t\"FileSystem\"\n\t{\n\t\t\"SteamAppId\" \"550\"\n\t}\n}\n");
+
+    profiles::GameManager manager;
+    manager.discover(root);
+    const auto* profile = manager.find("survivors_mod");
+    UT_CHECK(profile != nullptr);
+    if (!profile) return;
+    UT_CHECK(profile->name == "Survivors Custom Campaign");
+    UT_CHECK(profile->engine_branch == "left4dead2");
+}
+
+UT_TEST_CASE("steam: ignores commented L4D2 appids and preserves GMod detection") {
+    const fs::path root = fresh_temp_dir("gameinfo_comments");
+    const fs::path game = root / "custom_gmod";
+    make_source_game(game, "Custom Sandbox");
+    write_text_file(game / "gameinfo.txt",
+        "\"GameInfo\"\n{\n"
+        "\t// game \"Left 4 Dead 2\"\n"
+        "\tgame \"Custom Sandbox\"\n"
+        "\t// FileSystem { SteamAppId 550 }\n"
+        "\tFileSystem { \"SteamAppId\" \"4000\" }\n}\n");
+
+    profiles::GameManager manager;
+    manager.discover(root);
+    const auto* profile = manager.find("custom_gmod");
+    UT_CHECK(profile != nullptr);
+    if (!profile) return;
+    UT_CHECK(profile->name == "Custom Sandbox");
+    UT_CHECK(profile->engine_branch == "gmod");
+}
+
 UT_TEST_CASE("steam: discover_all_in unions and de-duplicates libraries") {
     const fs::path root = fresh_temp_dir("discover");
     const fs::path nested = root / "library";
@@ -349,4 +419,19 @@ UT_TEST_CASE("steam: discover_all scans the STEAMPATH fixture end to end") {
         UT_CHECK(profiles[0].name == "Half-Life 2");
         UT_CHECK(profiles[0].is_valid);
     }
+}
+
+UT_TEST_CASE("steam: cancelled discovery discards its catalogue and can be retried") {
+    const fs::path root = fresh_temp_dir("cancelled");
+    make_source_game(root / "game", "Test Game");
+    profiles::GameManager manager;
+    std::atomic<bool> cancelled{false};
+    manager.discover(root, 6, &cancelled);
+    UT_CHECK_EQ(manager.profiles().size(), std::size_t(1));
+    cancelled.store(true);
+    manager.discover(root, 6, &cancelled);
+    UT_CHECK(manager.profiles().empty());
+    UT_CHECK(profiles::SteamDetector::discover_all_in(root, 6, &cancelled).empty());
+    cancelled.store(false);
+    UT_CHECK_EQ(profiles::SteamDetector::discover_all_in(root, 6, &cancelled).size(), std::size_t(1));
 }

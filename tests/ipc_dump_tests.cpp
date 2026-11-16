@@ -3,6 +3,7 @@
 #include "bridge/ipc_dump.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -38,7 +39,59 @@ bool contains(const std::string& text, const char* needle) {
     return text.find(needle) != std::string::npos;
 }
 
+std::vector<unsigned char> prefix_payload(std::uint64_t file_size, std::size_t count) {
+    std::vector<unsigned char> bytes(8 + count, 0x5a);
+    for (unsigned int byte = 0; byte < 8; ++byte) {
+        bytes[byte] = static_cast<unsigned char>((file_size >> (byte * 8)) & 0xff);
+    }
+    return bytes;
+}
+
 } // namespace
+
+UT_TEST_CASE("ipc_dump: binary prefix preserves full size and accepts only the requested bytes") {
+    const std::uint64_t large_file = (std::uint64_t{1} << 40) + 3;
+    const auto prefix = bridge::parse_binary_prefix(prefix_payload(large_file, 16), 16);
+    UT_CHECK(prefix.ok());
+    if (prefix) {
+        UT_CHECK_EQ(prefix.value().file_size, large_file);
+        UT_CHECK_EQ(prefix.value().bytes, std::vector<unsigned char>(16, 0x5a));
+    }
+    const auto short_file = bridge::parse_binary_prefix(prefix_payload(3, 3), 16);
+    UT_CHECK(short_file.ok());
+    if (short_file) {
+        UT_CHECK_EQ(short_file.value().file_size, std::uint64_t{3});
+        UT_CHECK_EQ(short_file.value().bytes.size(), std::size_t{3});
+    }
+    const auto empty = bridge::parse_binary_prefix(prefix_payload(0, 0), 16);
+    UT_CHECK(empty.ok());
+    if (empty) UT_CHECK(empty.value().bytes.empty());
+    const auto maximum = bridge::parse_binary_prefix(prefix_payload(10000, 4096), 4096);
+    UT_CHECK(maximum.ok());
+    if (maximum) UT_CHECK_EQ(maximum.value().bytes.size(), std::size_t{4096});
+}
+
+UT_TEST_CASE("ipc_dump: binary prefix rejects invalid limits and inconsistent framing") {
+    const auto zero = bridge::parse_binary_prefix(prefix_payload(0, 0), 0);
+    const auto oversized = bridge::parse_binary_prefix(prefix_payload(0, 0), 4097);
+    UT_CHECK(!zero && !oversized);
+    if (!zero) UT_CHECK_EQ(zero.error().code, vmt::ErrorCode::InvalidArgument);
+    if (!oversized) UT_CHECK_EQ(oversized.error().code, vmt::ErrorCode::InvalidArgument);
+
+    const std::vector<std::vector<unsigned char>> malformed = {
+        {}, std::vector<unsigned char>(7), // no complete size header
+        prefix_payload(1000, 15),         // truncated requested prefix
+        prefix_payload(1000, 17),         // more bytes than requested
+        prefix_payload(3, 2),             // short file is itself truncated
+        prefix_payload(3, 4),             // more bytes than the declared file
+        prefix_payload(0, 1),             // empty files cannot carry payload
+    };
+    for (const auto& bytes : malformed) {
+        const auto result = bridge::parse_binary_prefix(bytes, 16);
+        UT_CHECK(!result);
+        if (!result) UT_CHECK_EQ(result.error().code, vmt::ErrorCode::ParseError);
+    }
+}
 
 UT_TEST_CASE("ipc_dump: version detection accepts the current one and reports the rest") {
     const std::string valid =

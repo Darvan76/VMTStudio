@@ -1,5 +1,7 @@
 #include "ut.h"
 
+#include "bridge/engine_view.h"
+
 #include "ui/asset_cache.h"
 #include "ui/asset_index.h"
 #include "ui/asset_pack.h"
@@ -577,6 +579,36 @@ UT_TEST_CASE("ui connection: a missing game folder fails cleanly") {
     for (const std::string& line : check.lines) {
         UT_CHECK(line.find("[FAIL]") != std::string::npos);
     }
+}
+
+UT_TEST_CASE("ui connection: L4D2 reports the backend requirement before loading DLLs") {
+    const fs::path dir = fresh_temp_dir();
+    // These are data fixtures, deliberately not loadable PE images. The
+    // recognized version combination must be rejected before DLL loading.
+    const auto write_version = [&dir](const char* name, const char* version) {
+        std::ofstream out(dir / name, std::ios::binary);
+        out.write(version, static_cast<std::streamsize>(std::char_traits<char>::length(version) + 1));
+    };
+    write_version("filesystem_stdio.dll", "VFileSystem018");
+    write_version("materialsystem.dll", "VMaterialSystem080");
+    write_version("studiorender.dll", "VStudioRender026");
+
+    const auto check = ui::test_connection(dir);
+    UT_CHECK(!check.connected);
+    UT_CHECK(!check.architecture.empty());
+    UT_CHECK(check.summary.find("Left 4 Dead 2") != std::string::npos);
+    UT_CHECK(check.summary.find("dedicated") != std::string::npos);
+
+    auto created = bridge::EngineView::create();
+    UT_CHECK(created.ok());
+    if (!created.ok()) return;
+    bridge::EngineViewConfig config;
+    config.bin_dir = dir;
+    config.game_dir = dir;
+    const auto initialized = created.value()->initialize(config);
+    UT_CHECK(!initialized.ok());
+    UT_CHECK(initialized.error().message.find("Left 4 Dead 2") != std::string::npos);
+    UT_CHECK(!created.value()->initialized());
 }
 
 UT_TEST_CASE("ui connection: detect_game_dir finds the folder with gameinfo.txt") {
@@ -1163,102 +1195,6 @@ UT_TEST_CASE("ui browser: game paths normalize to material names") {
     UT_CHECK_EQ(ui::material_name_from_game_path("materials/"), std::string());
 }
 
-UT_TEST_CASE("ui browser: folder scan finds vmt files, hides dot directories") {
-    const fs::path root = fresh_temp_dir() / "scan";
-    std::error_code ec;
-    fs::create_directories(root / "materials" / "brick", ec);
-    fs::create_directories(root / "materials" / ".hidden", ec);
-    fs::create_directories(root / "materials" / "wood", ec);
-    {
-        std::ofstream(root / "materials" / "brick" / "brickwall001a.vmt") << "\"UnlitGeneric\"\n{\n}\n";
-        std::ofstream(root / "materials" / "wood" / "plank.vmt") << "\"UnlitGeneric\"\n{\n}\n";
-        std::ofstream(root / "materials" / ".hidden" / "hidden.vmt") << "x";
-        std::ofstream(root / "materials" / "readme.txt") << "x";
-    }
-
-    ui::MaterialIndex index;
-    const std::size_t added = index.add_directory(root);
-    UT_CHECK_EQ(added, static_cast<std::size_t>(2));
-    UT_CHECK_EQ(index.size(), static_cast<std::size_t>(2));
-    UT_CHECK_EQ(index.entries()[0].name, std::string("brick/brickwall001a"));
-    UT_CHECK_EQ(index.entries()[0].display, std::string("brick/brickwall001a.vmt"));
-    UT_CHECK_EQ(index.entries()[1].name, std::string("wood/plank"));
-    UT_CHECK(!index.entries()[0].from_engine);
-    UT_CHECK(!index.entries()[0].disk_path.empty());
-}
-
-UT_TEST_CASE("ui browser: engine names dedupe against the folder scan") {
-    const fs::path root = fresh_temp_dir() / "dedupe";
-    std::error_code ec;
-    fs::create_directories(root / "materials" / "brick", ec);
-    std::ofstream(root / "materials" / "brick" / "brickwall001a.vmt") << "x";
-
-    ui::MaterialIndex index;
-    index.add_directory(root);
-    index.add_engine_names({ "materials/brick/brickwall001a.vmt", "materials/dev/dev_measuregeneric01.vmt" });
-    UT_CHECK_EQ(index.size(), static_cast<std::size_t>(2));
-
-    bool found_disk = false;
-    bool found_engine = false;
-    for (const ui::MaterialEntry& entry : index.entries()) {
-        if (entry.name == "brick/brickwall001a") {
-            found_disk = true;
-            UT_CHECK(!entry.from_engine); // the disk entry won the dedupe
-        }
-        if (entry.name == "dev/dev_measuregeneric01") {
-            found_engine = true;
-            UT_CHECK(entry.from_engine);
-        }
-    }
-    UT_CHECK(found_disk);
-    UT_CHECK(found_engine);
-}
-
-UT_TEST_CASE("ui browser: search is case-insensitive and filters") {
-    ui::MaterialIndex index;
-    index.add_engine_names({ "materials/brick/brickwall001a.vmt", "materials/wood/plank.vmt",
-                             "materials/dev/dev_measuregeneric01.vmt" });
-    UT_CHECK_EQ(index.search("").size(), static_cast<std::size_t>(3));
-    UT_CHECK_EQ(index.search("BRICK").size(), static_cast<std::size_t>(1));
-    UT_CHECK_EQ(index.search("dev_").size(), static_cast<std::size_t>(1));
-    UT_CHECK_EQ(index.search("wall").size(), static_cast<std::size_t>(1));
-    UT_CHECK_EQ(index.search("nope").size(), static_cast<std::size_t>(0));
-    const std::vector<std::size_t> wood = index.search("plank");
-    UT_CHECK_EQ(wood.size(), static_cast<std::size_t>(1));
-    if (!wood.empty()) {
-        UT_CHECK_EQ(index.entries()[wood[0]].name, std::string("wood/plank"));
-    }
-}
-
-UT_TEST_CASE("ui browser: thumbnail cache name is stable and a bmp round-trips") {
-    const std::string first = ui::thumbnail_file_name("Brick/Brickwall001A");
-    UT_CHECK_EQ(first, ui::thumbnail_file_name("brick/brickwall001a"));
-    UT_CHECK(first.find(".bmp") != std::string::npos);
-    UT_CHECK(first.find('/') == std::string::npos);
-    UT_CHECK(first.find('\\') == std::string::npos);
-
-    const fs::path root = fresh_temp_dir() / "thumbs";
-    const fs::path bmp = ui::thumbnail_cache_path(root, "brick/brickwall001a");
-    std::vector<unsigned char> pixels(4 * 4 * 4, 0);
-    for (int i = 0; i < 16; ++i) {
-        pixels[i * 4 + 0] = static_cast<unsigned char>(i * 4);     // B
-        pixels[i * 4 + 1] = static_cast<unsigned char>(i * 4 + 1); // G
-        pixels[i * 4 + 2] = static_cast<unsigned char>(i * 4 + 2); // R
-        pixels[i * 4 + 3] = 255;
-    }
-    UT_CHECK(ui::write_bmp_from_bgra(bmp, 4, 4, pixels.data(), true));
-    int width = 0;
-    int height = 0;
-    UT_CHECK(ui::read_bmp_size(bmp, width, height));
-    UT_CHECK_EQ(width, 4);
-    UT_CHECK_EQ(height, 4);
-
-    // Reading a non-BMP file fails cleanly.
-    const fs::path text = root / "not_a_bmp.txt";
-    std::ofstream(text) << "hello";
-    UT_CHECK(!ui::read_bmp_size(text, width, height));
-}
-
 // --- texture thumbnails (VTF decoding without the engine) ----------------------
 
 namespace {
@@ -1460,27 +1396,6 @@ UT_TEST_CASE("ui texture: a real VTF decodes to a non-empty BGRA thumbnail") {
     UT_CHECK(!image.has_alpha);
 }
 
-UT_TEST_CASE("ui texture: a decoded thumbnail writes a valid BMP") {
-    FakeTextureSource source;
-    source.add("materials/brick/test05.vtf", make_dxt1_4x4());
-    const auto thumbnail =
-        ui::make_texture_thumbnail(vmt_with_base_texture("brick/test05"), source, 64);
-    UT_CHECK(thumbnail.ok());
-    if (!thumbnail.ok()) {
-        return;
-    }
-
-    const fs::path bmp = fresh_temp_dir() / "thumb.bmp";
-    const ui::TextureThumbnail& image = thumbnail.value();
-    UT_CHECK(ui::write_bmp_from_bgra(bmp, image.width, image.height, image.bgra.data(), true));
-
-    int width = 0;
-    int height = 0;
-    UT_CHECK(ui::read_bmp_size(bmp, width, height));
-    UT_CHECK_EQ(width, 4);
-    UT_CHECK_EQ(height, 4);
-}
-
 UT_TEST_CASE("ui texture: a missing texture reports NotFound, an empty buffer does not crash") {
     FakeTextureSource source;
     source.add("materials/brick/test05.vtf", {});
@@ -1650,6 +1565,66 @@ UT_TEST_CASE("ui info: a plain material reports its shader and one texture") {
     UT_CHECK_EQ(texture.vram_size, 16u * 16u * 4u);
     UT_CHECK(!texture.is_cubemap);
     UT_CHECK(!texture.is_hdr);
+}
+
+UT_TEST_CASE("ui info: metadata source avoids full texture reads and keeps the real file size") {
+    class MetadataSource final : public ui::TextureSource {
+    public:
+        int full_reads = 0;
+        int header_reads = 0;
+        vmt::Result<std::vector<unsigned char>> read(const std::string&) override {
+            ++full_reads;
+            return vmt::Err<std::vector<unsigned char>>(vmt::make_error(
+                vmt::ErrorCode::Internal, "metadata must not request pixels"));
+        }
+        vmt::Result<ui::TextureMetadata> metadata(const std::string&) override {
+            ++header_reads;
+            const auto bytes = make_dxt1_vtf(8, 8, 2);
+            return vmt::Ok(ui::TextureMetadata{1000000,
+                vtf::open_vtf_info_from_memory(bytes.data(), 64)});
+        }
+    } source;
+    const auto info = ui::collect_material_info(vmt_with_base_texture("brick/test05"), source, true);
+    UT_CHECK(source.full_reads == 0);
+    UT_CHECK(source.header_reads == 1);
+    UT_CHECK(info.textures.size() == 1);
+    if (info.textures.empty()) return;
+    UT_CHECK(info.textures[0].found && info.textures[0].decoded);
+    UT_CHECK(info.textures[0].width == 8);
+    UT_CHECK(info.textures[0].file_size == 1000000);
+}
+
+UT_TEST_CASE("ui session: opening a VTF reads metadata without touching locked pixels") {
+    const auto directory = fresh_temp_dir();
+    const auto bytes = make_dxt1_vtf(4, 4);
+    for (const auto* name : {L"texture_\u03bb_\u7d20.VTF", L"signature.data"}) {
+        const auto file = directory / name;
+        {
+            std::ofstream output(file, std::ios::binary);
+            output.write(reinterpret_cast<const char*>(bytes.data()),
+                         static_cast<std::streamsize>(bytes.size()));
+        }
+        const HANDLE locked = CreateFileW(file.c_str(), GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        UT_CHECK(locked != INVALID_HANDLE_VALUE);
+        if (locked == INVALID_HANDLE_VALUE) return;
+        OVERLAPPED range{};
+        range.Offset = 64;
+        const DWORD pixel_size = static_cast<DWORD>(bytes.size() - 64);
+        const bool held = LockFileEx(locked, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                                     0, pixel_size, 0, &range) != FALSE;
+        UT_CHECK(held);
+        if (!held) { CloseHandle(locked); return; }
+        ui::EditorSession session;
+        const auto opened = session.open_file(file);
+        UT_CHECK(opened.ok());
+        UT_CHECK(session.is_vtf());
+        UT_CHECK(session.vtf_info() != nullptr);
+        if (session.vtf_info()) UT_CHECK(session.vtf_info()->width == 4);
+        UnlockFileEx(locked, 0, pixel_size, 0, &range);
+        CloseHandle(locked);
+    }
 }
 
 UT_TEST_CASE("ui info: every referenced texture is described, not just the first") {
@@ -2655,7 +2630,7 @@ UT_TEST_CASE("ui version: semantic version parsing and comparison") {
     // Serialization
     UT_CHECK_EQ(v1.to_string(), std::string("0.1.0"));
     UT_CHECK_EQ(v_beta.to_string(), std::string("0.2.0-beta.1"));
-    UT_CHECK_EQ(ui::AppVersion::current(), ui::AppVersion::parse("0.2.1"));
+    UT_CHECK_EQ(ui::AppVersion::current(), ui::AppVersion::parse(VMTSTUDIO_VERSION_STRING));
 }
 
 UT_TEST_CASE("ui settings: updater options roundtrip") {
@@ -2865,17 +2840,12 @@ UT_TEST_CASE("ui assets: cache round-trips and rejects another game or version")
     meta.roots = { "materials", "models" };
     meta.extensions = { ".vmt", ".vtf", ".mdl" };
 
-    // The parent directory does not exist yet: save must create it.
-    const fs::path file = fresh_temp_dir() / "cache" / "assets-v1.tsv";
-    UT_CHECK(ui::save_asset_cache(file, index, meta));
-    UT_CHECK(fs::exists(file));
-    fs::path temp_file = file;
-    temp_file += ".tmp";
-    UT_CHECK(!fs::exists(temp_file));
+    const std::string text = ui::serialize_asset_cache(index, meta);
+    UT_CHECK(text.find('\r') == std::string::npos);
 
     // Case, slash style and a trailing separator do not invalidate the cache.
     const ui::AssetCacheLoad loaded =
-        ui::load_asset_cache(file, "c:/games/garrysmod/garrysmod/");
+        ui::parse_asset_cache(text, "c:/games/garrysmod/garrysmod/");
     UT_CHECK(loaded.loaded);
     UT_CHECK_EQ(loaded.index.size(), index.size());
     UT_CHECK_EQ(loaded.meta.game_dir, meta.game_dir);
@@ -2893,27 +2863,19 @@ UT_TEST_CASE("ui assets: cache round-trips and rejects another game or version")
     }
 
     const ui::AssetCacheLoad other_game =
-        ui::load_asset_cache(file, "C:\\Games\\TF2\\tf");
+        ui::parse_asset_cache(text, "C:\\Games\\TF2\\tf");
     UT_CHECK(!other_game.loaded);
     UT_CHECK(other_game.index.empty());
 
-    const fs::path wrong_version = fresh_temp_dir() / "assets-v2.tsv";
-    {
-        std::ofstream stream(wrong_version, std::ios::binary);
-        stream << "vmtstudio-assets\t2\n";
-        stream << "game_dir\tC:\\Games\\GarrysMod\\garrysmod\n";
-        stream << "count\t0\n";
-    }
-    const ui::AssetCacheLoad rejected =
-        ui::load_asset_cache(wrong_version, "C:\\Games\\GarrysMod\\garrysmod");
+    const ui::AssetCacheLoad rejected = ui::parse_asset_cache(
+        "vmtstudio-assets\t2\ngame_dir\tC:\\Games\\GarrysMod\\garrysmod\ncount\t0\n",
+        meta.game_dir);
     UT_CHECK(!rejected.loaded);
     UT_CHECK(rejected.index.empty());
 
-    const ui::AssetCacheLoad missing =
-        ui::load_asset_cache(fresh_temp_dir() / "does-not-exist.tsv",
-                             "C:\\Games\\GarrysMod\\garrysmod");
-    UT_CHECK(!missing.loaded);
-    UT_CHECK(missing.index.empty());
+    const ui::AssetCacheLoad empty = ui::parse_asset_cache("", meta.game_dir);
+    UT_CHECK(!empty.loaded);
+    UT_CHECK(empty.index.empty());
 }
 
 UT_TEST_CASE("ui assets: cache serializes to and parses from memory") {
@@ -3030,6 +2992,71 @@ UT_TEST_CASE("ui assets: pack round-trips, updates, compacts and trims a partial
         UT_CHECK(reopened.get(ui::kAssetPackTagMeta, "index", read));
         UT_CHECK(read == index_bytes);
     }
+}
+
+UT_TEST_CASE("ui assets: pack has one owner and releases ownership after close or failed open") {
+    const fs::path directory = fresh_temp_dir();
+    const fs::path file = directory / "cache.pack";
+    const std::vector<unsigned char> bytes = { 1, 2, 3, 4 };
+    ui::AssetPack next;
+    {
+        ui::AssetPack owner;
+        UT_CHECK(owner.open(file));
+        if (!owner.is_open()) return;
+        UT_CHECK(owner.put(ui::kAssetPackTagMeta, "index", bytes, false));
+        const std::string original = read_all(file);
+        UT_CHECK(!next.open(file));
+        UT_CHECK(!next.is_open());
+        UT_CHECK(!next.open(directory / "." / "cache.pack", false));
+        UT_CHECK_EQ(read_all(file), original);
+
+        // A different game cache is independent of the held lock.
+        ui::AssetPack other_game;
+        UT_CHECK(other_game.open(directory / "other.pack"));
+    }
+    UT_CHECK(next.open(file, false));
+    std::vector<unsigned char> read;
+    UT_CHECK(next.get(ui::kAssetPackTagMeta, "index", read));
+    UT_CHECK(read == bytes);
+
+    const fs::path damaged = directory / "damaged.pack";
+    std::ofstream(damaged, std::ios::binary) << "foreign archive header";
+    ui::AssetPack failed;
+    UT_CHECK(!failed.open(damaged));
+    std::ofstream(damaged, std::ios::binary | std::ios::trunc).close();
+    ui::AssetPack repaired;
+    UT_CHECK(repaired.open(damaged));
+}
+
+UT_TEST_CASE("ui assets: failed compaction preserves archive and live records") {
+    const fs::path file = fresh_temp_dir() / "cache.pack";
+    ui::AssetPack pack;
+    UT_CHECK(pack.open(file));
+    if (!pack.is_open()) return;
+    const std::vector<unsigned char> bytes = { 5, 6, 7 };
+    UT_CHECK(pack.put(ui::kAssetPackTagMeta, "index", bytes, false));
+    UT_CHECK(pack.put(ui::kAssetPackTagThumb, "image", bytes, false));
+    const std::string original = read_all(file);
+
+    const HANDLE blocker = CreateFileW(file.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    UT_CHECK(blocker != INVALID_HANDLE_VALUE);
+    if (blocker == INVALID_HANDLE_VALUE) return;
+    UT_CHECK(!pack.compact());
+    UT_CHECK(!pack.remove_tag(ui::kAssetPackTagThumb));
+    UT_CHECK(pack.is_open());
+    UT_CHECK(pack.live_count() == 2);
+    UT_CHECK_EQ(read_all(file), original);
+    std::vector<unsigned char> read;
+    UT_CHECK(pack.get(ui::kAssetPackTagThumb, "image", read));
+    UT_CHECK(read == bytes);
+    CloseHandle(blocker);
+
+    UT_CHECK(pack.remove_tag(ui::kAssetPackTagThumb));
+    UT_CHECK(!pack.contains(ui::kAssetPackTagThumb, "image"));
+    UT_CHECK(pack.get(ui::kAssetPackTagMeta, "index", read));
+    UT_CHECK(read == bytes);
 }
 
 UT_TEST_CASE("ui assets: pack uses the injected compressor and rejects bad checksums") {

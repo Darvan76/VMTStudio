@@ -13,6 +13,8 @@
 #include <QStandardPaths>
 #include <QTextStream>
 #include <QTimer>
+#include <QTemporaryDir>
+#include <chrono>
 
 namespace ui {
 namespace qt {
@@ -20,11 +22,16 @@ namespace qt {
 AppUpdater::AppUpdater(QObject* parent)
     : QObject(parent),
       m_net(new QNetworkAccessManager(this)) {
+    m_applyTimer = new QTimer(this);
+    m_applyTimer->setInterval(25);
+    connect(m_applyTimer, &QTimer::timeout, this, &AppUpdater::finishPreparation);
 }
 
 AppUpdater::~AppUpdater() {
     cleanupCheckReply();
     cleanupDownloadReply();
+    if (m_cancelPreparation) m_cancelPreparation->store(true);
+    if (m_preparation.valid()) m_preparation.wait();
 }
 
 void AppUpdater::setRepository(const QString& owner, const QString& repo) {
@@ -188,6 +195,10 @@ void AppUpdater::onCheckFinished() {
 }
 
 void AppUpdater::startDownload(const ReleaseInfo& release) {
+    if (isPreparing()) {
+        emit downloadFailed(tr("Espera a que termine la preparación anterior."));
+        return;
+    }
     cleanupDownloadReply();
 
     m_redirectCount = 0;
@@ -198,13 +209,15 @@ void AppUpdater::startDownload(const ReleaseInfo& release) {
         return;
     }
 
-    const QString tempDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation) + "/VMTStudio_Update";
-    QDir().mkpath(tempDir);
-
-    m_downloadPath = tempDir + "/update.zip";
-    if (QFile::exists(m_downloadPath)) {
-        QFile::remove(m_downloadPath);
+    // Every application instance owns its download and extraction files.
+    m_downloadDirectory = std::make_unique<QTemporaryDir>(
+        QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+            .filePath("VMTStudio_Update-XXXXXX"));
+    if (!m_downloadDirectory->isValid()) {
+        emit downloadFailed(tr("No se pudo crear el directorio temporal de descarga."));
+        return;
     }
+    m_downloadPath = m_downloadDirectory->filePath("update.zip");
 
     m_downloadFile = std::make_unique<QFile>(m_downloadPath);
     if (!m_downloadFile->open(QIODevice::WriteOnly)) {
@@ -227,6 +240,7 @@ void AppUpdater::startDownload(const ReleaseInfo& release) {
 
 void AppUpdater::cancelDownload() {
     cleanupDownloadReply();
+    if (m_cancelPreparation) m_cancelPreparation->store(true);
 }
 
 void AppUpdater::onDownloadDataReady() {
@@ -297,50 +311,115 @@ void AppUpdater::onDownloadFinished() {
         emit downloadFailed(tr("El archivo descargado está incompleto o dañado."));
         return;
     }
+    const qint64 expectedSize = m_currentRelease.bestAsset().size;
+    if (expectedSize > 0 && QFileInfo(savedPath).size() != expectedSize) {
+        emit downloadFailed(tr("El tamaño del archivo descargado no coincide con la release."));
+        return;
+    }
 
     emit downloadFinished(savedPath);
 }
 
-bool AppUpdater::applyUpdate(const QString& zipFilePath, QString& errorMessage) {
-    emit extractionStatus(tr("Extrayendo paquete de actualización..."));
-
-    const QString tempDir = QFileInfo(zipFilePath).dir().absolutePath();
-    const QString extractedDir = tempDir + "/extracted";
-
-    // Clean up existing extracted directory
-    if (QDir(extractedDir).exists()) {
-        QDir(extractedDir).removeRecursively();
+void AppUpdater::applyUpdate(const QString& zipFilePath) {
+    if (isPreparing()) return;
+    m_updateZip = zipFilePath;
+    m_cancelPreparation = std::make_shared<std::atomic<bool>>(false);
+    const auto cancelled = m_cancelPreparation;
+    try {
+        m_preparation = std::async(std::launch::async, [this, zipFilePath, cancelled]() {
+            PreparedUpdate result;
+            prepareUpdate(zipFilePath, cancelled, result.payloadDir, result.stagingDir, result.error);
+            return result;
+        });
+        m_applyTimer->start();
+    } catch (const std::exception& error) {
+        emit updateFailed(tr("No se pudo iniciar la preparación: %1").arg(QString::fromUtf8(error.what())));
     }
-    if (!QDir().mkpath(extractedDir)) {
-        errorMessage = tr("No se pudo crear el directorio temporal de extracción.");
+}
+
+void AppUpdater::finishPreparation() {
+    if (!m_preparation.valid() ||
+        m_preparation.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
+    m_applyTimer->stop();
+    PreparedUpdate result;
+    try {
+        result = m_preparation.get();
+    } catch (const std::exception& error) {
+        result.error = QString::fromUtf8(error.what());
+    }
+    if (m_cancelPreparation->load()) {
+        if (!result.stagingDir.isEmpty()) QDir(result.stagingDir).removeRecursively();
+        emit updateCancelled();
+        return;
+    }
+    if (!result.error.isEmpty()) {
+        emit updateFailed(result.error);
+        return;
+    }
+    QString error;
+    if (!launchUpdate(result, error)) {
+        QDir(result.stagingDir).removeRecursively();
+        emit updateFailed(error);
+    }
+}
+
+bool AppUpdater::prepareUpdate(const QString& zipFilePath,
+                              const std::shared_ptr<std::atomic<bool>>& cancelled,
+                              QString& payloadDir, QString& stagingDir, QString& errorMessage) {
+    if (cancelled->load()) return false;
+    emit extractionStatus(tr("Extrayendo paquete de actualización..."));
+    if (cancelled->load()) return false;
+    const QFileInfo archive(zipFilePath);
+    if (!archive.isFile() || archive.size() < 22) {
+        errorMessage = tr("El archivo de actualización no existe o está incompleto.");
         return false;
     }
 
+    const QString tempDir = QFileInfo(zipFilePath).dir().absolutePath();
+    QTemporaryDir extraction(tempDir + "/extracted-XXXXXX");
+    if (!extraction.isValid()) {
+        errorMessage = tr("No se pudo crear el directorio temporal de extracción.");
+        return false;
+    }
+    // Failed/cancelled attempts clean their own unique directory in this
+    // worker; another attempt's files and the installed app stay untouched.
+    const QString extractedDir = extraction.path();
+
     // Try tar.exe first (standard on Windows 10 build 17063+ and Windows 11)
     bool extracted = false;
-    QProcess tarProcess;
     const QString nativeZip = QDir::toNativeSeparators(zipFilePath);
     const QString nativeExtracted = QDir::toNativeSeparators(extractedDir);
 
-    tarProcess.start("tar.exe", {"-xf", nativeZip, "-C", nativeExtracted});
-    if (tarProcess.waitForFinished(60000) && tarProcess.exitCode() == 0) {
-        extracted = true;
-    }
+    const auto extract = [&cancelled](const QString& program, const QStringList& arguments,
+                                      int timeoutMs) {
+        if (cancelled->load()) return false;
+        QProcess process;
+        process.start(program, arguments);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        while (!process.waitForFinished(25)) {
+            if (cancelled->load() || std::chrono::steady_clock::now() >= deadline ||
+                process.state() == QProcess::NotRunning) {
+                process.kill();
+                process.waitForFinished(1000);
+                return false;
+            }
+        }
+        return !cancelled->load() && process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+    };
+    extracted = extract("tar.exe", {"-xf", nativeZip, "-C", nativeExtracted}, 60000);
+    if (cancelled->load()) return false;
 
     // Fallback to powershell Expand-Archive
     if (!extracted) {
-        QProcess psProcess;
         QString escapedZip = nativeZip;
         escapedZip.replace("'", "''");
         QString escapedExtracted = nativeExtracted;
         escapedExtracted.replace("'", "''");
         const QString psCommand = QString("Expand-Archive -Force -LiteralPath '%1' -DestinationPath '%2'")
                                       .arg(escapedZip, escapedExtracted);
-        psProcess.start("powershell.exe", {"-NoProfile", "-NonInteractive", "-Command", psCommand});
-        if (psProcess.waitForFinished(120000) && psProcess.exitCode() == 0) {
-            extracted = true;
-        }
+        extracted = extract("powershell.exe", {"-NoProfile", "-NonInteractive", "-Command", psCommand}, 120000);
     }
+    if (cancelled->load()) return false;
 
     if (!extracted) {
         errorMessage = tr("No se pudo descomprimir el archivo de actualización.");
@@ -352,10 +431,11 @@ bool AppUpdater::applyUpdate(const QString& zipFilePath, QString& errorMessage) 
     if (!canonicalExtracted.isEmpty()) {
         QDirIterator it(extractedDir, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
         while (it.hasNext()) {
+            if (cancelled->load()) return false;
             it.next();
             const QString canonicalItem = it.fileInfo().canonicalFilePath();
-            if (!canonicalItem.isEmpty() && !canonicalItem.startsWith(canonicalExtracted, Qt::CaseInsensitive)) {
-                QDir(extractedDir).removeRecursively();
+            if (!canonicalItem.isEmpty() &&
+                !canonicalItem.startsWith(canonicalExtracted + "/", Qt::CaseInsensitive)) {
                 errorMessage = tr("Error de seguridad: el archivo de actualización contiene rutas no seguras (Zip Slip).");
                 return false;
             }
@@ -363,7 +443,6 @@ bool AppUpdater::applyUpdate(const QString& zipFilePath, QString& errorMessage) 
     }
 
     // Locate directory containing vmtstudio.exe
-    QString payloadDir;
     if (QFile::exists(extractedDir + "/vmtstudio.exe")) {
         payloadDir = extractedDir;
     } else {
@@ -371,6 +450,7 @@ bool AppUpdater::applyUpdate(const QString& zipFilePath, QString& errorMessage) 
         QDir extDir(extractedDir);
         const QStringList subDirs = extDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
         for (const QString& sub : subDirs) {
+            if (cancelled->load()) return false;
             const QString candidate = extractedDir + "/" + sub;
             if (QFile::exists(candidate + "/vmtstudio.exe")) {
                 payloadDir = candidate;
@@ -383,90 +463,77 @@ bool AppUpdater::applyUpdate(const QString& zipFilePath, QString& errorMessage) 
         errorMessage = tr("El archivo descargado no contiene el ejecutable vmtstudio.exe.");
         return false;
     }
+    if (cancelled->load()) return false;
 
     emit extractionStatus(tr("Preparando script de actualización..."));
 
-    // Write apply_update.cmd
-    const QString scriptPath = tempDir + "/apply_update.cmd";
+    // PowerShell -File passes paths as arguments without cmd.exe CALL's
+    // second expansion of percent signs or delayed expansion of exclamation marks.
+    const QString scriptPath = extraction.filePath("apply_update.ps1");
     QFile scriptFile(scriptPath);
     if (!scriptFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         errorMessage = tr("No se pudo crear el script de actualización.");
         return false;
     }
-
-    {
-        QTextStream out(&scriptFile);
-        out << "@echo off\r\n";
-        out << "chcp 65001 >nul\r\n";
-        out << "setlocal enabledelayedexpansion\r\n";
-        out << "title Actualizando VMT-Studio...\r\n";
-        out << "\r\n";
-        out << "set \"PID=%~1\"\r\n";
-        out << "set \"SRC=%~2\"\r\n";
-        out << "set \"DST=%~3\"\r\n";
-        out << "set \"EXE=%~4\"\r\n";
-        out << "\r\n";
-        out << ":: Quitar barras invertidas finales para evitar escape accidental en robocopy\r\n";
-        out << "if \"%SRC:~-1%\"==\"\\\" set \"SRC=%SRC:~0,-1%\"\r\n";
-        out << "if \"%DST:~-1%\"==\"\\\" set \"DST=%DST:~0,-1%\"\r\n";
-        out << "\r\n";
-        out << "echo ========================================\r\n";
-        out << "echo        Actualizando VMT-Studio...        \r\n";
-        out << "echo ========================================\r\n";
-        out << "echo Esperando a que el proceso %PID% finalice...\r\n";
-        out << "\r\n";
-        out << ":wait_loop\r\n";
-        out << "tasklist /FI \"PID eq %PID%\" 2>nul | find /I \"%PID%\" >nul\r\n";
-        out << "if not errorlevel 1 (\r\n";
-        out << "    timeout /t 1 /nobreak >nul\r\n";
-        out << "    goto wait_loop\r\n";
-        out << ")\r\n";
-        out << "\r\n";
-        out << ":: Breve espera para liberar bloqueos residuales de archivos y DLLs\r\n";
-        out << "timeout /t 1 /nobreak >nul\r\n";
-        out << "\r\n";
-        out << "echo Aplicando archivos actualizados...\r\n";
-        out << "robocopy \"%SRC%\" \"%DST%\" /E /IS /IT /R:5 /W:1 > \"%TEMP%\\vmtstudio_update_robocopy.log\"\r\n";
-        out << "set ROBO_ERR=%ERRORLEVEL%\r\n";
-        out << "if %ROBO_ERR% GEQ 8 (\r\n";
-        out << "    echo Error critico al copiar archivos (codigo %ROBO_ERR%).\r\n";
-        out << "    echo Consulte %TEMP%\\vmtstudio_update_robocopy.log\r\n";
-        out << "    pause\r\n";
-        out << "    exit /b %ROBO_ERR%\r\n";
-        out << ")\r\n";
-        out << "\r\n";
-        out << "echo Iniciando VMT-Studio actualizado...\r\n";
-        out << "start \"\" \"%DST%\\%EXE%\"\r\n";
-        out << "\r\n";
-        out << ":: Limpiar archivos temporales\r\n";
-        out << "timeout /t 2 /nobreak >nul\r\n";
-        out << "rd /s /q \"%~dp0\" 2>nul\r\n";
-        out << "exit /b 0\r\n";
+    const QByteArray script = R"ps(param(
+    [int]$AppProcessId,
+    [string]$SourceDir,
+    [string]$DestinationDir,
+    [string]$ExecutableName,
+    [string]$CleanupDir
+)
+$ErrorActionPreference = 'Stop'
+try {
+    Wait-Process -Id $AppProcessId -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    & robocopy.exe $SourceDir $DestinationDir /E /IS /IT /R:5 /W:1 /XF apply_update.ps1
+    if ($LASTEXITCODE -ge 8) {
+        throw "Robocopy failed with exit code $LASTEXITCODE. The update files remain in $SourceDir."
+    }
+    Start-Process -FilePath (Join-Path $DestinationDir $ExecutableName) -WorkingDirectory $DestinationDir
+    Start-Sleep -Seconds 2
+    Remove-Item -LiteralPath $CleanupDir -Recurse -Force
+    exit 0
+} catch {
+    Write-Error $_ -ErrorAction Continue
+    exit 1
+}
+)ps";
+    if (scriptFile.write(script) != script.size() || !scriptFile.flush()) {
+        errorMessage = tr("No se pudo escribir el script de actualización.");
+        return false;
     }
     scriptFile.close();
 
-    const qint64 currentPid = QCoreApplication::applicationPid();
-    const QString nativeSrc = QDir::toNativeSeparators(payloadDir);
-    const QString nativeDst = QDir::toNativeSeparators(QCoreApplication::applicationDirPath());
-    const QString exeName = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
+    if (cancelled->load()) return false;
+    stagingDir = extraction.path();
+    extraction.setAutoRemove(false); // the detached script still needs the payload
+    return true;
+}
 
+bool AppUpdater::launchUpdate(const PreparedUpdate& update, QString& errorMessage) {
+    const QString scriptPath = QDir(update.stagingDir).filePath("apply_update.ps1");
+    const bool ownsArchive = m_downloadDirectory &&
+        QFileInfo(m_updateZip).absolutePath() == m_downloadDirectory->path();
+    const QString cleanupDir = ownsArchive ? m_downloadDirectory->path() : update.stagingDir;
     emit extractionStatus(tr("Reiniciando aplicación..."));
 
-    // Using "call" prevents cmd.exe /c from stripping surrounding quotes on whitespace paths
-    const bool launched = QProcess::startDetached("cmd.exe", {
-        "/c",
-        "call",
+    const bool launched = QProcess::startDetached("powershell.exe", {
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
         QDir::toNativeSeparators(scriptPath),
-        QString::number(currentPid),
-        nativeSrc,
-        nativeDst,
-        exeName
+        "-AppProcessId", QString::number(QCoreApplication::applicationPid()),
+        "-SourceDir", QDir::toNativeSeparators(update.payloadDir),
+        "-DestinationDir", QDir::toNativeSeparators(QCoreApplication::applicationDirPath()),
+        "-ExecutableName", QFileInfo(QCoreApplication::applicationFilePath()).fileName(),
+        "-CleanupDir", QDir::toNativeSeparators(cleanupDir)
     });
 
     if (!launched) {
         errorMessage = tr("No se pudo iniciar el proceso detached de actualización.");
         return false;
     }
+
+    if (ownsArchive) m_downloadDirectory->setAutoRemove(false);
 
     // Schedule application shutdown
     QTimer::singleShot(250, qApp, &QCoreApplication::quit);

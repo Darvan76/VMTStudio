@@ -1,6 +1,7 @@
 #include "ui/connection_model.h"
 
 #include "bridge/dll_loader.h"
+#include "bridge/engine_compatibility.h"
 #include "bridge/pe.h"
 #include "profiles/game_manager.h"
 
@@ -38,6 +39,23 @@ ConnectionCheck test_connection(const std::filesystem::path& bin_dir) {
     check.bin_dir = bin_dir;
 
     try {
+        const auto compatibility = bridge::inspect_engine_compatibility(bin_dir);
+        if (compatibility.requires_l4d2_backend) {
+            check.architecture = arch_name(bridge::read_pe_arch(bin_dir / "materialsystem.dll"));
+            check.summary = compatibility.detail;
+            check.lines.push_back("[FAIL] Native preview: Left 4 Dead 2 backend is pending");
+            for (const auto& version : compatibility.filesystem_interfaces) {
+                check.lines.push_back("[INFO] filesystem_stdio.dll: " + version);
+            }
+            for (const auto& version : compatibility.material_system_interfaces) {
+                check.lines.push_back("[INFO] materialsystem.dll: " + version);
+            }
+            for (const auto& version : compatibility.studio_render_interfaces) {
+                check.lines.push_back("[INFO] studiorender.dll: " + version);
+            }
+            return check;
+        }
+
         bridge::LoaderOptions options;
         options.bin_dir = bin_dir;
         for (const RequiredDll& dll : kRequiredDlls) {

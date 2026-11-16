@@ -757,6 +757,9 @@ bool MainWindow::ensureEngine(QString& error) {
     config.width = std::max(64, m_viewport->width());
     config.height = std::max(64, m_viewport->height());
 
+    m_engineCancelled = std::make_shared<std::atomic<bool>>(false);
+    config.cancelled = m_engineCancelled;
+
     auto initRes = m_engine->initialize(config);
     if (!initRes) {
         error = QString::fromStdString(initRes.error().message);
@@ -814,6 +817,9 @@ void MainWindow::ensureEngineAsync() {
     config.child_window = reinterpret_cast<void*>(m_viewport->hostHwnd());
     config.width = std::max(64, m_viewport->width());
     config.height = std::max(64, m_viewport->height());
+
+    m_engineCancelled = std::make_shared<std::atomic<bool>>(false);
+    config.cancelled = m_engineCancelled;
 
     m_engineConnecting = true;
     updateStatus();
@@ -895,6 +901,8 @@ void MainWindow::finishEngineInitialization() {
 }
 
 void MainWindow::shutdownEngine() {
+    if (m_engineCancelled) m_engineCancelled->store(true);
+    if (m_engine) m_engine->cancel_pending_queries();
     m_previewSyncTimer->stop();
     m_previewSync = ui::PreviewSync{};
     m_previewIdentity.clear();
@@ -2563,6 +2571,7 @@ void MainWindow::onInspectorParameterChanged(const QString& name, const QString&
     QTextCursor restored = m_codeEditor->textCursor();
     restored.setPosition(std::min(savedPosition, static_cast<int>(m_codeEditor->toPlainText().size())));
     m_codeEditor->setTextCursor(restored);
+    m_inspector->updateFromDocument(m_session.document(), m_schemas, m_showAdvanced);
     m_suppressSync = false;
 
     updateTitle();

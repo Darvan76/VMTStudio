@@ -34,7 +34,9 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -46,6 +48,10 @@ namespace qt {
 // Generation counter, worker slots and the delivery object shared with the
 // pool jobs (defined in the .cpp so the job does not need the service).
 struct ThumbnailShared;
+
+// Acquired before loading source bytes, shared by previews and thumbnail jobs
+// across browser windows. The decoder's own mutex starts too late for this.
+std::mutex& asset_load_mutex();
 
 // --- shared plumbing ---------------------------------------------------------
 
@@ -111,9 +117,11 @@ public:
 
     GameTextureSource(std::shared_ptr<EngineAccess> access,
                       std::vector<std::filesystem::path> roots,
-                      LockMode mode = LockMode::Blocking);
+                      LockMode mode = LockMode::Blocking,
+                      std::function<bool()> is_current = {});
 
     vmt::Result<std::vector<unsigned char>> read(const std::string& game_path) override;
+    vmt::Result<TextureMetadata> metadata(const std::string& game_path) override;
 
     // True when the last read gave up because another thread was using the
     // engine (only possible in Try mode). The caller must then treat the whole
@@ -121,10 +129,12 @@ public:
     bool last_engine_busy() const noexcept { return m_lastEngineBusy; }
 
 private:
+    bool current() const;
     std::shared_ptr<EngineAccess> m_access;
     std::vector<std::filesystem::path> m_roots;
     LockMode m_mode = LockMode::Blocking;
     bool m_lastEngineBusy = false;
+    std::function<bool()> m_isCurrent;
 };
 
 // --- service -----------------------------------------------------------------

@@ -210,8 +210,7 @@ std::size_t AssetIndex::add_directory(const std::filesystem::path& root,
 
     // Directory junctions and symlinks can form cycles (a game folder linking
     // back to an ancestor); canonicalizing each directory before visiting it
-    // breaks those loops, and a hard cap bounds pathological trees. This is
-    // the same protection MaterialIndex::add_directory uses.
+    // breaks those loops, and a hard cap bounds pathological trees.
     std::set<std::filesystem::path> visited;
     constexpr std::size_t kMaxDirectories = 20000;
 

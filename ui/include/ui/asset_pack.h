@@ -23,6 +23,9 @@
 //
 // Thread-safety: every public method locks an internal mutex. Asset thumbnail
 // workers read and write the same pack while the UI loads or compacts it.
+// One instance owns the pack through an exclusive Windows handle to a sibling
+// .lock file. Other instances fail open immediately and can work in memory;
+// closing the owner (including a process crash) releases the lock.
 
 #include <cstdint>
 #include <filesystem>
@@ -67,6 +70,7 @@ public:
     // Creates the parent directory and an empty archive when it does not exist.
     // An existing file with a foreign/corrupt header is rejected instead of
     // overwritten. A partial trailing record is truncated to the last good one.
+    // Returns false without modifying the archive when another instance owns it.
     bool open(const std::filesystem::path& file, bool create_if_missing = true);
 
     bool is_open() const;
@@ -101,12 +105,13 @@ private:
     };
 
     static std::string combined_key(std::string_view tag, std::string_view key);
-    bool compact_locked();
+    bool compact_locked(std::string_view removed_prefix = {});
     bool reopen_locked();
     void close_locked();
 
     mutable std::mutex m_mutex;
     std::fstream m_file;
+    void* m_lock_handle = nullptr; // Windows HANDLE, released by close_locked().
     std::filesystem::path m_path;
     Compressor m_compressor;
     Decompressor m_decompressor;

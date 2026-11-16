@@ -31,6 +31,18 @@ UpdateDialog::UpdateDialog(const ReleaseInfo& release, AppUpdater* updater, QWid
         connect(m_updater, &AppUpdater::downloadFinished, this, &UpdateDialog::onDownloadFinished);
         connect(m_updater, &AppUpdater::downloadFailed, this, &UpdateDialog::onDownloadFailed);
         connect(m_updater, &AppUpdater::extractionStatus, this, &UpdateDialog::onExtractionStatus);
+        connect(m_updater, &AppUpdater::updateFailed, this, [this](const QString& error) {
+            m_progressBar->setRange(0, 100);
+            m_progressBar->setValue(0);
+            m_progressLabel->setText(tr("Error al aplicar actualización: %1").arg(error));
+            m_cancelDownloadBtn->setEnabled(true);
+            m_cancelDownloadBtn->setText(tr("Cerrar"));
+        });
+        connect(m_updater, &AppUpdater::updateCancelled, this, [this]() {
+            m_progressContainer->hide();
+            m_buttonContainer->show();
+            m_cancelDownloadBtn->setEnabled(true);
+        });
     }
 }
 
@@ -292,6 +304,11 @@ void UpdateDialog::reject() {
 void UpdateDialog::onCancelDownloadClicked() {
     if (m_updater) {
         m_updater->cancelDownload();
+        if (m_updater->isPreparing()) {
+            m_cancelDownloadBtn->setEnabled(false);
+            m_progressLabel->setText(tr("Cancelando preparación..."));
+            return;
+        }
     }
     if (m_cancelDownloadBtn->text() == tr("Cerrar")) {
         reject();
@@ -331,18 +348,9 @@ void UpdateDialog::onDownloadProgress(qint64 received, qint64 total) {
 void UpdateDialog::onDownloadFinished(const QString& zipFilePath) {
     m_progressLabel->setText(tr("Descarga completada. Extrayendo archivos..."));
     m_progressBar->setRange(0, 0);
-    m_cancelDownloadBtn->setEnabled(false);
-
-    QString error;
+    m_cancelDownloadBtn->setText(tr("Cancelar preparación"));
     if (m_updater) {
-        const bool success = m_updater->applyUpdate(zipFilePath, error);
-        if (!success) {
-            m_progressBar->setRange(0, 100);
-            m_progressBar->setValue(0);
-            m_progressLabel->setText(tr("<b style='color:#ff5555;'>Error al aplicar actualización:</b> %1").arg(error));
-            m_cancelDownloadBtn->setEnabled(true);
-            m_cancelDownloadBtn->setText(tr("Cerrar"));
-        }
+        m_updater->applyUpdate(zipFilePath);
     }
 }
 

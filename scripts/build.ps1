@@ -41,6 +41,19 @@ if (-not $CmakeExe) {
 
 $ConfigsToBuild = if ($Config -eq "Both") { @("Release", "Debug") } else { @($Config) }
 
+# Dependency configuration is reproducible on a clean recursive checkout.
+& $CmakeExe -P (Join-Path $RepoRoot 'thirdparty/patches/apply_vtflib_patches.cmake')
+if ($LASTEXITCODE -ne 0) { throw "VTFLib patching failed ($LASTEXITCODE)." }
+foreach ($dependency in @(
+    @{ Architecture = 'Win32'; Directory = 'build_vtflib' },
+    @{ Architecture = 'x64'; Directory = 'build_vtflib64' }
+)) {
+    & $CmakeExe -S (Join-Path $RepoRoot 'thirdparty/vtflib') `
+        -B (Join-Path $RepoRoot "thirdparty/vtflib/$($dependency.Directory)") `
+        -A $dependency.Architecture -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF -DCMAKE_DEBUG_POSTFIX=_d
+    if ($LASTEXITCODE -ne 0) { throw "VTFLib $($dependency.Architecture) configuration failed ($LASTEXITCODE)." }
+}
+
 foreach ($cfg in $ConfigsToBuild) {
     Write-Host "==========================================================" -ForegroundColor Cyan
     Write-Host " Building VMT-Studio ($cfg)" -ForegroundColor Cyan
@@ -49,20 +62,28 @@ foreach ($cfg in $ConfigsToBuild) {
     $BuildWin32 = Join-Path $RepoRoot "build"
     $BuildX64 = Join-Path $RepoRoot "build64"
 
+    foreach ($directory in @('build_vtflib', 'build_vtflib64')) {
+        & $CmakeExe --build (Join-Path $RepoRoot "thirdparty/vtflib/$directory") --config $cfg --target vtflib --parallel 2
+        if ($LASTEXITCODE -ne 0) { throw "VTFLib $directory $cfg build failed ($LASTEXITCODE)." }
+    }
+
     # Auto-configure if build directories do not exist yet
-    if (-not (Test-Path $BuildWin32)) {
+    if (-not (Test-Path (Join-Path $BuildWin32 'CMakeCache.txt'))) {
         Write-Host "Configuring 32-bit Win32 build directory..."
         & $CmakeExe -S $RepoRoot -B $BuildWin32 -A Win32
+        if ($LASTEXITCODE -ne 0) { throw "Win32 configuration failed ($LASTEXITCODE)." }
     }
-    if (-not (Test-Path $BuildX64)) {
+    if (-not (Test-Path (Join-Path $BuildX64 'CMakeCache.txt'))) {
         Write-Host "Configuring 64-bit x64 build directory..."
         & $CmakeExe -S $RepoRoot -B $BuildX64 -A x64
+        if ($LASTEXITCODE -ne 0) { throw "x64 configuration failed ($LASTEXITCODE)." }
     }
 
     # 1. Win32 HLMV backend
     if (Test-Path $BuildWin32) {
         Write-Host "Building 32-bit HLMV backend ($cfg)..."
         & $CmakeExe --build $BuildWin32 --config $cfg --target hlmv_backend
+        if ($LASTEXITCODE -ne 0) { throw "Win32 backend build failed ($LASTEXITCODE)." }
     }
 
     # 2. 64-bit VMT-Studio frontend
@@ -73,6 +94,7 @@ foreach ($cfg in $ConfigsToBuild) {
         } else {
             & $CmakeExe --build $BuildX64 --config $cfg --target vmtstudio
         }
+        if ($LASTEXITCODE -ne 0) { throw "x64 $cfg build failed ($LASTEXITCODE)." }
     }
 
     # 3. Unit tests if requested
@@ -80,12 +102,10 @@ foreach ($cfg in $ConfigsToBuild) {
         Write-Host "Running unit tests ($cfg)..."
         $CtestExe = Join-Path (Split-Path $CmakeExe) "ctest.exe"
         if (Test-Path $CtestExe) {
-            & $CtestExe --test-dir $BuildX64 -C $cfg --output-on-failure
+            & $CtestExe --test-dir $BuildX64 -C $cfg --output-on-failure --no-tests=error
+            if ($LASTEXITCODE -ne 0) { throw "The $cfg test suite failed ($LASTEXITCODE)." }
         } else {
-            $TestExe = Join-Path $BuildX64 "bin/$cfg/ui_tests.exe"
-            if (Test-Path $TestExe) {
-                & $TestExe
-            }
+            throw "CTest was not found beside CMake: $CtestExe"
         }
     }
 

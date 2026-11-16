@@ -1,6 +1,7 @@
 #include "bridge/ipc_dump.h"
 
 #include <charconv>
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <system_error>
@@ -482,6 +483,30 @@ vmt::Result<ModelScene> parse_model_scene_dump(const std::string& text) {
         // Unknown row kinds (for example "note") are ignored.
     }
     return vmt::Ok(std::move(scene));
+}
+
+vmt::Result<BinaryPrefix> parse_binary_prefix(
+    const std::vector<unsigned char>& payload, std::uint32_t max_bytes) {
+    if (max_bytes == 0 || max_bytes > kMaxBinaryPrefixBytes) {
+        return vmt::Err<BinaryPrefix>(vmt::make_error(
+            vmt::ErrorCode::InvalidArgument, "binary prefix size must be 1..4096"));
+    }
+    constexpr std::size_t header_size = 8;
+    if (payload.size() < header_size || payload.size() > header_size + max_bytes) {
+        return vmt::Err<BinaryPrefix>(protocol_error(
+            "raw_prefix", "missing size header or response exceeds the requested prefix"));
+    }
+    BinaryPrefix result;
+    for (unsigned byte = 0; byte < header_size; ++byte) {
+        result.file_size |= static_cast<std::uint64_t>(payload[byte]) << (byte * 8);
+    }
+    const std::uint64_t expected = std::min<std::uint64_t>(result.file_size, max_bytes);
+    if (payload.size() - header_size != expected) {
+        return vmt::Err<BinaryPrefix>(protocol_error(
+            "raw_prefix", "prefix byte count does not match the file size and requested maximum"));
+    }
+    result.bytes.assign(payload.begin() + header_size, payload.end());
+    return vmt::Ok(std::move(result));
 }
 
 vmt::Result<AnimState> parse_anim_state_dump(const std::string& text) {

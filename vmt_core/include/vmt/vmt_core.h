@@ -12,10 +12,3 @@
 #include "vmt/value.h"
 #include "vmt/document.h"
 #include "vmt/schema.h"
-
-namespace vmt {
-
-// Module identity; also gives the static library a guaranteed symbol.
-const char* vmt_core_version_string() noexcept;
-
-} // namespace vmt

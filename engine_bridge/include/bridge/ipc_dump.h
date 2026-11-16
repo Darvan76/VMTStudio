@@ -17,6 +17,11 @@ namespace bridge {
 // missing or malformed. The parser refuses versions it does not know.
 int dump_protocol_version(const std::string& text);
 
+// RAW_PREFIX .bin: original file size (u64 little-endian), then exactly
+// min(file size, requested maximum) bytes. Rejects invalid bounds/framing.
+vmt::Result<BinaryPrefix> parse_binary_prefix(
+    const std::vector<unsigned char>& payload, std::uint32_t max_bytes);
+
 // Parses a "models" dump. Unknown rows are ignored; malformed rows fail the
 // whole parse (the backend is the only writer, so a broken row is a bug and
 // silent data loss would be worse).

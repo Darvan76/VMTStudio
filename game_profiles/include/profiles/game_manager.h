@@ -10,6 +10,7 @@
 
 #include "profiles/install_check.h"
 
+#include <atomic>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -20,7 +21,7 @@ namespace profiles {
 struct GameProfile {
     std::string id;          // stable key, usually the game folder name
     std::string name;         // human readable (from gameinfo.txt, fallback: folder name)
-    std::string engine_branch; // e.g. "source_2013", "gmod", "unknown"
+    std::string engine_branch; // e.g. "source_2013", "gmod", "left4dead2", "unknown"
     std::filesystem::path game_dir; // folder containing gameinfo.txt
     std::filesystem::path bin_dir;  // folder containing tier0.dll / vstdlib.dll
     std::string gameinfo_game;       // "game" value from gameinfo.txt
@@ -35,7 +36,8 @@ public:
     // Replace the current catalogue with every Source game discovered under
     // `root`. `max_depth` caps recursion so a whole Steam library root can be
     // scanned cheaply.
-    void discover(const std::filesystem::path& root, int max_depth = 4);
+    void discover(const std::filesystem::path& root, int max_depth = 4,
+                  const std::atomic<bool>* cancelled = nullptr);
 
     void clear() noexcept;
 
@@ -78,11 +80,8 @@ private:
     std::vector<GameProfile> profiles_;
     std::string last_used_;
 
-    static std::string read_game_name(const std::filesystem::path& gameinfo_path) noexcept;
-    static std::string detect_engine_branch(const std::filesystem::path& game_root,
-                                            const std::filesystem::path& bin_dir) noexcept;
-
-    void scan(const std::filesystem::path& root, int depth);
+    void scan(const std::filesystem::path& root, int depth,
+              const std::atomic<bool>* cancelled);
 };
 
 } // namespace profiles

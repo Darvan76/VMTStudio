@@ -12,7 +12,7 @@ $checkedSources = 0
 # Direct CMake source entries must resolve. Entries with CMake variables and
 # generated files are deliberately left to the actual configure/build checks.
 Get-ChildItem -LiteralPath $repoRoot -Directory | Where-Object {
-    $_.Name -in @('ui', 'vmt_core', 'vtf_reader', 'engine_bridge', 'game_profiles', 'renderer', 'tests')
+    $_.Name -in @('ui', 'vmt_core', 'vtf_reader', 'engine_bridge', 'game_profiles', 'tests')
 } | ForEach-Object {
     $moduleRoot = $_.FullName
     $cmakeFile = Join-Path $moduleRoot 'CMakeLists.txt'

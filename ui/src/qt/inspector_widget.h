@@ -6,7 +6,9 @@
 #include <QComboBox>
 #include <QCheckBox>
 #include <QLineEdit>
-#include <QMap>
+
+class QGroupBox;
+class QSlider;
 
 #include "ui/panel_model.h"
 #include "vmt/document.h"
@@ -42,7 +44,15 @@ private slots:
     void onFilterTextChanged(const QString& filter);
 
 private:
+    struct RowWidgets {
+        QWidget* editor;
+        QWidget* field;
+        QSlider* slider = nullptr;
+    };
+
     void rebuildRows(const std::vector<ui::PanelGroup>& groups);
+    void updateRowValues(const std::vector<ui::PanelGroup>& groups);
+    void applyFilter();
 
     QComboBox* m_shaderCombo = nullptr;
     QCheckBox* m_advancedCheck = nullptr;
@@ -53,7 +63,10 @@ private:
 
     bool m_updating = false;
     QString m_currentFilter;
+    std::string m_lastShader;
     std::vector<ui::PanelGroup> m_lastGroups;
+    std::vector<RowWidgets> m_rows;
+    std::vector<QGroupBox*> m_groups;
 };
 
 } // namespace qt

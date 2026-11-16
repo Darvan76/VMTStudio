@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 #include <filesystem>
 #include <initializer_list>
 #include <map>
@@ -44,6 +45,7 @@ extern void HLMV_Log(const char* fmt, ...);
 
 // RAW refuses files bigger than this (response files are polled, not streamed).
 #define QUERY_MAX_RAW_BYTES (256u * 1024u * 1024u)
+#define QUERY_MAX_PREFIX_BYTES 4096u
 
 // Bodyparts tracked for the model_scene bodypart rows.
 #define QUERY_MAX_BODYPARTS 64
@@ -58,6 +60,7 @@ struct BackendQueryJob
 	std::string token;
 	std::string args;   // dump prefix / RAW game path
 	bool raw;
+	unsigned int prefixBytes = 0; // 0 keeps the complete RAW response unchanged
 };
 
 //-----------------------------------------------------------------------------
@@ -105,6 +108,23 @@ static std::string FixSlashes(const std::string& path)
 		}
 	}
 	return out;
+}
+
+static bool IsGameRelativePath(const std::string& path)
+{
+	if (path.empty() || std::any_of(path.begin(), path.end(), [](unsigned char c) {
+		return c < 32 || c == 127;
+	}))
+	{
+		return false;
+	}
+	const std::filesystem::path relative = std::filesystem::u8path(path);
+	if (relative.has_root_path()) return false;
+	for (const std::filesystem::path& part : relative)
+	{
+		if (part == "..") return false;
+	}
+	return true;
 }
 
 // Field values coming from the engine must not break the TSV layout.
@@ -226,7 +246,9 @@ static void DeleteStaleFiles(const std::string& token)
 		{
 			if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
 			{
-				DeleteFileIfExists(g_responseDir + "\\" + data.cFileName);
+				// A frontend may cancel while its request is still queued.
+				if (std::string(data.cFileName) != token + ".cancel")
+					DeleteFileIfExists(g_responseDir + "\\" + data.cFileName);
 			}
 		} while (FindNextFileA(find, &data));
 		FindClose(find);
@@ -278,7 +300,14 @@ static void WriteErrorResult(const std::string& token, const std::string& messag
 	{
 		text = "query failed";
 	}
-	WriteBytes(ResponsePath(token, ".err"), text.data(), text.size());
+	// Directory notifications may wake the frontend as soon as a file appears.
+	// Publish the complete error in one rename, just like a successful payload.
+	const std::string part = ResponsePath(token, ".part");
+	if (!WriteBytes(part, text.data(), text.size()) ||
+		!MoveFileExA(part.c_str(), ResponsePath(token, ".err").c_str(), MOVEFILE_REPLACE_EXISTING))
+	{
+		DeleteFileIfExists(part);
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -371,13 +400,28 @@ struct FileScan
 	ULONGLONG scanDeadline;   // GetTickCount64() value; 0 disables the clock budget
 	size_t scanEntries;
 	bool truncated;
+	std::string cancelPath;
+	ULONGLONG nextCancelCheck = 0;
+	bool cancelled = false;
 
-	FileScan(size_t rows, size_t entries)
-		: maxRows(rows), maxScanEntries(entries), scanDeadline(0), scanEntries(0), truncated(false) {}
+	FileScan(size_t rows, size_t entries, const std::string& token)
+		: maxRows(rows), maxScanEntries(entries), scanDeadline(0), scanEntries(0), truncated(false),
+		  cancelPath(ResponsePath(token, ".cancel")) {}
 
-	bool BudgetExhausted() const
+	bool Cancelled()
 	{
-		if (scanEntries >= maxScanEntries)
+		const ULONGLONG now = GetTickCount64();
+		if (!cancelled && now >= nextCancelCheck)
+		{
+			nextCancelCheck = now + 5;
+			cancelled = GetFileAttributesA(cancelPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+		}
+		return cancelled;
+	}
+
+	bool BudgetExhausted()
+	{
+		if (Cancelled() || scanEntries >= maxScanEntries)
 		{
 			return true;
 		}
@@ -493,7 +537,8 @@ static void ScanFilesRecursive(const std::string& root, const std::string& prefi
 // models dump
 //-----------------------------------------------------------------------------
 
-static void BuildModelsDump(const std::string& args, std::string& text, std::string& error)
+static void BuildModelsDump(const std::string& args, const std::string& token,
+                            std::string& text, std::string& error)
 {
 	if (!g_pFileSystem)
 	{
@@ -520,7 +565,7 @@ static void BuildModelsDump(const std::string& args, std::string& text, std::str
 	}
 
 	static const std::vector<std::string> kModelExtensions = { ".mdl" };
-	FileScan scan(QUERY_MAX_MODEL_ROWS, QUERY_MAX_MODEL_SCAN_ENTRIES);
+	FileScan scan(QUERY_MAX_MODEL_ROWS, QUERY_MAX_MODEL_SCAN_ENTRIES, token);
 	ScanFilesFlat(root, prefix, kModelExtensions, scan);
 	ScanFilesRecursive(root, prefix, kModelExtensions, scan);
 
@@ -528,6 +573,7 @@ static void BuildModelsDump(const std::string& args, std::string& text, std::str
 	AppendRow(text, { "kind", "models" });
 	for (std::map<std::string, std::string>::const_iterator it = scan.paths.begin(); it != scan.paths.end(); ++it)
 	{
+		if (scan.Cancelled()) { error = "query cancelled"; return; }
 		AppendRow(text, { "model", it->second, QueryFileSource(it->second) });
 	}
 	if (scan.truncated)
@@ -579,7 +625,8 @@ static std::string NormalizeAssetExtension(const std::string& extension)
 	return out;
 }
 
-static void BuildAssetsDump(const std::string& args, std::string& text, std::string& error)
+static void BuildAssetsDump(const std::string& args, const std::string& token,
+                            std::string& text, std::string& error)
 {
 	if (!g_pFileSystem)
 	{
@@ -633,7 +680,7 @@ static void BuildAssetsDump(const std::string& args, std::string& text, std::str
 	const ULONGLONG startTick = GetTickCount64();
 	const ULONGLONG scanDeadline = startTick + QUERY_MAX_ASSET_SCAN_MS;
 
-	FileScan scan(QUERY_MAX_ASSET_ROWS, QUERY_MAX_SCAN_ENTRIES);
+	FileScan scan(QUERY_MAX_ASSET_ROWS, QUERY_MAX_SCAN_ENTRIES, token);
 	for (size_t i = 0; i < roots.size() && !scan.truncated; ++i)
 	{
 		scan.scanDeadline = GetTickCount64() + QUERY_ASSET_ROOT_BUDGET_MS;
@@ -650,6 +697,7 @@ static void BuildAssetsDump(const std::string& args, std::string& text, std::str
 	AppendRow(text, { "kind", "assets" });
 	for (std::map<std::string, std::string>::const_iterator it = scan.paths.begin(); it != scan.paths.end(); ++it)
 	{
+		if (scan.Cancelled()) { error = "query cancelled"; return; }
 		AppendRow(text, { "asset", it->second, QueryFileSource(it->second) });
 	}
 	if (scan.truncated)
@@ -960,26 +1008,10 @@ static void BuildExistsDump(const std::string& args, std::string& text, std::str
 		return;
 	}
 	const std::string path = FixSlashes(Trimmed(args));
-	if (path.empty() || std::any_of(path.begin(), path.end(), [](unsigned char c) {
-		return c < 32 || c == 127;
-	}))
+	if (!IsGameRelativePath(path))
 	{
 		error = "exists requires a game-relative file path";
 		return;
-	}
-	const std::filesystem::path relative = std::filesystem::u8path(path);
-	if (relative.has_root_path())
-	{
-		error = "exists requires a game-relative file path";
-		return;
-	}
-	for (const std::filesystem::path& part : relative)
-	{
-		if (part == "..")
-		{
-			error = "exists path must stay inside the game paths";
-			return;
-		}
 	}
 
 	// The engine resolves loose files, mounted content and VPK entries without
@@ -996,11 +1028,11 @@ static void RunDumpJob(const BackendQueryJob& job)
 
 	if (job.kind == "models")
 	{
-		BuildModelsDump(job.args, text, error);
+		BuildModelsDump(job.args, job.token, text, error);
 	}
 	else if (job.kind == "assets")
 	{
-		BuildAssetsDump(job.args, text, error);
+		BuildAssetsDump(job.args, job.token, text, error);
 	}
 	else if (job.kind == "model_scene")
 	{
@@ -1019,6 +1051,10 @@ static void RunDumpJob(const BackendQueryJob& job)
 		error = "unknown dump kind: " + job.kind;
 	}
 
+	if (GetFileAttributesA(ResponsePath(job.token, ".cancel").c_str()) != INVALID_FILE_ATTRIBUTES)
+	{
+		error = "query cancelled";
+	}
 	if (!error.empty())
 	{
 		WriteErrorResult(job.token, error);
@@ -1053,7 +1089,7 @@ static void RunRawJob(const BackendQueryJob& job)
 	}
 
 	unsigned int size = g_pFileSystem->Size(file);
-	if ((int)size < 0 || size > QUERY_MAX_RAW_BYTES)
+	if (job.prefixBytes == 0 && ((int)size < 0 || size > QUERY_MAX_RAW_BYTES))
 	{
 		g_pFileSystem->Close(file);
 		WriteErrorResult(job.token, "file is too large to query or has invalid size");
@@ -1061,9 +1097,11 @@ static void RunRawJob(const BackendQueryJob& job)
 	}
 
 	std::string bytes;
+	const unsigned int readSize = job.prefixBytes == 0 ? size : (std::min)(size, job.prefixBytes);
+	const unsigned int headerSize = job.prefixBytes == 0 ? 0u : 8u;
 	try
 	{
-		bytes.resize(size);
+		bytes.resize(headerSize + readSize);
 	}
 	catch (...)
 	{
@@ -1071,10 +1109,17 @@ static void RunRawJob(const BackendQueryJob& job)
 		WriteErrorResult(job.token, "insufficient memory to read file");
 		return;
 	}
-	unsigned int total = 0;
-	while (total < size)
+	if (headerSize != 0)
 	{
-		int read = g_pFileSystem->Read(&bytes[total], (int)(size - total), file);
+		for (unsigned int byte = 0; byte < headerSize; ++byte)
+		{
+			bytes[byte] = static_cast<char>((static_cast<std::uint64_t>(size) >> (byte * 8)) & 0xff);
+		}
+	}
+	unsigned int total = 0;
+	while (total < readSize)
+	{
+		int read = g_pFileSystem->Read(&bytes[headerSize + total], (int)(readSize - total), file);
 		if (read <= 0)
 		{
 			break;
@@ -1083,12 +1128,17 @@ static void RunRawJob(const BackendQueryJob& job)
 	}
 	g_pFileSystem->Close(file);
 
-	if (total != size)
+	if (total != readSize)
 	{
 		WriteErrorResult(job.token, "failed to read " + path);
 		return;
 	}
 
+	if (GetFileAttributesA(ResponsePath(job.token, ".cancel").c_str()) != INVALID_FILE_ATTRIBUTES)
+	{
+		WriteErrorResult(job.token, "query cancelled");
+		return;
+	}
 	if (!PublishPayload(job.token, ".bin", bytes.data(), bytes.size()))
 	{
 		WriteErrorResult(job.token, "failed to write " + job.token + ".bin");
@@ -1187,6 +1237,26 @@ bool BackendQuery_HandleRaw(const std::string& token, const std::string& path)
 	return true;
 }
 
+bool BackendQuery_HandleRawPrefix(const std::string& token, unsigned int maxBytes,
+                                 const std::string& path)
+{
+	const std::string normalized = FixSlashes(Trimmed(path));
+	if (!IsValidToken(token) || maxBytes == 0 || maxBytes > QUERY_MAX_PREFIX_BYTES ||
+		!IsGameRelativePath(normalized))
+	{
+		return false;
+	}
+	EnsureResponseDir();
+	DeleteStaleFiles(token);
+	BackendQueryJob* job = new BackendQueryJob();
+	job->token = token;
+	job->args = normalized;
+	job->raw = true;
+	job->prefixBytes = maxBytes;
+	ScheduleJob(job);
+	return true;
+}
+
 void BackendQuery_RunJob(WPARAM wParam, LPARAM lParam)
 {
 	(void)wParam;
@@ -1197,7 +1267,11 @@ void BackendQuery_RunJob(WPARAM wParam, LPARAM lParam)
 		return;
 	}
 
-	if (job->raw)
+	if (GetFileAttributesA(ResponsePath(job->token, ".cancel").c_str()) != INVALID_FILE_ATTRIBUTES)
+	{
+		WriteErrorResult(job->token, "query cancelled");
+	}
+	else if (job->raw)
 	{
 		RunRawJob(*job);
 	}

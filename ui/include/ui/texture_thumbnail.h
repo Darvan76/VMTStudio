@@ -3,16 +3,12 @@
 // ui texture_thumbnail - builds Asset Browser thumbnails by decoding the
 // material's texture with the in-process VTF decoder.
 //
-// Why this exists: the engine bridge can only produce thumbnails by asking the
-// game's own material system to render and read back a render target. That
-// requires a working shaderapidx9, which is not available for every game build
-// (Garry's Mod and Portal 2 ship newer interface versions than the SDK 2013
-// headers this project compiles against), and the backbuffer readback returns
-// all zeros even when init succeeds. Decoding the VTF ourselves sidesteps both
-// problems: textures render from the actual file bytes, with no engine at all.
+// Decoding VTF bytes directly avoids material-system rendering and backbuffer
+// readback, so texture previews work independently of the engine's rendering
+// compatibility.
 //
 // The pipeline is: VMT text -> candidate texture names -> .vtf bytes ->
-// vtf::decode_vtf_preview_from_memory -> RGBA -> BGRA -> BMP cache file.
+// vtf::decode_vtf_preview_from_memory -> RGBA -> BGRA for the Qt thumbnail cache.
 //
 // Design notes:
 //   - Windows-free and engine-free, so it is unit-tested directly.
@@ -23,6 +19,7 @@
 //     texture is missing still previews its detail map.
 
 #include "vmt/result.h"
+#include "vtf/vtf_reader.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -33,6 +30,13 @@
 
 namespace ui {
 
+// A readable file can still contain an invalid VTF. Keep its actual size and
+// parsing result together so metadata views distinguish that from a missing file.
+struct TextureMetadata {
+    std::uint64_t file_size;
+    vmt::Result<vtf::VtfInfo> info;
+};
+
 // Where a texture's bytes come from. Injected so this module stays
 // engine-free and testable.
 class TextureSource {
@@ -42,9 +46,13 @@ public:
     // Reads a game-relative path such as "materials/brick/brick05.vtf".
     // Returns the raw bytes, or an error (NotFound when it does not exist).
     virtual vmt::Result<std::vector<unsigned char>> read(const std::string& game_path) = 0;
+
+    // Implementations backed by files/VPKs override this to read only headers.
+    // The default supports existing in-memory sources through read().
+    virtual vmt::Result<TextureMetadata> metadata(const std::string& game_path);
 };
 
-// A decoded thumbnail, ready to be written to the BMP cache.
+// A decoded thumbnail, ready for display and storage in the thumbnail cache.
 struct TextureThumbnail {
     int width = 0;
     int height = 0;

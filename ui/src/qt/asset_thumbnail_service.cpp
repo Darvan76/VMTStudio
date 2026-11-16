@@ -19,7 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <iterator>
+#include <limits>
 #include <mutex>
 #include <system_error>
 #include <utility>
@@ -65,8 +65,36 @@ bool read_file_bytes(const std::filesystem::path& path, std::vector<unsigned cha
     if (!stream) {
         return false;
     }
-    out.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
-    return !stream.bad();
+    stream.seekg(0, std::ios::end);
+    const std::streamoff end = stream.tellg();
+    if (end < 0 || static_cast<std::uintmax_t>(end) > out.max_size() ||
+        static_cast<std::uintmax_t>(end) > static_cast<std::uintmax_t>(
+            std::numeric_limits<std::streamsize>::max())) return false;
+    stream.seekg(0, std::ios::beg);
+    try {
+        out.resize(static_cast<std::size_t>(end));
+    } catch (const std::exception&) {
+        out.clear();
+        return false;
+    }
+    if (!out.empty() && !stream.read(reinterpret_cast<char*>(out.data()),
+                                     static_cast<std::streamsize>(out.size()))) {
+        out.clear();
+        return false;
+    }
+    return static_cast<bool>(stream);
+}
+
+std::vector<std::filesystem::path> source_candidates(
+    const std::vector<std::filesystem::path>& roots, const std::string& game_path) {
+    std::vector<std::filesystem::path> candidates;
+    for (const auto& root : roots) {
+        candidates.push_back(root / std::filesystem::u8path(game_path));
+        if (game_path.rfind("materials/", 0) == 0) {
+            candidates.push_back(root / std::filesystem::u8path(game_path.substr(10)));
+        }
+    }
+    return candidates;
 }
 
 // Top-down BGRA -> QImage. The per-pixel loop (instead of a memcpy) keeps the
@@ -151,13 +179,16 @@ namespace ui {
 namespace qt {
 
 struct ThumbnailShared {
+    ThumbnailShared() { dispatcher->setObjectName(QStringLiteral("assetThumbnailDelivery")); }
     std::atomic<int> generation{0};
     // Couples the final generation check with cache writes. A scan can bump
     // the generation before purging the pack without an older job repopulating it.
     std::mutex cache_write_mutex;
     // Not named `slots`: moc treats that identifier as the Qt access keyword.
     std::shared_ptr<QSemaphore> semaphore = std::make_shared<QSemaphore>(kMaxConcurrent);
-    std::shared_ptr<ThumbnailDispatcher> dispatcher = std::make_shared<ThumbnailDispatcher>();
+    // A cancelled job can release the last reference on a pool thread.
+    std::shared_ptr<ThumbnailDispatcher> dispatcher{
+        new ThumbnailDispatcher, [](ThumbnailDispatcher* delivery) { delivery->deleteLater(); }};
 };
 
 namespace {
@@ -241,7 +272,12 @@ private:
             return {}; // models get the delegate's placeholder, not a decode
         }
 
-        GameTextureSource source(m_access, m_roots, GameTextureSource::LockMode::Try);
+        const std::lock_guard<std::mutex> load(asset_load_mutex());
+        if (m_shared->generation.load() != m_generation) return {};
+        GameTextureSource source(m_access, m_roots, GameTextureSource::LockMode::Try,
+            [shared = m_shared, generation = m_generation]() {
+                return shared->generation.load() == generation;
+            });
         const vmt::Result<std::vector<unsigned char>> bytes = source.read(m_path);
         if (!bytes) {
             retryable = source.last_engine_busy();
@@ -291,6 +327,13 @@ private:
 
 // --- path helpers -------------------------------------------------------------
 
+std::mutex& asset_load_mutex() {
+    // ponytail: one source load/decode at a time; use a byte budget if profiling
+    // shows that parallel small textures are worth the added scheduling policy.
+    static std::mutex mutex;
+    return mutex;
+}
+
 std::uint64_t fnv1a64(std::string_view text) {
     std::uint64_t hash = 14695981039346656037ull;
     for (const char c : text) {
@@ -329,9 +372,14 @@ void EngineAccess::setEngine(bridge::EngineView* engine) {
         // replaces the EngineView right after this call, so wait for a call in
         // flight to leave before returning. Workers re-read the pointer under
         // this same gate, which makes queued jobs a no-op too.
+        bridge::EngineView* previous = nullptr;
+        {
+            QMutexLocker pointer(&m_pointerMutex);
+            previous = m_engine;
+            m_engine = nullptr;
+        }
+        if (previous) previous->cancel_pending_queries();
         QMutexLocker device(&m_deviceMutex);
-        QMutexLocker pointer(&m_pointerMutex);
-        m_engine = nullptr;
         return;
     }
     QMutexLocker locker(&m_pointerMutex);
@@ -359,30 +407,32 @@ bool EngineAccess::tryLock() noexcept {
 
 GameTextureSource::GameTextureSource(std::shared_ptr<EngineAccess> access,
                                      std::vector<std::filesystem::path> roots,
-                                     LockMode mode)
-    : m_access(std::move(access)), m_roots(std::move(roots)), m_mode(mode) {}
+                                     LockMode mode, std::function<bool()> is_current)
+    : m_access(std::move(access)), m_roots(std::move(roots)), m_mode(mode),
+      m_isCurrent(std::move(is_current)) {}
+
+bool GameTextureSource::current() const {
+    return !m_isCurrent || m_isCurrent();
+}
 
 vmt::Result<std::vector<unsigned char>> GameTextureSource::read(const std::string& game_path) {
     m_lastEngineBusy = false;
+    if (!current()) {
+        return vmt::Err<std::vector<unsigned char>>(vmt::make_error(
+            vmt::ErrorCode::Internal, "asset request was cancelled"));
+    }
 
     // Disk first: a loose copy is the copy the user is editing.
     std::error_code ec;
-    for (const std::filesystem::path& root : m_roots) {
-        std::vector<std::filesystem::path> candidates;
-        candidates.push_back(root / std::filesystem::path(game_path));
-        if (game_path.rfind("materials/", 0) == 0) {
-            // The user added the materials folder itself instead of the folder
-            // that contains it; both spellings must resolve.
-            candidates.push_back(root / std::filesystem::path(game_path.substr(10)));
+    for (const auto& candidate : source_candidates(m_roots, game_path)) {
+        if (!current()) {
+            return vmt::Err<std::vector<unsigned char>>(vmt::make_error(
+                vmt::ErrorCode::Internal, "asset request was cancelled"));
         }
-        for (const std::filesystem::path& candidate : candidates) {
-            if (!std::filesystem::is_regular_file(candidate, ec)) {
-                continue;
-            }
-            std::vector<unsigned char> bytes;
-            if (read_file_bytes(candidate, bytes)) {
-                return vmt::Ok(std::move(bytes));
-            }
+        if (!std::filesystem::is_regular_file(candidate, ec)) continue;
+        std::vector<unsigned char> bytes;
+        if (read_file_bytes(candidate, bytes)) {
+            return vmt::Ok(std::move(bytes));
         }
     }
 
@@ -400,8 +450,13 @@ vmt::Result<std::vector<unsigned char>> GameTextureSource::read(const std::strin
         return vmt::Err<std::vector<unsigned char>>(vmt::make_error(
             vmt::ErrorCode::Internal, "the engine is busy: " + game_path));
     }
+    const std::unique_lock<EngineAccess> device(*m_access, std::adopt_lock);
 
-    // The pointer may have changed while waiting for the gate.
+    // The pointer and selected asset may have changed while waiting for the gate.
+    if (!current()) {
+        return vmt::Err<std::vector<unsigned char>>(vmt::make_error(
+            vmt::ErrorCode::Internal, "asset request was cancelled"));
+    }
     engine = m_access->engine();
     vmt::Result<std::vector<unsigned char>> result =
         vmt::Err<std::vector<unsigned char>>(vmt::make_error(
@@ -409,8 +464,72 @@ vmt::Result<std::vector<unsigned char>> GameTextureSource::read(const std::strin
     if (engine != nullptr && engine->initialized()) {
         result = engine->read_binary_file(game_path);
     }
-    m_access->unlock();
     return result;
+}
+
+vmt::Result<TextureMetadata> GameTextureSource::metadata(const std::string& game_path) {
+    m_lastEngineBusy = false;
+    const auto cancelled = []() {
+        return vmt::Err<TextureMetadata>(vmt::make_error(
+            vmt::ErrorCode::Internal, "asset request was cancelled"));
+    };
+    if (!current()) return cancelled();
+
+    std::error_code error;
+    for (const auto& candidate : source_candidates(m_roots, game_path)) {
+        if (!current()) return cancelled();
+        if (!std::filesystem::is_regular_file(candidate, error)) continue;
+        const auto size = std::filesystem::file_size(candidate, error);
+        if (error) continue;
+        auto info = vtf::open_vtf_info(candidate);
+        if (!info && (info.error().code == vmt::ErrorCode::NotFound ||
+                      info.error().code == vmt::ErrorCode::PermissionDenied ||
+                      info.error().code == vmt::ErrorCode::IoError)) continue;
+        return vmt::Ok(TextureMetadata{static_cast<std::uint64_t>(size), std::move(info)});
+    }
+
+    if (!m_access || m_access->engine() == nullptr) {
+        return vmt::Err<TextureMetadata>(vmt::make_error(
+            vmt::ErrorCode::NotFound, "not found: " + game_path,
+            "Connect a game to read assets stored inside VPKs"));
+    }
+    if (m_mode == LockMode::Blocking) {
+        m_access->lock();
+    } else if (!m_access->tryLock()) {
+        m_lastEngineBusy = true;
+        return vmt::Err<TextureMetadata>(vmt::make_error(
+            vmt::ErrorCode::Internal, "the engine is busy: " + game_path));
+    }
+    const std::unique_lock<EngineAccess> device(*m_access, std::adopt_lock);
+    if (!current()) return cancelled();
+    auto* engine = m_access->engine();
+    if (engine == nullptr || !engine->initialized()) {
+        return vmt::Err<TextureMetadata>(vmt::make_error(
+            vmt::ErrorCode::NotFound, "no engine connected: " + game_path));
+    }
+
+    auto prefix = engine->read_binary_prefix(game_path,
+        static_cast<std::uint32_t>(vtf::kVtfHeaderProbeSize));
+    if (!prefix) return vmt::Err<TextureMetadata>(prefix.error());
+    const auto origin = std::filesystem::u8path(game_path);
+    const auto required = vtf::vtf_header_size(prefix.value().bytes.data(),
+                                             prefix.value().bytes.size(), origin);
+    if (!required) {
+        return vmt::Ok(TextureMetadata{prefix.value().file_size, required.error()});
+    }
+    if (required.value() > prefix.value().bytes.size()) {
+        if (!current()) return cancelled();
+        auto header = engine->read_binary_prefix(game_path, required.value());
+        if (!header) return vmt::Err<TextureMetadata>(header.error());
+        if (header.value().file_size != prefix.value().file_size) {
+            return vmt::Err<TextureMetadata>(vmt::make_error(
+                vmt::ErrorCode::IoError, "texture changed while reading its header: " + game_path));
+        }
+        prefix = std::move(header);
+    }
+    return vmt::Ok(TextureMetadata{prefix.value().file_size,
+        vtf::open_vtf_info_from_memory(prefix.value().bytes.data(),
+                                       prefix.value().bytes.size(), origin)});
 }
 
 // --- AssetThumbnailService ----------------------------------------------------

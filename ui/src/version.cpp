@@ -4,7 +4,7 @@
 #include <sstream>
 
 #ifndef VMTSTUDIO_VERSION_STRING
-#define VMTSTUDIO_VERSION_STRING "0.2.1"
+#error "VMTSTUDIO_VERSION_STRING must be supplied by the build system"
 #endif
 
 namespace ui {

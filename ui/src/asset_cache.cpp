@@ -2,8 +2,6 @@
 
 #include <charconv>
 #include <cctype>
-#include <fstream>
-#include <iterator>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -158,60 +156,6 @@ std::string serialize_asset_cache(const AssetIndex& index, const AssetCacheMeta&
     return out;
 }
 
-bool save_asset_cache(const std::filesystem::path& file, const AssetIndex& index,
-                      const AssetCacheMeta& meta) {
-    if (file.empty()) {
-        return false;
-    }
-
-    std::error_code ec;
-    const std::filesystem::path parent = file.parent_path();
-    if (!parent.empty()) {
-        std::filesystem::create_directories(parent, ec);
-        if (ec) {
-            return false;
-        }
-    }
-
-    std::filesystem::path temp = file;
-    temp += ".tmp";
-
-    {
-        std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
-        if (!stream) {
-            return false;
-        }
-
-        // Binary mode + explicit '\n' keeps the file LF-only on Windows, as
-        // documented; the reader strips stray '\r' anyway.
-        const std::string data = serialize_asset_cache(index, meta);
-        stream.write(data.data(), static_cast<std::streamsize>(data.size()));
-        stream.close();
-        if (!stream) {
-            std::error_code ignored;
-            std::filesystem::remove(temp, ignored);
-            return false;
-        }
-    }
-
-    // Rename over the target so a crash cannot truncate the live file. On
-    // Windows rename is not guaranteed to replace an existing target, hence
-    // the remove + retry (same pattern as UISettings::save).
-    std::filesystem::rename(temp, file, ec);
-    if (ec) {
-        std::error_code ignored;
-        std::filesystem::remove(file, ignored);
-        ec.clear();
-        std::filesystem::rename(temp, file, ec);
-    }
-    if (ec) {
-        std::error_code ignored;
-        std::filesystem::remove(temp, ignored);
-        return false;
-    }
-    return true;
-}
-
 AssetCacheLoad parse_asset_cache(std::string_view text,
                                  const std::string& expected_game_dir) {
     AssetCacheLoad result;
@@ -301,20 +245,6 @@ AssetCacheLoad parse_asset_cache(std::string_view text,
     result.meta = std::move(meta);
     result.loaded = true;
     return result;
-}
-
-AssetCacheLoad load_asset_cache(const std::filesystem::path& file,
-                                const std::string& expected_game_dir) {
-    if (file.empty()) {
-        return {};
-    }
-    std::ifstream stream(file, std::ios::binary);
-    if (!stream) {
-        return {};
-    }
-    const std::string text((std::istreambuf_iterator<char>(stream)),
-                           std::istreambuf_iterator<char>());
-    return parse_asset_cache(text, expected_game_dir);
 }
 
 } // namespace ui

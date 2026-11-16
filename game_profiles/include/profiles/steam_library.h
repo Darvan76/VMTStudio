@@ -46,13 +46,15 @@ public:
     // registry lookups, so tests can pass a fixture directory.
     static std::vector<GameProfile> discover_all_in(
         const std::filesystem::path& steam_root,
-        int max_depth_per_library = 4) noexcept;
+        int max_depth_per_library = 4,
+        const std::atomic<bool>* cancelled = nullptr) noexcept;
 
     // Runs GameManager::discover on every known Steam library and returns the
     // de-duplicated union of the resulting profiles. Empty when Steam itself
     // is not installed.
     static std::vector<GameProfile> discover_all(
-        int max_depth_per_library = 4) noexcept;
+        int max_depth_per_library = 4,
+        const std::atomic<bool>* cancelled = nullptr) noexcept;
 };
 
 } // namespace profiles

@@ -2,6 +2,14 @@
 
 #include "vtf/vtf_reader.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -10,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <random>
 #include <string>
 #include <utility>
@@ -996,6 +1005,116 @@ UT_TEST_CASE("vtf memory: metadata matches the file-based read") {
     UT_CHECK_EQ(b.format_name, a.format_name);
     UT_CHECK_EQ(b.has_alpha, a.has_alpha);
     UT_CHECK_EQ(b.preview_supported, a.preview_supported);
+}
+
+UT_TEST_CASE("vtf metadata: bounded headers preserve old/resource metadata without reading locked pixels") {
+    const fs::path directory = fresh_temp_dir();
+    for (const std::uint32_t minor : {0u, 2u, 6u}) {
+        std::vector<std::uint8_t> bytes = make_colored_mips(8, 8, 1);
+        const auto put32 = [&bytes](std::size_t offset, std::uint32_t value) {
+            for (unsigned index = 0; index < 4; ++index) {
+                bytes[offset + index] = static_cast<std::uint8_t>(value >> (index * 8));
+            }
+        };
+        if (minor == 0) {
+            bytes.erase(bytes.begin() + 64, bytes.begin() + 80);
+            put32(12, 64);
+        } else if (minor == 6) {
+            bytes.insert(bytes.begin() + 80, 8, 0);
+            put32(12, 88);
+            put32(68, 1);    // One resource dictionary entry.
+            put32(80, 0x30); // High-resolution image resource.
+            put32(84, 88);   // Its pixels follow the header.
+        }
+        put32(8, minor);
+        const auto required = vtf::vtf_header_size(bytes.data(), vtf::kVtfHeaderProbeSize);
+        UT_CHECK(required.ok());
+        if (!required) continue;
+        const auto expected = vtf::open_vtf_info_from_memory(bytes.data(), bytes.size());
+        const auto header_only = vtf::open_vtf_info_from_memory(bytes.data(), required.value());
+        UT_CHECK(expected.ok() && header_only.ok());
+        if (!expected || !header_only) continue;
+
+        // A name outside the active ANSI code page must still use wide file I/O.
+        const fs::path file = directory /
+            (L"\u6d4b\u8bd5_" + std::to_wstring(minor) + L".vtf");
+        UT_CHECK(write_bytes(file, bytes));
+        std::unique_ptr<void, decltype(&CloseHandle)> handle(
+            CreateFileW(file.c_str(), GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr), &CloseHandle);
+        UT_CHECK(handle.get() != INVALID_HANDLE_VALUE);
+        if (handle.get() == INVALID_HANDLE_VALUE) {
+            (void)handle.release();
+            continue;
+        }
+        OVERLAPPED range{};
+        range.Offset = required.value();
+        const DWORD pixel_bytes = static_cast<DWORD>(bytes.size() - required.value());
+        const bool locked = LockFileEx(handle.get(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                                       0, pixel_bytes, 0, &range) != FALSE;
+        UT_CHECK(locked);
+        if (!locked) continue;
+
+        // Prove the fixture blocks a whole-file read; this is an I/O bound,
+        // not a timing or RSS assertion that could pass by accident.
+        std::ifstream full(file, std::ios::binary);
+        std::vector<std::uint8_t> blocked(bytes.size());
+        full.read(reinterpret_cast<char*>(blocked.data()), static_cast<std::streamsize>(blocked.size()));
+        UT_CHECK(!full);
+        full.close();
+        const auto actual = vtf::open_vtf_info(file);
+        UT_CHECK(actual.ok());
+        UT_CHECK(UnlockFileEx(handle.get(), 0, pixel_bytes, 0, &range) != FALSE);
+        if (!actual) continue;
+
+        const auto compare = [](const vtf::VtfInfo& a, const vtf::VtfInfo& b) {
+            UT_CHECK_EQ(a.width, b.width);
+            UT_CHECK_EQ(a.height, b.height);
+            UT_CHECK_EQ(a.depth, b.depth);
+            UT_CHECK_EQ(a.frame_count, b.frame_count);
+            UT_CHECK_EQ(a.face_count, b.face_count);
+            UT_CHECK_EQ(a.mip_count, b.mip_count);
+            UT_CHECK_EQ(a.version_major, b.version_major);
+            UT_CHECK_EQ(a.version_minor, b.version_minor);
+            UT_CHECK_EQ(a.format_id, b.format_id);
+            UT_CHECK_EQ(a.format_name, b.format_name);
+            UT_CHECK_EQ(a.has_alpha, b.has_alpha);
+            UT_CHECK_EQ(a.has_mipmaps, b.has_mipmaps);
+            UT_CHECK_EQ(a.is_cubemap, b.is_cubemap);
+            UT_CHECK_EQ(a.is_normal_map, b.is_normal_map);
+            UT_CHECK_EQ(a.is_hdr, b.is_hdr);
+            UT_CHECK_EQ(a.preview_supported, b.preview_supported);
+        };
+        compare(actual.value(), expected.value());
+        compare(header_only.value(), expected.value());
+        UT_CHECK_EQ(actual.value().depth, 1u);
+    }
+}
+
+UT_TEST_CASE("vtf metadata: prefix probing rejects invalid sizes before requesting a payload") {
+    auto prefix = make_file_header(7, 6, 88);
+    const auto required = vtf::vtf_header_size(prefix.data(), prefix.size());
+    UT_CHECK(required.ok() && required.value() == 88);
+    const auto partial = vtf::open_vtf_info_from_memory(prefix.data(), prefix.size());
+    UT_CHECK(!partial && partial.error().code == vmt::ErrorCode::VtfTruncated);
+
+    prefix = make_file_header(7, 6, 0xffffffffu);
+    const auto excessive = vtf::vtf_header_size(prefix.data(), prefix.size());
+    UT_CHECK(!excessive && excessive.error().code == vmt::ErrorCode::VtfTruncated);
+    prefix = make_file_header(7, 6, 8);
+    const auto undersized = vtf::vtf_header_size(prefix.data(), prefix.size());
+    UT_CHECK(!undersized && undersized.error().code == vmt::ErrorCode::VtfInvalidHeader);
+    prefix = make_file_header(7, 7, 80);
+    const auto future = vtf::vtf_header_size(prefix.data(), prefix.size());
+    UT_CHECK(!future && future.error().code == vmt::ErrorCode::VtfUnsupportedVersion);
+    prefix[0] = 'X';
+    const auto wrong_signature = vtf::vtf_header_size(prefix.data(), prefix.size());
+    UT_CHECK(!wrong_signature && wrong_signature.error().code == vmt::ErrorCode::VtfInvalidHeader);
+    const auto tiny = vtf::vtf_header_size(prefix.data(), 4);
+    UT_CHECK(!tiny && tiny.error().code == vmt::ErrorCode::VtfTruncated);
+    const auto null = vtf::vtf_header_size(nullptr, 0);
+    UT_CHECK(!null && null.error().code == vmt::ErrorCode::InvalidArgument);
 }
 
 UT_TEST_CASE("vtf memory: a null buffer is rejected, not dereferenced") {

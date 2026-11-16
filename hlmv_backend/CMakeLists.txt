@@ -18,6 +18,7 @@ add_executable(hlmv_backend WIN32
     src/sys_win.cpp
     src/viewersettings.cpp
     src/hlmv_compat.cpp
+    ../engine_bridge/src/engine_compatibility.cpp
     src/backend_ipc.cpp
     src/backend_query.cpp
     src/anim_control.cpp
@@ -67,6 +68,7 @@ target_include_directories(hlmv_backend PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/mxtk/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/mxtk/include/mx"
     "${CMAKE_CURRENT_SOURCE_DIR}/common"
+    "${CMAKE_SOURCE_DIR}/engine_bridge/include"
     "${SOURCE_SDK_PUBLIC}"
     "${SOURCE_SDK_PUBLIC}/mathlib"
     "${SOURCE_SDK_PUBLIC}/tier0"

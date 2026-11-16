@@ -1,0 +1,9 @@
+mxToolKit (c) 1999 by Mete Ciragan
+
+The programs and associated files contained in this distribution were developed
+by Mete Ciragan. The programs are not in the public domain, but they are freely
+distributable without licensing fees. These programs are provided without
+guarantee or warrantee expressed or implied.
+
+This notice is reproduced from hlmv_backend/mxtk/include/mx/mx.h and
+hlmv_backend/mxtk/src/win32/mx.cpp. The original notices remain in the source.

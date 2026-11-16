@@ -26,25 +26,7 @@ public:
     const T& value() const&  { return std::get<0>(storage_); }
     T&&      value() &&      { return std::get<0>(std::move(storage_)); }
 
-    T value_or(T fallback) const& {
-        return ok() ? std::get<0>(storage_) : std::move(fallback);
-    }
-
     const Error& error() const& { return std::get<1>(storage_); }
-
-    template <class F>
-    auto map(F&& f) const& {
-        using U = std::decay_t<decltype(f(std::declval<const T&>()))>;
-        if (ok()) return Result<U>(f(std::get<0>(storage_)));
-        return Result<U>(std::get<1>(storage_));
-    }
-
-    template <class F>
-    auto and_then(F&& f) const& {
-        using U = std::decay_t<decltype(f(std::declval<const T&>()))>;
-        if (ok()) return f(std::get<0>(storage_));
-        return Result<U>(std::get<1>(storage_));
-    }
 
 private:
     std::variant<T, Error> storage_;

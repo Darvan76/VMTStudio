@@ -15,22 +15,44 @@
 #include <cstdio>
 #include "miniz.h"
 
+#ifndef VMTSTUDIO_PORTABLE_VERSION
+#error "The portable version must be supplied by CMake"
+#endif
+
 namespace fs = std::filesystem;
 
 // The payload zip resource ID
 #define IDR_PAYLOAD_ZIP 101
 
 // Forward command-line arguments without launcher's own argv[0]
+static std::wstring quote_argument(const std::wstring& argument) {
+    std::wstring quoted = L"\"";
+    size_t backslashes = 0;
+    for (const wchar_t character : argument) {
+        if (character == L'\\') {
+            ++backslashes;
+            continue;
+        }
+        // Backslashes only escape quotes; double the final run before the
+        // closing quote so a folder argument ending in '\\' stays intact.
+        quoted.append(character == L'"' ? backslashes * 2 + 1 : backslashes, L'\\');
+        backslashes = 0;
+        quoted += character;
+    }
+    quoted.append(backslashes * 2, L'\\');
+    quoted += L'"';
+    return quoted;
+}
+
 static std::wstring build_forward_args(const std::wstring& targetExe) {
-    std::wstring result = L"\"" + targetExe + L"\"";
+    std::wstring result = quote_argument(targetExe);
     
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argv && argc > 1) {
+    if (argv) {
         for (int i = 1; i < argc; ++i) {
-            result += L" \"";
-            result += argv[i];
-            result += L"\"";
+            result += L" ";
+            result += quote_argument(argv[i]);
         }
         LocalFree(argv);
     }
@@ -97,6 +119,18 @@ static bool extract_payload(const void* zipData, size_t zipSize, const fs::path&
         }
 
         fs::path relPath = fs::u8path(name);
+        if (relPath.has_root_path() || name.find(':') != std::string::npos) {
+            errorDetail = L"El paquete integrado contiene una ruta absoluta no válida.";
+            mz_zip_reader_end(&zip);
+            return false;
+        }
+        for (const auto& component : relPath) {
+            if (component == L"..") {
+                errorDetail = L"El paquete integrado contiene una ruta fuera del directorio de la aplicación.";
+                mz_zip_reader_end(&zip);
+                return false;
+            }
+        }
         fs::path outPath = destDir / relPath;
 
         if (isDir) {
@@ -141,17 +175,42 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*pC
     // Optional modern DPI awareness
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-    // 1. Locate destination in %LOCALAPPDATA%\VMTStudio\app-v0.2.0
+    // 1. Extract each version into its own application directory.
     PWSTR localAppData = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, NULL, &localAppData)) || !localAppData) {
         MessageBoxW(NULL, L"Error: No se pudo resolver la ruta %LOCALAPPDATA%.", L"VMT-Studio Launcher", MB_ICONERROR);
         return 1;
     }
-    fs::path appDir = fs::path(localAppData) / L"VMTStudio" / L"app-v0.2.0";
+    fs::path appDir = fs::path(localAppData) / L"VMTStudio" /
+                      fs::u8path(std::string("app-v") + VMTSTUDIO_PORTABLE_VERSION);
     CoTaskMemFree(localAppData);
 
     fs::path targetExe = appDir / L"vmtstudio.exe";
     fs::path readyMarker = appDir / L".ready";
+
+    // Concurrent first launches must not write the same DLL while the other
+    // instance is starting it. The OS also releases this gate after a crash.
+    const std::wstring mutexName = L"Local\\VMTStudio.Portable." +
+        fs::u8path(VMTSTUDIO_PORTABLE_VERSION).wstring();
+    const HANDLE extractionMutex = CreateMutexW(nullptr, FALSE, mutexName.c_str());
+    if (!extractionMutex) {
+        MessageBoxW(nullptr, L"No se pudo proteger la extracción del paquete.", L"VMT-Studio Launcher", MB_ICONERROR);
+        return 1;
+    }
+    struct ExtractionGuard {
+        HANDLE mutex;
+        bool acquired = false;
+        ~ExtractionGuard() {
+            if (acquired) ReleaseMutex(mutex);
+            CloseHandle(mutex);
+        }
+    } extractionGuard{extractionMutex};
+    const DWORD waitResult = WaitForSingleObject(extractionMutex, INFINITE);
+    if (waitResult != WAIT_OBJECT_0 && waitResult != WAIT_ABANDONED) {
+        MessageBoxW(nullptr, L"No se pudo esperar a la extracción del paquete.", L"VMT-Studio Launcher", MB_ICONERROR);
+        return 1;
+    }
+    extractionGuard.acquired = true;
 
     // 2. Check if already extracted
     std::error_code ec;
@@ -183,13 +242,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*pC
             MessageBoxW(NULL, msg.c_str(), L"VMT-Studio Launcher", MB_ICONERROR);
             return 1;
         }
+        if (!fs::is_regular_file(targetExe, ec)) {
+            MessageBoxW(nullptr, L"El paquete integrado no contiene vmtstudio.exe.", L"VMT-Studio Launcher", MB_ICONERROR);
+            return 1;
+        }
 
         // Mark as ready
         std::ofstream marker(readyMarker);
         if (marker.is_open()) {
-            marker << "0.2.0\n";
+            marker << VMTSTUDIO_PORTABLE_VERSION << "\n";
         }
     }
+
+    ReleaseMutex(extractionMutex);
+    extractionGuard.acquired = false;
 
     // 3. Launch target application
     std::wstring cmdLine = build_forward_args(targetExe);

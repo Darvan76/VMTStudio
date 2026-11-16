@@ -6,7 +6,6 @@
 
 #include <QAbstractItemView>
 #include <QCheckBox>
-#include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
@@ -23,8 +22,10 @@
 #include <QRadioButton>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QTimer>
 
 #include <cstddef>
+#include <chrono>
 #include <string>
 #include <utility>
 #include <vector>
@@ -121,6 +122,7 @@ ExportMaterialsDialog::ExportMaterialsDialog(bridge::EngineView* engine,
     auto* destinationRow = new QHBoxLayout();
     destinationRow->addWidget(new QLabel(tr("Destination folder:"), this));
     m_destinationEdit = new QLineEdit(default_destination(m_modelName), this);
+    m_destinationEdit->setObjectName(QStringLiteral("exportDestination"));
     m_browseButton = new QPushButton(tr("Browse..."), this);
     destinationRow->addWidget(m_destinationEdit, 1);
     destinationRow->addWidget(m_browseButton);
@@ -156,6 +158,7 @@ ExportMaterialsDialog::ExportMaterialsDialog(bridge::EngineView* engine,
     mainLayout->addWidget(m_logEdit);
 
     m_statusLabel = new QLabel(this);
+    m_statusLabel->setObjectName(QStringLiteral("exportStatus"));
     m_statusLabel->setWordWrap(true);
     mainLayout->addWidget(m_statusLabel);
 
@@ -164,6 +167,7 @@ ExportMaterialsDialog::ExportMaterialsDialog(bridge::EngineView* engine,
     m_openFolderButton = new QPushButton(tr("Open Folder"), this);
     m_openFolderButton->setEnabled(false);
     m_exportButton = new QPushButton(tr("Export"), this);
+    m_exportButton->setObjectName(QStringLiteral("exportStart"));
     m_exportButton->setDefault(true);
     m_closeButton = new QPushButton(tr("Close"), this);
     buttonRow->addWidget(m_openFolderButton);
@@ -188,6 +192,39 @@ ExportMaterialsDialog::ExportMaterialsDialog(bridge::EngineView* engine,
     });
 
     refreshPreview();
+    m_exportTimer = new QTimer(this);
+    m_exportTimer->setInterval(25);
+    connect(m_exportTimer, &QTimer::timeout, this, &ExportMaterialsDialog::finishExport);
+}
+
+ExportMaterialsDialog::~ExportMaterialsDialog() {
+    cancelExport();
+    if (m_exportFuture.valid()) m_exportFuture.wait();
+}
+
+void ExportMaterialsDialog::cancelExport() {
+    if (!m_exportFuture.valid()) return;
+    m_cancelled->store(true);
+}
+
+void ExportMaterialsDialog::reject() {
+    if (m_exportFuture.valid()) {
+        m_closeAfterExport = true;
+        cancelExport();
+        m_statusLabel->setText(tr("Cancelling..."));
+        return;
+    }
+    QDialog::reject();
+}
+
+void ExportMaterialsDialog::setExporting(bool exporting) {
+    m_destinationEdit->setEnabled(!exporting);
+    m_browseButton->setEnabled(!exporting);
+    m_flatRadio->setEnabled(!exporting);
+    m_treeRadio->setEnabled(!exporting);
+    m_overwriteCheck->setEnabled(!exporting);
+    m_exportButton->setEnabled(!exporting);
+    m_closeButton->setText(exporting ? tr("Cancel and close") : tr("Close"));
 }
 
 void ExportMaterialsDialog::browseForDestination() {
@@ -255,7 +292,7 @@ void ExportMaterialsDialog::appendLog(const QString& line) {
 }
 
 void ExportMaterialsDialog::exportAll() {
-    if (m_engine == nullptr) {
+    if (m_engine == nullptr || m_exportFuture.valid()) {
         return; // the Export button is disabled in this case
     }
 
@@ -282,17 +319,6 @@ void ExportMaterialsDialog::exportAll() {
     }
 
     const std::filesystem::path destination = options.destination;
-    std::error_code ec;
-    std::filesystem::create_directories(destination, ec);
-    if (ec) {
-        m_statusLabel->setStyleSheet(QStringLiteral("color: #f14c4c; font-weight: bold;"));
-        m_statusLabel->setText(tr("Cannot create the output folder."));
-        m_logEdit->setPlainText(tr("Cannot create the output folder %1: %2")
-                                    .arg(native_path(destination),
-                                         QString::fromLocal8Bit(ec.message().c_str())));
-        return;
-    }
-
     m_logEdit->clear();
     appendLog(tr("Output folder: %1").arg(native_path(destination)));
     for (const std::string& duplicate : plan.duplicates) {
@@ -301,91 +327,116 @@ void ExportMaterialsDialog::exportAll() {
     }
 
     const int total = static_cast<int>(plan.items.size());
-    QProgressDialog progress(tr("Exporting materials..."), tr("Cancel"), 0, total, this);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(0);
-    progress.setAutoClose(false);
-    progress.setAutoReset(false);
-
-    int written = 0;
-    int skipped = 0;
-    int failed = 0;
-    bool cancelled = false;
-
-    for (std::size_t index = 0; index < plan.items.size(); ++index) {
-        progress.setLabelText(
-            tr("%1 / %2").arg(static_cast<qlonglong>(index) + 1).arg(total));
-        progress.setValue(static_cast<int>(index));
-        QCoreApplication::processEvents();
-        if (progress.wasCanceled()) {
-            cancelled = true;
-            break;
-        }
-
-        const ui::ExportItem& item = plan.items[index];
-        const QString displayName = display_path(item.relative);
-
-        // "Overwrite" off: leave existing files untouched and count them.
-        if (!m_overwriteCheck->isChecked()) {
-            std::error_code existsEc;
-            const bool exists = std::filesystem::exists(item.absolute, existsEc);
-            if (existsEc) {
-                ++failed;
-                appendLog(tr("Failed to check %1: %2")
-                              .arg(displayName,
-                                   QString::fromLocal8Bit(existsEc.message().c_str())));
-                continue;
-            }
-            if (exists) {
-                ++skipped;
-                continue;
-            }
-        }
-
-        const std::string gamePath = "materials/" + item.material + ".vmt";
-        const vmt::Result<std::string> text = m_engine->read_text_file(gamePath);
-        if (!text.ok()) {
-            ++failed;
-            appendLog(tr("Failed to read %1: %2")
-                          .arg(QString::fromStdString(gamePath),
-                               QString::fromStdString(text.error().message)));
-            continue;
-        }
-
-        std::error_code dirEc;
-        std::filesystem::create_directories(item.absolute.parent_path(), dirEc);
-        if (dirEc) {
-            ++failed;
-            appendLog(tr("Failed to create %1: %2")
-                          .arg(native_path(item.absolute.parent_path()),
-                               QString::fromLocal8Bit(dirEc.message().c_str())));
-            continue;
-        }
-
-        std::string writeError;
-        if (!write_file_atomically(item.absolute, text.value(), writeError)) {
-            ++failed;
-            appendLog(tr("Failed to write %1: %2")
-                          .arg(displayName, QString::fromStdString(writeError)));
-            continue;
-        }
-        ++written;
-    }
-
-    progress.close();
-
     m_lastDestination = native_path(destination);
-    m_openFolderButton->setEnabled(true);
+    m_openFolderButton->setEnabled(false);
+    m_cancelled = std::make_shared<std::atomic<bool>>(false);
+    m_completed = std::make_shared<std::atomic<int>>(0);
+    m_closeAfterExport = false;
+    const auto cancelled = m_cancelled;
+    const auto completed = m_completed;
+    auto* engine = m_engine;
+    const bool overwrite = m_overwriteCheck->isChecked();
+    try {
+        m_exportFuture = std::async(std::launch::async, [plan, engine, overwrite, cancelled, completed]() {
+            ExportResult result;
+            for (const ui::ExportItem& item : plan.items) {
+                if (cancelled->load()) break;
+                completed->fetch_add(1);
+                const QString displayName = display_path(item.relative);
+                if (!overwrite) {
+                    std::error_code existsEc;
+                    const bool exists = std::filesystem::exists(item.absolute, existsEc);
+                    if (existsEc) {
+                        ++result.failed;
+                        result.log.append(tr("Failed to check %1: %2")
+                            .arg(displayName, QString::fromLocal8Bit(existsEc.message().c_str())));
+                        continue;
+                    }
+                    if (exists) {
+                        ++result.skipped;
+                        continue;
+                    }
+                }
 
+                const std::string gamePath = "materials/" + item.material + ".vmt";
+                const vmt::Result<std::string> text = engine->read_text_file(gamePath, cancelled.get());
+                if (cancelled->load()) break;
+                if (!text.ok()) {
+                    ++result.failed;
+                    result.log.append(tr("Failed to read %1: %2")
+                        .arg(QString::fromStdString(gamePath), QString::fromStdString(text.error().message)));
+                    continue;
+                }
+
+                std::error_code dirEc;
+                std::filesystem::create_directories(item.absolute.parent_path(), dirEc);
+                if (dirEc) {
+                    ++result.failed;
+                    result.log.append(tr("Failed to create %1: %2")
+                        .arg(native_path(item.absolute.parent_path()), QString::fromLocal8Bit(dirEc.message().c_str())));
+                    continue;
+                }
+
+                std::string writeError;
+                if (cancelled->load()) break;
+                if (!write_file_atomically(item.absolute, text.value(), writeError)) {
+                    ++result.failed;
+                    result.log.append(tr("Failed to write %1: %2")
+                        .arg(displayName, QString::fromStdString(writeError)));
+                    continue;
+                }
+                ++result.written;
+            }
+            result.cancelled = cancelled->load();
+            return result;
+        });
+    } catch (const std::exception& error) {
+        m_statusLabel->setText(tr("Cannot start export: %1").arg(QString::fromUtf8(error.what())));
+        return;
+    }
+    setExporting(true);
+    m_progress = new QProgressDialog(tr("Exporting materials..."), tr("Cancel"), 0, total, this);
+    // The parent export dialog is already modal. A modal progress setValue()
+    // pumps nested events; a non-modal child keeps worker completion sequential.
+    m_progress->setWindowModality(Qt::NonModal);
+    m_progress->setMinimumDuration(0);
+    m_progress->setAutoClose(false);
+    m_progress->setAutoReset(false);
+    connect(m_progress, &QProgressDialog::canceled, this, &ExportMaterialsDialog::cancelExport);
+    m_progress->show();
+    m_exportTimer->start();
+}
+
+void ExportMaterialsDialog::finishExport() {
+    if (!m_exportFuture.valid()) return;
+    if (m_progress) m_progress->setValue(m_completed->load());
+    if (m_exportFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
+    m_exportTimer->stop();
+    ExportResult result;
+    try {
+        result = m_exportFuture.get();
+    } catch (const std::exception& error) {
+        result.failed = 1;
+        result.log.append(tr("Export failed: %1").arg(QString::fromUtf8(error.what())));
+    }
+    if (m_progress) {
+        m_progress->close();
+        m_progress->deleteLater();
+        m_progress = nullptr;
+    }
+    setExporting(false);
+    m_openFolderButton->setEnabled(true);
+    for (const auto& line : result.log) appendLog(line);
     QString summary = tr("Exported %1 file(s), skipped %2, %3 failed")
-                          .arg(written).arg(skipped).arg(failed);
-    if (cancelled) {
+                          .arg(result.written).arg(result.skipped).arg(result.failed);
+    if (result.cancelled) {
         summary = tr("Cancelled. ") + summary;
     }
-    const bool problem = cancelled || failed > 0;
+    const bool problem = result.cancelled || result.failed > 0;
     m_statusLabel->setStyleSheet(problem ? QStringLiteral("color: #f14c4c; font-weight: bold;")
                                          : QStringLiteral("color: #4ec9b0; font-weight: bold;"));
     m_statusLabel->setText(summary);
+    if (m_closeAfterExport) QDialog::reject();
 }
 
 } // namespace qt

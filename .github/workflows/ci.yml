@@ -4,40 +4,35 @@ on:
   workflow_dispatch:
     inputs:
       configuration:
-        description: 'Build configuration'
+        description: Build configuration
         required: true
-        default: 'Release'
+        default: Release
         type: choice
-        options:
-          - 'Release'
-          - 'Debug'
-          - 'Both'
+        options: [Release, Debug, Both]
       create_release:
-        description: 'Publish release on GitHub'
+        description: Publish release (select the matching version tag and Release or Both)
         required: false
         default: false
         type: boolean
   push:
-    branches:
-      - master
-      - main
-      - 'release/*'
-    tags:
-      - 'v*'
   pull_request:
-    branches:
-      - master
-      - main
-      - 'release/*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-release:
-    name: Build & Test Release (Windows x64 + Win32)
-    runs-on: windows-latest
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.configuration == 'Release' || github.event.inputs.configuration == 'Both'
+  build:
+    name: Build & Test ${{ matrix.configuration }} (Windows x64 + Win32)
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: ${{ fromJSON((github.event_name != 'workflow_dispatch' || github.event.inputs.configuration == 'Both') && '["Release","Debug"]' || format('["{0}"]', github.event.inputs.configuration)) }}
+    env:
+      BUILD_CONFIG: ${{ matrix.configuration }}
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
       - name: Checkout repository
@@ -46,6 +41,25 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Check sources and release version
+        env:
+          PUBLISH_REQUESTED: ${{ github.event.inputs.create_release }}
+          REQUESTED_CONFIGURATION: ${{ github.event.inputs.configuration }}
+        run: |
+          & ./scripts/check_source_integrity.ps1
+          $project = Get-Content CMakeLists.txt -Raw
+          if ($project -notmatch '(?ms)project\s*\([^)]*VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+            throw 'Cannot read application version.'
+          }
+          $version = $Matches[1]
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Release tag must match CMake version: v$version."
+          }
+          if ($env:PUBLISH_REQUESTED -eq 'true' -and
+              ($env:GITHUB_REF_TYPE -ne 'tag' -or $env:REQUESTED_CONFIGURATION -eq 'Debug')) {
+            throw 'Publishing requires the matching version tag and a Release build.'
+          }
+
       - name: Set up MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
 
@@ -53,173 +67,110 @@ jobs:
         uses: jurplel/install-qt-action@v3
         with:
           version: '6.8.2'
-          host: 'windows'
-          target: 'desktop'
-          arch: 'win64_msvc2022_64'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
           dir: 'C:/'
 
       - name: Apply VTFLib patches
-        shell: pwsh
         run: |
           cmake -P thirdparty/patches/apply_vtflib_patches.cmake
+          if ($LASTEXITCODE -ne 0) { throw 'VTFLib patching failed.' }
 
       - name: Build VTFLib++ (Win32 & x64)
-        shell: pwsh
         run: |
-          Write-Host "Configuring and compiling 32-bit VTFLib++ (Release)..."
-          cmake -B thirdparty/vtflib/build_vtflib -S thirdparty/vtflib -A Win32 `
-                -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
-          cmake --build thirdparty/vtflib/build_vtflib --config Release
+          foreach ($build in @(
+            @{ Architecture = 'Win32'; Directory = 'build_vtflib' },
+            @{ Architecture = 'x64'; Directory = 'build_vtflib64' }
+          )) {
+            cmake -G 'Visual Studio 17 2022' -S thirdparty/vtflib -B "thirdparty/vtflib/$($build.Directory)" `
+              -A $build.Architecture -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF -DCMAKE_DEBUG_POSTFIX=_d
+            if ($LASTEXITCODE -ne 0) { throw 'VTFLib configuration failed.' }
+            cmake --build "thirdparty/vtflib/$($build.Directory)" --config $env:BUILD_CONFIG --target vtflib --parallel 2
+            if ($LASTEXITCODE -ne 0) { throw 'VTFLib build failed.' }
+          }
 
-          Write-Host "Configuring and compiling 64-bit VTFLib++ (Release)..."
-          cmake -B thirdparty/vtflib/build_vtflib64 -S thirdparty/vtflib -A x64 `
-                -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
-          cmake --build thirdparty/vtflib/build_vtflib64 --config Release
-
-      - name: Checkout Source SDK 2013 Public Headers
-        shell: pwsh
+      - name: Checkout pinned Source SDK 2013 public headers
         run: |
-          Write-Host "Cloning Source SDK 2013 public headers (sparse checkout)..."
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/ValveSoftware/source-sdk-2013.git "$env:RUNNER_TEMP/source-sdk-2013"
-          git -C "$env:RUNNER_TEMP/source-sdk-2013" sparse-checkout set src/public
+          $sdk = "$env:RUNNER_TEMP/source-sdk-2013"
+          git clone --filter=blob:none --no-checkout https://github.com/ValveSoftware/source-sdk-2013.git $sdk
+          if ($LASTEXITCODE -ne 0) { throw 'Source SDK clone failed.' }
+          git -C $sdk sparse-checkout set src/public
+          if ($LASTEXITCODE -ne 0) { throw 'Source SDK sparse checkout failed.' }
+          git -C $sdk checkout b8cfb12c0e083a2ef5b2f9f9b50f3902fa034474
+          if ($LASTEXITCODE -ne 0) { throw 'Source SDK pinned checkout failed.' }
 
-      - name: Build 32-bit Backend (HLMV)
-        shell: pwsh
+      - name: Build 32-bit backend (HLMV)
         run: |
           $sdkPublic = "$env:RUNNER_TEMP/source-sdk-2013/src/public" -replace '\\', '/'
-          Write-Host "Configuring Win32 build with SOURCE_SDK_PUBLIC=$sdkPublic..."
-          cmake -S . -B build -A Win32 -DSOURCE_SDK_PUBLIC="$sdkPublic"
-          Write-Host "Compiling 32-bit HLMV backend (Release)..."
-          cmake --build build --config Release --target hlmv_backend
+          cmake -G 'Visual Studio 17 2022' -S . -B build -A Win32 "-DSOURCE_SDK_PUBLIC=$sdkPublic"
+          if ($LASTEXITCODE -ne 0) { throw 'Win32 configuration failed.' }
+          cmake --build build --config $env:BUILD_CONFIG --target hlmv_backend --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'Win32 backend build failed.' }
 
-      - name: Build 64-bit VMT-Studio & Test Suite
-        shell: pwsh
+      - name: Build 64-bit application and tests
         run: |
-          Write-Host "Configuring 64-bit build with Qt at ${{ env.QT_ROOT_DIR }}..."
-          cmake -S . -B build64 -A x64 -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT_DIR }}"
-          Write-Host "Compiling 64-bit VMT-Studio and unit tests (Release)..."
-          cmake --build build64 --config Release
+          cmake -G 'Visual Studio 17 2022' -S . -B build64 -A x64 "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR"
+          if ($LASTEXITCODE -ne 0) { throw 'x64 configuration failed.' }
+          cmake --build build64 --config $env:BUILD_CONFIG --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'x64 build failed.' }
 
-      - name: Run CTest Unit Tests
-        shell: pwsh
+      - name: Run CTest unit tests
         run: |
-          Write-Host "Running 64-bit CTest test suite (Release)..."
-          ctest --test-dir build64 -C Release --output-on-failure
+          ctest --test-dir build64 -C $env:BUILD_CONFIG --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { throw 'CTest failed.' }
 
-      - name: Package Release Distribution
-        shell: pwsh
+      - name: Package verified distribution
         run: |
-          Write-Host "Packaging Release distribution..."
-          powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1 -Config Release
+          & ./scripts/package_release.ps1 -Config $env:BUILD_CONFIG
 
-      - name: Upload Build Artifacts (ZIP)
+      - name: Build portable executable
+        if: matrix.configuration == 'Release'
+        run: |
+          & ./scripts/build_single_exe.ps1 -Config Release -UseExistingPackage
+
+      - name: Generate SHA-256 checksums
+        run: |
+          $assets = Get-ChildItem dist -File | Where-Object { $_.Extension -in @('.zip', '.exe') } | Sort-Object Name
+          if (-not $assets) { throw 'No release artifacts were produced.' }
+          $assets | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -LiteralPath dist/SHA256SUMS -Encoding ascii
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
+        with:
+          name: vmtstudio-${{ matrix.configuration == 'Release' && 'release' || 'debug' }}-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.exe
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    name: Publish verified release
+    needs: build
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Release artifacts
+        uses: actions/download-artifact@v4
         with:
           name: vmtstudio-release-windows-x64
-          path: dist/*.zip
-          if-no-files-found: error
+          path: dist
 
-      - name: Upload Release to GitHub
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == true))
+      - name: Publish ZIP, portable executable and checksums
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/*.exe
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-debug:
-    # El job de Release es el único que publica releases en push de tags,
-    # para evitar que dos jobs creen la misma release a la vez.
-    name: Build & Test Debug (Windows x64 + Win32)
-    runs-on: windows-latest
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.configuration == 'Debug' || github.event.inputs.configuration == 'Both'
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-
-      - name: Set up MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Install Qt 6.8
-        uses: jurplel/install-qt-action@v3
-        with:
-          version: '6.8.2'
-          host: 'windows'
-          target: 'desktop'
-          arch: 'win64_msvc2022_64'
-          dir: 'C:/'
-
-      - name: Apply VTFLib patches
-        shell: pwsh
-        run: |
-          cmake -P thirdparty/patches/apply_vtflib_patches.cmake
-
-      - name: Build VTFLib++ (Win32 & x64)
-        shell: pwsh
-        run: |
-          Write-Host "Configuring and compiling 32-bit VTFLib++ (Debug)..."
-          cmake -B thirdparty/vtflib/build_vtflib -S thirdparty/vtflib -A Win32 `
-                -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
-          cmake --build thirdparty/vtflib/build_vtflib --config Debug
-
-          Write-Host "Configuring and compiling 64-bit VTFLib++ (Debug)..."
-          cmake -B thirdparty/vtflib/build_vtflib64 -S thirdparty/vtflib -A x64 `
-                -DVTFLIB_BUILD_VTFCMD=OFF -DVTFLIB_BUILD_VTFEDIT=OFF
-          cmake --build thirdparty/vtflib/build_vtflib64 --config Debug
-
-      - name: Checkout Source SDK 2013 Public Headers
-        shell: pwsh
-        run: |
-          Write-Host "Cloning Source SDK 2013 public headers (sparse checkout)..."
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/ValveSoftware/source-sdk-2013.git "$env:RUNNER_TEMP/source-sdk-2013"
-          git -C "$env:RUNNER_TEMP/source-sdk-2013" sparse-checkout set src/public
-
-      - name: Build 32-bit Backend (HLMV)
-        shell: pwsh
-        run: |
-          $sdkPublic = "$env:RUNNER_TEMP/source-sdk-2013/src/public" -replace '\\', '/'
-          Write-Host "Configuring Win32 build with SOURCE_SDK_PUBLIC=$sdkPublic..."
-          cmake -S . -B build -A Win32 -DSOURCE_SDK_PUBLIC="$sdkPublic"
-          Write-Host "Compiling 32-bit HLMV backend (Debug)..."
-          cmake --build build --config Debug --target hlmv_backend
-
-      - name: Build 64-bit VMT-Studio & Test Suite
-        shell: pwsh
-        run: |
-          Write-Host "Configuring 64-bit build with Qt at ${{ env.QT_ROOT_DIR }}..."
-          cmake -S . -B build64 -A x64 -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT_DIR }}"
-          Write-Host "Compiling 64-bit VMT-Studio and unit tests (Debug)..."
-          cmake --build build64 --config Debug
-
-      - name: Run CTest Unit Tests
-        shell: pwsh
-        run: |
-          Write-Host "Running 64-bit CTest test suite (Debug)..."
-          ctest --test-dir build64 -C Debug --output-on-failure
-
-      - name: Package Debug Distribution
-        shell: pwsh
-        run: |
-          Write-Host "Packaging Debug distribution..."
-          powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1 -Config Debug
-
-      - name: Upload Build Artifacts (ZIP)
-        uses: actions/upload-artifact@v4
-        with:
-          name: vmtstudio-debug-windows-x64
-          path: dist/*.zip
-          if-no-files-found: error
-
-      - name: Upload Release to GitHub
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.configuration == 'Debug' && (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == true)
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.zip
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

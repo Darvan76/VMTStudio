@@ -8,16 +8,17 @@
 // caller-provided child window, and the caller owns the message loop (the
 // engine never pumps messages here).
 //
-// Phase 9 adds preview controls (shape, lights/background), engine-side
-// material discovery for the browser, and offscreen thumbnail rendering. All
-// of it stays best-effort: a game binary that refuses an operation returns an
-// error and the viewer keeps working.
+// Preview controls (shape, lights/background) and engine-side asset discovery
+// stay best-effort: a game binary that refuses an operation returns an error
+// and the viewer keeps working.
 //
 // This header is Valve-free and Windows-header-free (the window handle travels
 // as void*, matching the engine's own SetMode convention).
 
 #include "vmt/result.h"
 
+#include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -50,12 +51,6 @@ struct PreviewLighting {
     float background[3] = { 0.16f, 0.16f, 0.17f };
 };
 
-// A material found by list_materials(): the game-relative name without the
-// extension, using forward slashes ("brick/brickwall001a").
-struct MaterialName {
-    std::string name;
-};
-
 // One file found by list_assets(). Paths keep their extension and use forward
 // slashes, matching how the engine file system addresses both loose files and
 // VPK entries ("materials/brick/brick001.vmt").
@@ -69,12 +64,13 @@ struct AssetList {
     bool truncated = false;  // the backend stopped after its safety cap or time budget
 };
 
-// Pixels read back from an engine render target: BGRA, row 0 is the top row
-// (already flipped vertically if `flip_vertical` was requested).
-struct Thumbnail {
-    int width = 0;
-    int height = 0;
-    std::vector<unsigned char> bgra;
+inline constexpr std::uint32_t kMaxBinaryPrefixBytes = 4096;
+
+// Original file size plus a bounded prefix; the payload may be empty for an
+// empty file. This supports metadata reads without copying complete VPK assets.
+struct BinaryPrefix {
+    std::uint64_t file_size = 0;
+    std::vector<unsigned char> bytes;
 };
 
 // --- Model viewer data (IPC protocol v2, see docs/IPC_PROTOCOL.md) ------------
@@ -196,6 +192,8 @@ struct EngineViewConfig {
     unsigned steam_appid = 0;         // optional; set before loading DLLs
     int width = 800;                  // initial device/backbuffer size
     int height = 600;
+    // Shared with the owner so startup can stop before an EngineView is adopted.
+    std::shared_ptr<std::atomic<bool>> cancelled;
 };
 
 class EngineView {
@@ -203,6 +201,10 @@ public:
     static vmt::Result<std::unique_ptr<EngineView>> create();
 
     virtual ~EngineView() = default;
+
+    // Interrupt response-file waits already in flight. New queries get a fresh
+    // generation and remain usable; engine lifetime must still be drained.
+    void cancel_pending_queries() noexcept { query_generation_.fetch_add(1); }
 
     // Loads the engine DLLs, mounts the game's search paths and creates the
     // device on the child window. Lazy: call it when the user asks for a
@@ -228,11 +230,6 @@ public:
     // engine confirmed absence; an unavailable VFS returns an error instead.
     virtual vmt::Result<bool> file_exists(const std::string& game_path) = 0;
 
-    // Enumerates every .vmt in the mounted search paths (game folders + VPKs)
-    // through the engine file system while the backend runs, with a disk-only
-    // fallback when it does not. Names are game-relative without extension.
-    virtual vmt::Result<std::vector<std::string>> list_materials() = 0;
-
     // Enumerates every file under `roots` whose extension is one of
     // `extensions`, through the engine file system (loose files and VPKs).
     // Roots are game-relative with forward slashes ("materials",
@@ -245,7 +242,10 @@ public:
 
     // Reads a text file (a VMT, for example) through the engine file system,
     // so materials that live inside VPKs can be opened for editing.
-    virtual vmt::Result<std::string> read_text_file(const std::string& game_path) = 0;
+    // An optional flag cancels this call without interrupting other queries;
+    // the caller keeps it alive until the call returns.
+    virtual vmt::Result<std::string> read_text_file(
+        const std::string& game_path, const std::atomic<bool>* cancelled = nullptr) = 0;
 
     // Reads an arbitrary file as raw bytes through the engine file system, so
     // binary assets that live inside VPKs (textures above all) can be handed to
@@ -257,6 +257,12 @@ public:
     virtual vmt::Result<std::vector<unsigned char>> read_binary_file(
         const std::string& game_path) = 0;
 
+    // Reads at most max_bytes (1..kMaxBinaryPrefixBytes) from the beginning,
+    // preserving the original file size. Uses the mounted VFS while the
+    // backend runs; without it, only loose files in game_dir are available.
+    virtual vmt::Result<BinaryPrefix> read_binary_prefix(
+        const std::string& game_path, std::uint32_t max_bytes) = 0;
+
     // Selects the primitive used for the preview.
     virtual vmt::Result<void> set_preview_shape(PreviewShape shape) = 0;
 
@@ -266,13 +272,6 @@ public:
     // Loads a .mdl model to preview. Pending: the StudioRender headers this
     // path needs are not wired yet; the call reports that cleanly.
     virtual vmt::Result<void> set_model(const std::filesystem::path& model_path) = 0;
-
-    // Offscreen render of one material into a BGRA thumbnail. Does not change
-    // the current preview material; returns a clear error when the game
-    // binaries cannot provide a readable render target.
-    virtual vmt::Result<Thumbnail> render_material_thumbnail(const std::string& material_name,
-                                                             int size,
-                                                             bool flip_vertical) = 0;
 
     // Sets render debug mode ("shaded", "wireframe", "albedo", "normals").
     virtual vmt::Result<void> set_render_mode(const std::string& mode) = 0;
@@ -347,6 +346,15 @@ public:
     virtual void shutdown() = 0;
 
     virtual bool initialized() const noexcept = 0;
+
+protected:
+    std::uint64_t query_generation() const noexcept { return query_generation_.load(); }
+    bool query_cancelled(std::uint64_t generation) const noexcept {
+        return generation != query_generation_.load();
+    }
+
+private:
+    std::atomic<std::uint64_t> query_generation_{0};
 };
 
 } // namespace bridge

@@ -16,7 +16,7 @@ it can be unit tested without Windows or an engine connection.
 * Backend -> UI: one-way notifications posted to the host HWND (see *Live
   tick*). Data queries never travel in messages; they use response files.
 
-## Command grammar (v1, unchanged)
+## Command grammar (v1)
 
 ```
 PING
@@ -25,7 +25,6 @@ SET_MATERIAL <game-relative material name>      # empty name clears the override
 RELOAD_MATERIAL [<game-relative material name>] # no argument: the current override
 LOAD_MODEL <absolute path or game-relative .mdl>
 SET_SHAPE <sphere|cube|cylinder|plane|brush_wall|brush_floor|brush_cube|brush_displacement>
-CAPTURE_THUMBNAIL <material|-> <size> <output file>
 SET_RENDER_MODE <shaded|wireframe|albedo|normals>
 SET_ANIMATION <play|pause|toggle>
 SET_SPEED <scale>
@@ -75,6 +74,7 @@ and lets the UI wait without blocking its own message loop.
 ```
 DUMP <kind> <token> [args]      # kind: models | assets | model_scene | anim_state | exists
 RAW <token> <game-relative path>  # binary payload (VPK-aware)
+RAW_PREFIX <token> <max-bytes> <game-relative path> # bounded prefix + original size
 ```
 
 * `token` matches `[A-Za-z0-9_-]{1,64}`; the UI generates it (job id).
@@ -83,18 +83,56 @@ RAW <token> <game-relative path>  # binary payload (VPK-aware)
 * Response files, all inside `<ipc_dir>`:
   * `<token>.dat` - UTF-8 text result (schema below), written atomically
     (`<token>.part` then rename).
-  * `<token>.bin` - raw bytes, only for `RAW`, written the same way.
+  * `<token>.bin` - binary result for `RAW` or `RAW_PREFIX`, written the same way.
   * `<token>.done` - empty marker created **after** the payload; the UI treats
     its presence as "result complete".
   * `<token>.err` - UTF-8 error message; mutually exclusive with `.done`.
-* The backend deletes stale `<token>.*` files before starting a job.
+* The backend deletes stale `<token>.*` response files before starting a job,
+  preserving `<token>.cancel`.
 * The UI gives up after 10 s (timeout) and reports an error. `assets` is the
   exception: a whole-game index legitimately takes longer, so the UI waits 60 s
   for it.
+* Native directory notifications wake response waits when files change. A 5 ms
+  timeout also checks cancellation, process exit and the job deadline; polling
+  remains the fallback if notifications are unavailable. Error text is published
+  through `.part` followed by an atomic rename to `.err`.
+* Cancellation creates `<token>.cancel` and releases the frontend waiter. The
+  backend preserves that marker when accepting a queued request, rejects a job
+  cancelled before execution, and checks it during model/asset scans and output
+  construction at intervals of at most 5 ms between engine calls. RAW checks it
+  before execution and after its bounded read. Cancellation produces `.err` with
+  `query cancelled`; it never publishes a successful partial listing.
+* The frontend retains cancelled tokens until completion: subsequent requests
+  reap acknowledged responses, and teardown removes leftovers after the backend
+  exits, including `.part` and `.cancel`. A Windows error response is closed
+  before removal so the frontend does not keep its own response locked.
+* Clearing an engine connection cancels active waits before draining workers;
+  startup checks the owner's shared cancellation flag. An export may cancel its
+  own text read without cancelling unrelated queries. The synchronous
+  `WM_COPYDATA` acknowledgement remains bounded to 1 s. Teardown services sent
+  native messages while waiting for the embedded child and allows 100 ms for
+  normal DLL cleanup before the existing forced-exit fallback. The renderer owns
+  no edited documents; frontend writes and workers are finished first.
 
 `DUMP models [prefix]`: every `*.mdl` reachable through the engine file system
 (loose folders and VPKs), including VPK-packed content. `prefix` is a
 game-relative path prefix such as `models/props_c17/`.
+
+`RAW_PREFIX <token> <max-bytes> <game-relative path>` opens the mounted game
+file (loose or VPK) and reads only its first `min(file-size, max-bytes)` bytes.
+The decimal limit must be between 1 and 4096. Absolute paths, `..` components
+and control characters are rejected. Its `.bin` response is:
+
+```
+uint64 little-endian original-file-size
+exactly min(original-file-size, max-bytes) payload bytes
+```
+
+The frontend rejects malformed or oversized responses before decoding them.
+Prefix reads may inspect metadata of files larger than the existing 256 MiB
+full-`RAW` cap; they never allocate or transfer the full file. Without a running
+backend the bridge only provides bounded reads of loose files in the configured
+game folder; it does not emulate VPK access or fall back to a full read.
 
 `DUMP assets <roots> <extensions>`: every file reachable through the engine
 file system whose extension is one of `extensions`, under any of `roots`:
@@ -168,7 +206,7 @@ note\ttruncated
 * `note\ttruncated` is written when the asset scan hit the row cap, the entry
   cap or the clock budget; the rows before it are still valid.
 * The dump carries no size: loose sizes come from `std::filesystem` in the UI
-  and VPK sizes are only known when the file is read through `RAW`.
+  and VPK sizes are known through `RAW_PREFIX` or a full `RAW` read.
 
 `kind=model_scene`:
 

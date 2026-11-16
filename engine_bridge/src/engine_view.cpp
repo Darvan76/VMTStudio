@@ -1,4 +1,5 @@
 #include "bridge/engine_view.h"
+#include "bridge/engine_compatibility.h"
 #include "bridge/ipc_dump.h"
 
 #include <fstream>
@@ -11,7 +12,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <iterator>
 #include <mutex>
@@ -32,6 +32,7 @@ vmt::Error engine_error(vmt::ErrorCode code, std::string message) {
 // the backend and get the longer deadline below (docs/IPC_PROTOCOL.md).
 constexpr unsigned kCommandTimeoutMs = 1000;
 constexpr unsigned kDumpTimeoutMs = 10000;
+constexpr unsigned kBackendExitGraceMs = 100;
 
 // Indexing a whole game walks VPKs and loose folders, so the assets dump can
 // take far longer than the model dumps without meaning that the backend hung.
@@ -49,30 +50,6 @@ std::string join_semicolons(const std::vector<std::string>& values) {
     return joined;
 }
 
-// list_materials() keeps the engine-side spike naming: no "materials/" prefix,
-// no ".vmt" extension and forward slashes.
-std::string material_name_from_asset_path(std::string path) {
-    for (char& c : path) {
-        if (c == '\\') c = '/';
-    }
-
-    constexpr char kPrefix[] = "materials/";
-    constexpr std::size_t kPrefixLength = sizeof(kPrefix) - 1;
-    if (path.size() > kPrefixLength &&
-        _strnicmp(path.c_str(), kPrefix, kPrefixLength) == 0) {
-        path.erase(0, kPrefixLength);
-    }
-
-    constexpr char kExtension[] = ".vmt";
-    constexpr std::size_t kExtensionLength = sizeof(kExtension) - 1;
-    if (path.size() > kExtensionLength &&
-        _strnicmp(path.c_str() + path.size() - kExtensionLength, kExtension,
-                  kExtensionLength) == 0) {
-        path.resize(path.size() - kExtensionLength);
-    }
-    return path;
-}
-
 // Response-file directory of the model viewer queries: %TEMP%\VMTStudio\ipc.
 // initialize() creates it and passes it to the backend with -ipc-dir.
 std::filesystem::path dump_dir() {
@@ -85,13 +62,16 @@ std::filesystem::path dump_dir() {
 }
 
 // Removes every response file the backend may leave for `token`.
-void remove_dump_files(const std::string& token) {
-    constexpr const char* const kExtensions[] = { "dat", "bin", "done", "err" };
+bool remove_dump_files(const std::string& token) {
+    constexpr const char* const kExtensions[] = { "dat", "bin", "done", "err", "part", "cancel" };
     const std::filesystem::path dir = dump_dir();
+    bool removed = true;
     for (const char* extension : kExtensions) {
         std::error_code ec;
         std::filesystem::remove(dir / (token + "." + extension), ec);
+        if (ec) removed = false;
     }
+    return removed;
 }
 
 std::filesystem::path find_hlmv_backend() {
@@ -125,9 +105,20 @@ public:
         }
 
         config_ = config;
+        if (owner_cancelled()) {
+            return vmt::Err<void>(engine_error(vmt::ErrorCode::Internal, "engine startup was cancelled"));
+        }
+
+        // This branch cannot use the SDK 2013/GMod vtable adapters. Refuse it
+        // before loading any engine module or starting the legacy backend.
+        const auto compatibility = inspect_engine_compatibility(config.bin_dir);
+        if (compatibility.requires_l4d2_backend) {
+            return vmt::Err<void>(engine_error(
+                vmt::ErrorCode::EngineInitFailed, compatibility.detail));
+        }
 
 #if !defined(_WIN64)
-        // 1. Initialize in-process filesystem (for instant file reading, material list, etc.)
+        // 1. Initialize in-process filesystem for instant file reads.
         if (!diagnostics_installed_) {
             spike::install_diagnostics();
             diagnostics_installed_ = true;
@@ -201,9 +192,14 @@ public:
 
         // 5. Wait for backend to initialize and embed
         HWND child = nullptr;
+        bool backend_ready = false;
         const auto start_time = std::chrono::steady_clock::now();
         while (std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::steady_clock::now() - start_time).count() < 6000) {
+            if (owner_cancelled()) {
+                terminate_backend();
+                return vmt::Err<void>(engine_error(vmt::ErrorCode::Internal, "engine startup was cancelled"));
+            }
             DWORD exit_code = 0;
             if (GetExitCodeProcess(pi.hProcess, &exit_code) && exit_code != STILL_ACTIVE) {
                 terminate_backend();
@@ -219,6 +215,7 @@ public:
                     if (SendMessageTimeoutW(child, WM_USER + 420, 0, 0,
                                             SMTO_ABORTIFHUNG, 200, &ping_result) != 0 &&
                         ping_result == 1) {
+                        backend_ready = true;
                         break;
                     }
                 }
@@ -226,11 +223,11 @@ public:
             Sleep(50);
         }
 
-        if (host_hwnd_ != nullptr && (child == nullptr || !IsWindow(child))) {
+        if (host_hwnd_ != nullptr && (!backend_ready || child == nullptr || !IsWindow(child))) {
             terminate_backend();
             return vmt::Err<void>(engine_error(
                 vmt::ErrorCode::EngineInitFailed,
-                "timed out waiting for hlmv_backend to embed into the host window"));
+                "timed out waiting for hlmv_backend to initialize and embed into the host window"));
         }
 
         child_hwnd_ = child;
@@ -314,46 +311,6 @@ public:
                                             "the game file system is unavailable for this lookup"));
     }
 
-    vmt::Result<std::vector<std::string>> list_materials() override {
-        // The engine file system is the only view that includes VPK content;
-        // the in-process spike and the disk walk below cannot see it.
-        if (backend_running()) {
-            const vmt::Result<AssetList> assets = list_assets({ "materials" }, { ".vmt" });
-            if (!assets.ok()) {
-                return vmt::Err<std::vector<std::string>>(assets.error());
-            }
-            std::vector<std::string> names;
-            names.reserve(assets.value().entries.size());
-            for (const AssetRecord& entry : assets.value().entries) {
-                names.push_back(material_name_from_asset_path(entry.path));
-            }
-            return vmt::Ok(std::move(names));
-        }
-#if !defined(_WIN64)
-        const spike::MaterialList result = spike::list_materials();
-        if (result.ok) {
-            return vmt::Ok(result.names);
-        }
-#endif
-        std::vector<std::string> names;
-        if (!config_.game_dir.empty()) {
-            std::filesystem::path mat_dir = config_.game_dir / "materials";
-            if (std::filesystem::exists(mat_dir)) {
-                for (const auto& entry : std::filesystem::recursive_directory_iterator(mat_dir)) {
-                    if (entry.is_regular_file() && entry.path().extension() == ".vmt") {
-                        auto rel = std::filesystem::relative(entry.path(), mat_dir);
-                        std::string name = rel.generic_string();
-                        if (name.size() > 4 && name.substr(name.size() - 4) == ".vmt") {
-                            name = name.substr(0, name.size() - 4);
-                        }
-                        names.push_back(std::move(name));
-                    }
-                }
-            }
-        }
-        return vmt::Ok(names);
-    }
-
     vmt::Result<AssetList> list_assets(const std::vector<std::string>& roots,
                                        const std::vector<std::string>& extensions) override {
         if (!backend_running()) {
@@ -384,8 +341,9 @@ public:
         // prefer it while the backend is running; the paths below are the
         // fallback for the in-process spike and for backend-less setups.
         if (backend_running()) {
+            const auto generation = query_generation();
             const vmt::Result<std::vector<unsigned char>> raw = request_raw(game_path);
-            if (raw.ok()) {
+            if (raw.ok() || owner_cancelled() || query_cancelled(generation)) {
                 return raw;
             }
         }
@@ -410,13 +368,73 @@ public:
             engine_error(vmt::ErrorCode::NotFound, "file not found: " + game_path));
     }
 
-    vmt::Result<std::string> read_text_file(const std::string& game_path) override {
+    vmt::Result<BinaryPrefix> read_binary_prefix(
+        const std::string& game_path, std::uint32_t max_bytes) override {
+        if (max_bytes == 0 || max_bytes > kMaxBinaryPrefixBytes || game_path.empty() ||
+            std::any_of(game_path.begin(), game_path.end(), [](unsigned char c) {
+                return c < 32 || c == 127;
+            })) {
+            return vmt::Err<BinaryPrefix>(engine_error(
+                vmt::ErrorCode::InvalidArgument, "invalid binary prefix limit or game-relative path"));
+        }
+        const std::filesystem::path relative = std::filesystem::u8path(game_path);
+        if (relative.has_root_path() ||
+            std::any_of(relative.begin(), relative.end(), [](const auto& part) {
+                return part == "..";
+            })) {
+            return vmt::Err<BinaryPrefix>(engine_error(
+                vmt::ErrorCode::InvalidArgument, "binary prefix path must stay inside the game paths"));
+        }
+        if (backend_running()) {
+            return request_binary_prefix(game_path, max_bytes);
+        }
+        if (config_.game_dir.empty()) {
+            return vmt::Err<BinaryPrefix>(engine_error(
+                vmt::ErrorCode::NotFound, "no game folder is configured: " + game_path));
+        }
+        std::ifstream file;
+        // A buffered read may prefetch pixel bytes beyond the requested prefix.
+        file.rdbuf()->pubsetbuf(nullptr, 0);
+        file.open(config_.game_dir / relative, std::ios::binary);
+        if (!file) {
+            return vmt::Err<BinaryPrefix>(engine_error(
+                vmt::ErrorCode::NotFound, "file not found: " + game_path));
+        }
+        file.seekg(0, std::ios::end);
+        const std::streamoff end = file.tellg();
+        if (end < 0) {
+            return vmt::Err<BinaryPrefix>(engine_error(
+                vmt::ErrorCode::IoError, "cannot determine file size: " + game_path));
+        }
+        BinaryPrefix result;
+        result.file_size = static_cast<std::uint64_t>(end);
+        result.bytes.resize(static_cast<std::size_t>(
+            std::min<std::uint64_t>(result.file_size, max_bytes)));
+        file.seekg(0, std::ios::beg);
+        if (!result.bytes.empty() &&
+            !file.read(reinterpret_cast<char*>(result.bytes.data()),
+                       static_cast<std::streamsize>(result.bytes.size()))) {
+            return vmt::Err<BinaryPrefix>(engine_error(
+                vmt::ErrorCode::IoError, "failed to read binary prefix: " + game_path));
+        }
+        return vmt::Ok(std::move(result));
+    }
+
+    vmt::Result<std::string> read_text_file(
+        const std::string& game_path, const std::atomic<bool>* cancelled) override {
+        if (owner_cancelled() || (cancelled && cancelled->load())) {
+            return vmt::Err<std::string>(engine_error(vmt::ErrorCode::Internal, "engine query was cancelled"));
+        }
         // Same policy as read_binary_file(): the engine file system first (it
         // sees VPK content), the direct disk read as the fallback.
         if (backend_running()) {
-            const vmt::Result<std::vector<unsigned char>> raw = request_raw(game_path);
+            const auto generation = query_generation();
+            const vmt::Result<std::vector<unsigned char>> raw = request_raw(game_path, cancelled);
             if (raw.ok()) {
                 return vmt::Ok(std::string(raw.value().begin(), raw.value().end()));
+            }
+            if (owner_cancelled() || query_cancelled(generation) || (cancelled && cancelled->load())) {
+                return vmt::Err<std::string>(raw.error());
             }
         }
 #if !defined(_WIN64)
@@ -481,117 +499,6 @@ public:
                                                "failed to send LOAD_MODEL to hlmv_backend"));
         }
         return vmt::Ok();
-    }
-
-    vmt::Result<Thumbnail> render_material_thumbnail(const std::string& material_name, int size,
-                                                     bool flip_vertical) override {
-        if (!initialized_ || !is_backend_alive()) {
-            return vmt::Err<Thumbnail>(engine_error(
-                vmt::ErrorCode::RenderFailed, "hlmv_backend is not initialized or running"));
-        }
-        if (size <= 0 || size > 4096) {
-            return vmt::Err<Thumbnail>(engine_error(
-                vmt::ErrorCode::InvalidArgument, "invalid thumbnail size (must be 1..4096)"));
-        }
-
-        wchar_t temp_dir[MAX_PATH] = {};
-        if (GetTempPathW(MAX_PATH, temp_dir) == 0) {
-            return vmt::Err<Thumbnail>(engine_error(
-                vmt::ErrorCode::RenderFailed, "failed to get temporary directory"));
-        }
-        wchar_t temp_file[MAX_PATH] = {};
-        if (GetTempFileNameW(temp_dir, L"vmt_thmb_", 0, temp_file) == 0) {
-            return vmt::Err<Thumbnail>(engine_error(
-                vmt::ErrorCode::RenderFailed, "failed to generate temporary thumbnail path"));
-        }
-        std::filesystem::path thumb_path = temp_file;
-        thumb_path.replace_extension(L".tga");
-
-        std::string cmd = "CAPTURE_THUMBNAIL \"" + material_name + "\" " +
-                          std::to_string(size) + " \"" + thumb_path.string() + "\"";
-        if (!send_command(cmd)) {
-            std::error_code ec;
-            std::filesystem::remove(thumb_path, ec);
-            std::filesystem::remove(temp_file, ec);
-            return vmt::Err<Thumbnail>(engine_error(
-                vmt::ErrorCode::RenderFailed, "failed to send CAPTURE_THUMBNAIL to hlmv_backend"));
-        }
-
-        FILE* f = _wfopen(thumb_path.c_str(), L"rb");
-        if (!f) {
-            std::error_code ec;
-            std::filesystem::remove(thumb_path, ec);
-            std::filesystem::remove(temp_file, ec);
-            return vmt::Err<Thumbnail>(engine_error(
-                vmt::ErrorCode::RenderFailed, "failed to open captured thumbnail file"));
-        }
-
-        unsigned char header[18] = {};
-        if (fread(header, 1, 18, f) != 18) {
-            fclose(f);
-            std::error_code ec;
-            std::filesystem::remove(thumb_path, ec);
-            std::filesystem::remove(temp_file, ec);
-            return vmt::Err<Thumbnail>(engine_error(
-                vmt::ErrorCode::RenderFailed, "malformed thumbnail header"));
-        }
-
-        const int w = header[12] | (header[13] << 8);
-        const int h = header[14] | (header[15] << 8);
-        if (w <= 0 || h <= 0 || w > 4096 || h > 4096) {
-            fclose(f);
-            std::error_code ec;
-            std::filesystem::remove(thumb_path, ec);
-            std::filesystem::remove(temp_file, ec);
-            return vmt::Err<Thumbnail>(engine_error(
-                vmt::ErrorCode::RenderFailed, "invalid thumbnail dimensions"));
-        }
-
-        Thumbnail result;
-        result.width = w;
-        result.height = h;
-        const size_t total_bytes = static_cast<size_t>(w) * static_cast<size_t>(h) * 4;
-        try {
-            result.bgra.resize(total_bytes);
-        } catch (const std::exception&) {
-            fclose(f);
-            std::error_code ec;
-            std::filesystem::remove(thumb_path, ec);
-            std::filesystem::remove(temp_file, ec);
-            return vmt::Err<Thumbnail>(engine_error(
-                vmt::ErrorCode::OutOfMemory, "failed to allocate thumbnail pixel buffer"));
-        }
-        if (fread(result.bgra.data(), 1, total_bytes, f) != total_bytes) {
-            fclose(f);
-            std::error_code ec;
-            std::filesystem::remove(thumb_path, ec);
-            std::filesystem::remove(temp_file, ec);
-            return vmt::Err<Thumbnail>(engine_error(
-                vmt::ErrorCode::RenderFailed, "incomplete thumbnail pixel data"));
-        }
-        fclose(f);
-
-        std::error_code ec;
-        std::filesystem::remove(thumb_path, ec);
-        std::filesystem::remove(temp_file, ec);
-
-        if (flip_vertical) {
-            std::vector<unsigned char> flipped;
-            try {
-                flipped.resize(result.bgra.size());
-            } catch (const std::exception&) {
-                return vmt::Err<Thumbnail>(engine_error(
-                    vmt::ErrorCode::OutOfMemory, "failed to allocate thumbnail buffer for flip"));
-            }
-            const size_t row_bytes = static_cast<size_t>(w) * 4;
-            for (int y = 0; y < h; ++y) {
-                std::memcpy(flipped.data() + static_cast<size_t>(y) * row_bytes,
-                            result.bgra.data() + static_cast<size_t>(h - 1 - y) * row_bytes, row_bytes);
-            }
-            result.bgra.swap(flipped);
-        }
-
-        return vmt::Ok(std::move(result));
     }
 
     vmt::Result<void> set_render_mode(const std::string& mode) override {
@@ -763,6 +670,10 @@ public:
     }
 
 private:
+    bool owner_cancelled() const noexcept {
+        return config_.cancelled && config_.cancelled->load();
+    }
+
     bool is_backend_alive() const {
         if (process_info_.hProcess == nullptr) return false;
         DWORD exit_code = 0;
@@ -821,27 +732,61 @@ private:
     // share a token.
     std::string generate_token() {
         std::lock_guard<std::mutex> lock(token_mutex_);
+        // A cancelled job may publish its acknowledgement after its caller
+        // returns. Reap completed responses before issuing the next request.
+        abandoned_tokens_.erase(std::remove_if(abandoned_tokens_.begin(), abandoned_tokens_.end(),
+            [](const std::string& token) {
+                std::error_code ec;
+                const auto dir = dump_dir();
+                if (!std::filesystem::exists(dir / (token + ".done"), ec) &&
+                    !std::filesystem::exists(dir / (token + ".err"), ec)) return false;
+                return remove_dump_files(token);
+            }), abandoned_tokens_.end());
         ++token_counter_;
         return "ui_" + std::to_string(GetCurrentProcessId()) + "_" +
                std::to_string(token_counter_) + "_" + std::to_string(GetTickCount64());
     }
 
+    void cancel_dump_job(const std::string& token) {
+        // Keep this marker until the backend has observed it. Deleting it
+        // when the frontend stops waiting would race a queued or active scan.
+        std::ofstream marker(dump_dir() / (token + ".cancel"), std::ios::binary);
+        marker.close();
+        const std::lock_guard<std::mutex> lock(token_mutex_);
+        abandoned_tokens_.push_back(token);
+    }
+
     // Sends a DUMP/RAW command and waits up to `timeout_ms` for
     // `<token>.done` or `<token>.err` (polled every 5 ms). On success the path
     // of the `<token>.<payload_extension>` file is returned; the response files
-    // are removed on every failure path.
+    // are removed on failure; cancellation markers survive until acknowledged
+    // or the drained backend process exits.
     vmt::Result<std::filesystem::path> run_dump_job(const std::string& command,
                                                     const std::string& token,
                                                     const char* payload_extension,
-                                                    unsigned timeout_ms) {
+                                                    unsigned timeout_ms,
+                                                    const std::atomic<bool>* cancelled = nullptr) {
+        const auto generation = query_generation();
+        if (owner_cancelled() || (cancelled && cancelled->load())) {
+            return vmt::Err<std::filesystem::path>(engine_error(
+                vmt::ErrorCode::Internal, "engine query was cancelled"));
+        }
         if (!backend_running()) {
             return vmt::Err<std::filesystem::path>(engine_error(
                 vmt::ErrorCode::RenderFailed, "hlmv_backend is not initialized or running"));
         }
 
         const std::filesystem::path dir = dump_dir();
-        if (!send_command_with_timeout(command, timeout_ms)) {
-            remove_dump_files(token);
+        // Response files can arrive between polls. A native directory signal
+        // wakes immediately instead of rounding every small query to a timer tick.
+        std::unique_ptr<void, decltype(&FindCloseChangeNotification)> changed(nullptr, &FindCloseChangeNotification);
+        const HANDLE notification = FindFirstChangeNotificationW(dir.c_str(), FALSE,
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE);
+        if (notification != INVALID_HANDLE_VALUE) changed.reset(notification);
+        // DUMP/RAW work is posted by WM_COPYDATA; only its acknowledgement
+        // belongs to this send. Do not block cancellation for the job deadline.
+        if (!send_command_with_timeout(command, kCommandTimeoutMs)) {
+            cancel_dump_job(token);
             return vmt::Err<std::filesystem::path>(engine_error(
                 vmt::ErrorCode::RenderFailed,
                 "failed to send \"" + command + "\" to hlmv_backend"));
@@ -852,6 +797,11 @@ private:
         const auto deadline =
             std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         for (;;) {
+            if (owner_cancelled() || query_cancelled(generation) || (cancelled && cancelled->load())) {
+                cancel_dump_job(token);
+                return vmt::Err<std::filesystem::path>(engine_error(
+                    vmt::ErrorCode::Internal, "engine query was cancelled"));
+            }
             std::error_code ec;
             if (std::filesystem::exists(err, ec)) {
                 std::ifstream file(err, std::ios::binary);
@@ -863,6 +813,7 @@ private:
                 while (!message.empty() && (message.back() == '\n' || message.back() == '\r')) {
                     message.pop_back();
                 }
+                file.close();
                 remove_dump_files(token);
                 if (message.empty()) {
                     message = "hlmv_backend rejected \"" + command + "\"";
@@ -880,13 +831,20 @@ private:
                     "hlmv_backend exited while \"" + command + "\" was in flight"));
             }
             if (std::chrono::steady_clock::now() >= deadline) {
-                remove_dump_files(token);
+                cancel_dump_job(token);
                 return vmt::Err<std::filesystem::path>(engine_error(
                     vmt::ErrorCode::RenderFailed,
                     "timed out after " + std::to_string(timeout_ms / 1000) +
                         " s waiting for hlmv_backend to answer \"" + command + "\""));
             }
-            Sleep(5);
+            if (changed) {
+                const DWORD ready = WaitForSingleObject(changed.get(), 5);
+                if ((ready == WAIT_OBJECT_0 && !FindNextChangeNotification(changed.get())) || ready == WAIT_FAILED) {
+                    changed.reset();
+                }
+            } else {
+                Sleep(5);
+            }
         }
     }
 
@@ -936,12 +894,13 @@ private:
     }
 
     // RAW <token> <game path> -> the bytes of `<token>.bin`.
-    vmt::Result<std::vector<unsigned char>> request_raw(const std::string& game_path) {
+    vmt::Result<std::vector<unsigned char>> request_raw(
+        const std::string& game_path, const std::atomic<bool>* cancelled = nullptr) {
         const std::string token = generate_token();
         const std::string command = "RAW " + token + " " + game_path;
 
         const vmt::Result<std::filesystem::path> payload =
-            run_dump_job(command, token, "bin", kDumpTimeoutMs);
+            run_dump_job(command, token, "bin", kDumpTimeoutMs, cancelled);
         if (!payload.ok()) {
             return vmt::Err<std::vector<unsigned char>>(payload.error());
         }
@@ -974,6 +933,34 @@ private:
                 "failed to read the hlmv_backend binary file " + payload.value().string()));
         }
         return vmt::Ok(std::move(bytes));
+    }
+
+    vmt::Result<BinaryPrefix> request_binary_prefix(
+        const std::string& game_path, std::uint32_t max_bytes) {
+        const std::string token = generate_token();
+        const std::string command = "RAW_PREFIX " + token + " " +
+                                    std::to_string(max_bytes) + " " + game_path;
+        const auto payload = run_dump_job(command, token, "bin", kDumpTimeoutMs);
+        if (!payload) return vmt::Err<BinaryPrefix>(payload.error());
+
+        std::error_code error;
+        const std::uintmax_t size = std::filesystem::file_size(payload.value(), error);
+        if (error || size < 8 || size > 8u + max_bytes) {
+            remove_dump_files(token);
+            return vmt::Err<BinaryPrefix>(engine_error(
+                vmt::ErrorCode::IoError, "invalid or oversized binary prefix response"));
+        }
+        std::ifstream file(payload.value(), std::ios::binary);
+        std::vector<unsigned char> bytes(static_cast<std::size_t>(size));
+        const bool read_ok = file && static_cast<bool>(file.read(
+            reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())));
+        file.close();
+        remove_dump_files(token);
+        if (!read_ok) {
+            return vmt::Err<BinaryPrefix>(engine_error(
+                vmt::ErrorCode::IoError, "failed to read the hlmv_backend binary prefix response"));
+        }
+        return parse_binary_prefix(bytes, max_bytes);
     }
 
     // list_models() without a backend: walks the loose <game_dir>/models tree.
@@ -1015,13 +1002,36 @@ private:
         return vmt::Ok(std::move(models));
     }
 
+    bool wait_for_backend_exit(unsigned timeout_ms) {
+        const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+        for (;;) {
+            const ULONGLONG now = GetTickCount64();
+            if (now >= deadline) return WaitForSingleObject(process_info_.hProcess, 0) == WAIT_OBJECT_0;
+            const DWORD ready = MsgWaitForMultipleObjects(1, &process_info_.hProcess, FALSE,
+                static_cast<DWORD>(deadline - now), QS_SENDMESSAGE);
+            if (ready == WAIT_OBJECT_0) return true;
+            if (ready != WAIT_OBJECT_0 + 1) return false;
+            // Destroying/reparenting the embedded child can synchronously call
+            // its host. Service sent native messages, without re-entering Qt's
+            // event queue or letting another close/game change start.
+            MSG message{};
+            (void)PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+        }
+    }
+
     void terminate_backend() {
         if (child_hwnd_ != nullptr && IsWindow(child_hwnd_)) {
             send_command("QUIT");
         }
         if (process_info_.hProcess != nullptr) {
-            if (WaitForSingleObject(process_info_.hProcess, 1000) != WAIT_OBJECT_0) {
+            // ponytail: the renderer owns no edited documents. Give its DLLs a
+            // short grace, then stop it; revisit graceful background teardown
+            // if this helper ever owns durable work beyond response files.
+            if (!wait_for_backend_exit(kBackendExitGraceMs)) {
                 TerminateProcess(process_info_.hProcess, 0);
+                // TerminateProcess is asynchronous; the old HWND must leave
+                // before a replacement backend can attach to the same host.
+                (void)wait_for_backend_exit(1000);
             }
             CloseHandle(process_info_.hProcess);
             process_info_.hProcess = nullptr;
@@ -1032,6 +1042,8 @@ private:
         }
         child_hwnd_ = nullptr;
         host_hwnd_ = nullptr;
+        for (const auto& token : abandoned_tokens_) remove_dump_files(token);
+        abandoned_tokens_.clear();
     }
 
     bool initialized_ = false;
@@ -1046,6 +1058,7 @@ private:
     // blocking query methods.
     std::mutex token_mutex_;
     std::uint64_t token_counter_ = 0;
+    std::vector<std::string> abandoned_tokens_;
 };
 
 } // namespace

@@ -11,6 +11,9 @@
 
 #include <QDialog>
 #include <QStringList>
+#include <atomic>
+#include <future>
+#include <memory>
 
 class QCheckBox;
 class QLabel;
@@ -19,6 +22,8 @@ class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
 class QRadioButton;
+class QProgressDialog;
+class QTimer;
 
 namespace bridge {
 class EngineView;
@@ -37,7 +42,8 @@ public:
                                    QStringList materials,
                                    QString modelName,
                                    QWidget* parent = nullptr);
-    ~ExportMaterialsDialog() override = default;
+    ~ExportMaterialsDialog() override;
+    void reject() override;
 
 private:
     // "Browse..." for the destination folder.
@@ -46,8 +52,25 @@ private:
     void refreshPreview();
     // Runs the export loop with a cancellable progress dialog.
     void exportAll();
+    void finishExport();
+    void cancelExport();
+    void setExporting(bool exporting);
     // Appends one line to the read-only result log.
     void appendLog(const QString& line);
+
+    struct ExportResult {
+        int written = 0;
+        int skipped = 0;
+        int failed = 0;
+        bool cancelled = false;
+        QStringList log;
+    };
+    std::future<ExportResult> m_exportFuture;
+    std::shared_ptr<std::atomic<bool>> m_cancelled;
+    std::shared_ptr<std::atomic<int>> m_completed;
+    QTimer* m_exportTimer = nullptr;
+    QProgressDialog* m_progress = nullptr;
+    bool m_closeAfterExport = false;
 
     bridge::EngineView* m_engine = nullptr;
     QStringList m_materials;

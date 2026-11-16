@@ -17,6 +17,12 @@ project(VMTStudioPortable VERSION "${VMTSTUDIO_PORTABLE_VERSION}" LANGUAGES C CX
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(MSVC)
+    # The self-extractor must start before the bundled DLLs are available.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    add_compile_options(/utf-8)
+endif()
+
 set(VTFLIB_MINIZ_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../thirdparty/vtflib/thirdparty/miniz")
 
 set(VMTSTUDIO_PAYLOAD

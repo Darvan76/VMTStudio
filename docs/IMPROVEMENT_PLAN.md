@@ -43,18 +43,19 @@ y revisión del cambio; la validación pendiente se registra expresamente.
 
 - [x] CACHE-01: invalidar miniaturas en memoria al refrescar; cubrir cambios
   en las texturas referenciadas por un material.
-- [ ] CACHE-02: revisar reemplazo y coordinación entre instancias del archivo
-  cache.pack; es reconstruible y conserva su implementación previa.
-- [ ] PERF-01: actualizar valores del inspector sin recrear todos los widgets
-  en cada pulsación.
+- [x] CACHE-02: coordinar cache.pack entre instancias con propiedad exclusiva,
+  conservar el archivo y el índice ante fallos de compactación y permitir que
+  otras instancias trabajen en memoria mientras la caché está ocupada.
+- [x] PERF-01: actualizar valores del inspector sin recrear todos los widgets
+  en cada pulsación; conservar controles y estado al filtrar.
 - [x] PERF-02: elegir un mip adecuado antes de decodificar miniaturas VTF.
-- [ ] PERF-03: leer únicamente la cabecera necesaria para metadatos VTF y
+- [x] PERF-03: leer únicamente la cabecera necesaria para metadatos VTF y
   limitar memoria en vuelo.
-- [ ] PERF-04: mover descubrimiento, exportación y extracción de actualizaciones
-  a trabajos cancelables que no bloqueen la interfaz. Incluir cancelación de
-  consultas al cambiar de juego/cerrar: actualmente se drenan antes de destruir
-  el motor y pueden esperar a que finalice una operación.
-- [ ] PERF-05: medir tiempos de apertura, escritura, preview, búsqueda y memoria
+- [x] PERF-04: mover descubrimiento, exportación y extracción de actualizaciones
+  a trabajos cancelables que no bloqueen la interfaz. Cancelar las esperas de
+  consultas al cambiar de juego/cerrar y drenar los trabajos antes de destruir
+  el motor.
+- [x] PERF-05: medir tiempos de apertura, escritura, preview, búsqueda y memoria
   con proyectos grandes antes de introducir más optimizaciones.
 - [ ] TEXT-01: conservar codificación, BOM y finales de línea durante la edición
   desde Qt.
@@ -100,9 +101,10 @@ y revisión del cambio; la validación pendiente se registra expresamente.
 
 ## Validación
 
-En esta etapa se revisan diffs, recursos, referencias CMake y contratos entre
-módulos sin compilar. Las pruebas de C++ añadidas quedan pendientes de ejecución.
-Antes de publicar una versión deberán completarse:
+El primer lote se revisó sin compilar. Las compilaciones y pruebas posteriores
+se registran por entrega más abajo. Las suites automatizadas y los builds no
+sustituyen los flujos completos en un juego o paquete instalado; antes de
+publicar una versión deberán completarse:
 
 - [ ] QA-01: ejecutar la suite de pruebas en x64 y las comprobaciones relevantes
   del backend Win32.
@@ -159,3 +161,194 @@ Antes de considerar este lote validado en ejecución siguen pendientes QA-01 a
 QA-06. La comprobación de fuentes no demuestra compilación correcta ni sustituye
 las pruebas del backend y la interfaz. PERF-03, PERF-04 y las funciones de las
 entregas 3/4 continúan pendientes; no se ha publicado una versión del programa.
+
+### CACHE-02: coordinación y reemplazo de la caché
+
+Implementación local posterior a la limpieza de la auditoría:
+
+- Un handle exclusivo de Windows sobre `cache.pack.lock` mantiene un único
+  propietario durante lectura, escritura, recuperación y compactación. Se
+  libera también al terminar inesperadamente el proceso; la existencia del
+  archivo `.lock` por sí sola no bloquea la caché.
+- La contención no espera ni modifica el archivo: la segunda instancia puede
+  escanear y usar miniaturas en memoria, y vuelve a intentar abrir la caché al
+  refrescar. No se añaden dependencias ni un sistema de transacciones.
+- La compactación reemplaza el archivo en una operación y nunca elimina el
+  original como alternativa si falla. La eliminación por etiquetas solo cambia
+  el índice en memoria después de completar el reemplazo.
+- El navegador conserva el `AssetPack` recibido del trabajo de carga/escaneo
+  antes de pasarlo al servicio de miniaturas.
+
+Validación del cambio:
+
+- Aplicación x64 y suite completa Release: compiladas; 6 de 6 objetivos CTest
+  pasan, incluidas dos nuevas regresiones de propiedad y compactación fallida.
+- Aplicación x64 y suite completa Debug: compiladas; 6 de 6 objetivos CTest pasan.
+- Prueba con dos procesos: el segundo no abre ni modifica el archivo ocupado;
+  después de terminar abruptamente el propietario, un proceso nuevo abre el
+  mismo archivo y recupera sus registros. PASS.
+- Integridad de fuentes y recursos y comprobación de espacios del diff: PASS.
+- Registros: `scratch/cache02-*.log`. Comprobación de procesos reproducible:
+  `scratch/cache02_build_probe.cmd` y `scratch/cache02_process_check.py`.
+- No se ha generado un paquete nuevo ni se ha hecho commit, push o publicación.
+
+Las reglas nativas usadas están documentadas en Microsoft Learn:
+[CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+y [MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw).
+
+### PERF-01: actualización incremental del inspector
+
+- Los cambios de valores actualizan los controles existentes. Solo se
+  reconstruyen las filas cuando cambia el shader o la estructura/metadatos del
+  modelo: grupos, nombres, tipos, rangos, opciones o mensajes del esquema.
+- Los filtros ocultan y muestran filas sin destruirlas; las filas ocultas
+  también reciben las actualizaciones del documento.
+- Se conserva el foco, el cursor, el desplazamiento y el texto parcial cuando
+  el valor efectivo no cambia. Un cambio externo real, incluido deshacer,
+  actualiza incluso el control enfocado.
+- Las actualizaciones programáticas no generan ediciones de vuelta. Slider y
+  campo numérico se sincronizan con una sola emisión por acción. Los valores
+  enum desconocidos se muestran sin conservar una selección obsoleta.
+- La edición desde el inspector y la selección de texturas actualizan su
+  modelo bajo la protección de sincronización existente de MainWindow.
+
+Validación:
+
+- Aplicación x64 compilada en Release y Debug. Las suites completas pasan:
+  **7 de 7 objetivos CTest en ambas configuraciones**.
+- Nuevo objetivo `inspector_widget_tests`, con tres casos Qt offscreen y el
+  harness existente, sin añadir QtTest ni otras dependencias. Comprueba
+  identidad de widgets, foco/cursor/scroll, texto parcial, señales, controles
+  numéricos, valores enum, presencia de parámetros, filtros y cambios de
+  filas/shader/esquema.
+- Integridad de fuentes y recursos: 98 entradas CMake y 10 recursos, incluidos
+  los 8 esquemas. Comprobación de espacios del diff: PASS.
+- Revisión cruzada del flujo completo de llamadas y de la reentrada de señales.
+- Registros de compilación y ejecución: `scratch/perf01-*.log`.
+- No se ha generado un paquete nuevo ni se ha hecho commit, push o publicación.
+
+Las APIs de bloqueo de señales y visibilidad de filas usadas están documentadas
+por Qt: [QSignalBlocker](https://doc.qt.io/qt-6/qsignalblocker.html) y
+[QFormLayout::setRowVisible](https://doc.qt.io/qt-6/qformlayout.html#setRowVisible).
+
+### PERF-03: cabeceras VTF y carga limitada
+
+- Sesión, preview e información de materiales consultan metadatos sin cargar
+  los píxeles. La lectura local solicita 16 bytes y después la cabecera
+  declarada, validada contra el máximo de 336 bytes de la VTFLib incorporada.
+  Conserva las rutas Unicode y la información de archivos legibles pero dañados.
+- El protocolo `RAW_PREFIX` ofrece la misma lectura acotada desde las rutas
+  montadas del motor: tamaño total de archivo y hasta 4096 bytes solicitados,
+  con validación de límites y longitud en ambos extremos. Los consumidores de
+  metadatos solicitan solo la cabecera, sin recurrir a una transferencia completa.
+- Miniaturas y preview comparten una exclusión antes de cargar los bytes de
+  origen. VTFLib libera el contenido cargado después de copiar el resultado.
+  Este límite permite una carga/decodificación simultánea; el tamaño de una
+  textura individual sigue sujeto a los límites existentes del lector/IPC.
+- La preview conserva una solicitud pendiente y un resultado reciente. Las
+  selecciones intermedias se sustituyen y los trabajos cancelados comprueban
+  su generación antes de leer, también después de esperar al motor.
+
+Validación:
+
+- Aplicación x64 y suite completa compiladas en Release y Debug:
+  **8 de 8 objetivos CTest pasan en ambas configuraciones**.
+- Backend HLMV Win32 compilado en Release y Debug.
+- Regresiones con los bytes de píxeles bloqueados, cabeceras VTF antiguas y
+  con recursos, rutas Unicode, metadatos sin lectura completa, framing IPC,
+  selección rápida, cancelación y exclusión entre preview y miniaturas.
+- El nuevo objetivo Qt `asset_loading_tests` utiliza el harness existente,
+  ejecución offscreen y un motor simulado; no añade dependencias.
+- Integridad de fuentes y recursos: 105 entradas CMake y los 10 recursos,
+  incluidos los 8 esquemas. Comprobación de espacios del diff: PASS.
+- Registros: `scratch/perf03-*.log`. PERF-05 añade la lectura de un VPK real
+  mediante Source SDK 2013/HL2; el resto del recorrido de publicación de QA-05
+  permanece pendiente.
+- No se ha generado un paquete nuevo ni se ha hecho commit, push o publicación.
+
+### PERF-04: trabajos cancelables fuera de la interfaz
+
+- El descubrimiento inicial y manual de juegos, incluidas las bibliotecas de
+  Steam, se ejecuta con un catálogo propio en segundo plano. Recorre las carpetas
+  comprobando cancelación; cerrar o cancelar descarta los resultados sin alterar
+  las rutas recordadas. El botón de descubrimiento permite cancelar el escaneo.
+- La exportación captura plan y opciones y realiza lecturas, creación de
+  carpetas y escrituras atómicas en un trabajo propio. La interfaz muestra
+  progreso y permite cancelar, sin llamar a `processEvents()` desde el bucle de
+  exportación. Cerrar el diálogo cancela y espera su resultado de forma asíncrona
+  antes de cerrarlo. Se conservan los recuentos y el respeto a archivos existentes.
+- La preparación de actualizaciones ejecuta los extractores y las comprobaciones
+  en un trabajo cancelable. Cancelar termina el extractor y una preparación
+  cancelada nunca inicia el script ni cierra la aplicación. Los intentos utilizan
+  carpetas de extracción únicas; los fallidos se limpian en el propio trabajo.
+- El propietario puede cancelar la inicialización antes de adoptar el motor.
+  Las consultas comprueban cancelación al sondear respuestas; la exportación
+  dispone además de una bandera propia para su lectura actual. La desconexión
+  retira el puntero compartido antes de drenar los trabajos, impidiendo que un
+  trabajo en espera inicie otra consulta contra el motor anterior.
+- La cancelación es cooperativa entre archivos y durante las esperas. Una
+  escritura atómica ya iniciada termina; la confirmación nativa de un comando
+  mantiene un límite de un segundo. PERF-05 amplía este flujo con cancelación
+  cooperativa en el backend, limpieza de respuestas y un cierre acotado.
+
+Validación:
+
+- Aplicación x64 y pruebas compiladas en Release y Debug. Las suites completas
+  pasan: **8 de 8 objetivos CTest en ambas configuraciones**.
+- Siete regresiones nuevas sobre el harness existente: exportación con lectura
+  detenida e interfaz activa, omisión de archivos existentes, cierre durante
+  exportación, cancelación/reintento de preparación, cancelación de consultas y
+  reconexión, descubrimiento Qt, catálogo cancelado e inicialización cancelada.
+  La omisión de archivos existentes se comprueba dentro del caso de exportación.
+- Los casos Qt se ejecutan offscreen. La extracción se detiene antes de iniciar
+  un actualizador; no se ha aplicado una actualización real ni se ha cerrado la
+  aplicación mediante el script durante las pruebas.
+- Integridad: 111 entradas CMake, 10 recursos Qt y 8 esquemas. Diff sin errores
+  de espacios. Registros: `scratch/perf04-*.log`.
+- Siguen pendientes QA-03 y QA-06 con un juego y un paquete completos, así como
+  la selección, integridad, validación previa de rutas y recuperación de UPDATE-01.
+- No se ha generado un paquete nuevo ni se ha hecho commit, push o publicación.
+
+### PERF-05: mediciones y correcciones guiadas por resultados
+
+- Banco manual reproducible sobre las clases reales del producto, sin un
+  framework nuevo ni umbrales de tiempo en CTest. Incluye el navegador completo
+  con tabla/cuadrícula, editor e inspector, preview VTF y backend Win32 real.
+- Matriz Release: catálogos de 10.000, 50.000 y 150.000 assets; VMT de 64, 512 y
+  2.048 parámetros; VTF RGBA de 4096² con mips. Se registran mediana, p95, memoria
+  privada, working set y pico por proceso, con 15 muestras y un calentamiento.
+- El perfil detectó conversiones repetidas a minúsculas al ordenar y lecturas
+  VTF byte a byte. Se reutilizan las claves normalizadas del índice y se leen los
+  archivos en un bloque. El orden por nombre usa los rangos canónicos del índice.
+- Las respuestas IPC despiertan por notificaciones nativas. Las marcas de
+  cancelación llegan a los trabajos del backend, los errores se publican
+  atómicamente y se limpian las respuestas y los recursos de consultas abandonadas.
+- El renderer, que no posee documentos editados, recibe 100 ms de gracia tras
+  QUIT y se confirma su salida antes de reutilizar el HWND. Se sirven mensajes
+  nativos enviados durante esa espera, sin reentrar en la cola de eventos Qt.
+- Una regresión nueva reprodujo la destrucción de entregas Qt desde un worker
+  al cerrar cargas activas. Preview y miniaturas usan ahora `deleteLater()`;
+  la misma prueba comprueba la destrucción efectiva en el hilo de interfaz.
+
+Validación:
+
+- Aplicación x64, pruebas y banco manual compilados en Release y Debug; backend
+  Win32 compilado en ambas configuraciones. **8/8 objetivos CTest pasan en ambas**.
+- El objetivo Qt de carga contiene 12 casos, incluidos cierre activo y
+  cancelación de un extractor real sobre un ZIP generado para la prueba. No se
+  aplica una actualización ni se ejecuta su script durante la comprobación.
+- Source SDK 2013/HL2: 12.315 assets, sin truncamiento. Se verifican metadatos y
+  decodificación desde VPK, cancelación previa y activa, limpieza tras errores,
+  reconexión y cancelación de un arranque con proceso hijo vivo, en Release y Debug.
+- La matriz aceptada tiene `completed: true` en
+  `scratch/perf05-acceptance-release/manifest.json`, con hashes de código y binarios.
+- Integridad final: 128 entradas CMake, 10 recursos Qt y 8 esquemas; el script
+  del banco se analiza correctamente y el diff no presenta errores de espacios.
+- Medianas observadas: ordenación por tipo 200 → 20 ms; filtrado ordenado del
+  modelo 248 → 32 ms; preview VTF 4K 587 → 124 ms; cierre de backend cancelado
+  1637 → 128 ms. El navegador completo tarda unos 202–204 ms en buscar, incluido
+  su debounce de 150 ms y el renderizado.
+- Informe, reproducción, memoria y límites: [PERFORMANCE_RESULTS.md](PERFORMANCE_RESULTS.md).
+  Los recorridos manuales completos y la matriz de compatibilidad de publicación
+  siguen separados de estas pruebas de rendimiento. No se ha generado un paquete
+  nuevo ni se ha hecho commit, push o publicación.

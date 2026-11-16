@@ -1,7 +1,7 @@
 add_library(engine_bridge STATIC
-    src/engine_bridge.cpp
     src/pe.cpp
     src/dll_loader.cpp
+    src/engine_compatibility.cpp
     src/ipc_dump.cpp
 )
 
@@ -12,7 +12,7 @@ target_include_directories(engine_bridge PUBLIC
 # engine_bridge is the ONLY module that will include Valve SDK headers, and only
 # in its .cpp / private headers. Its public header is Valve-free.
 target_link_libraries(engine_bridge
-    PUBLIC vmt_core renderer
+    PUBLIC vmt_core
     PRIVATE vmtviewer_warnings
 )
 
@@ -20,6 +20,11 @@ target_link_libraries(engine_bridge
 
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    # Optional isolated runtime diagnostic. It has no Valve SDK dependency and
+    # is not part of the application package or automatic engine startup.
+    add_executable(engine_abi_probe EXCLUDE_FROM_ALL src/engine_abi_probe_main.cpp)
+    target_link_libraries(engine_abi_probe PRIVATE vmtstudio_warnings)
+
     # The SDK-dependent translation units, isolated so the Valve headers (which are
     # not /W4 /WX clean) compile with relaxed flags and don't leak into other TUs.
     # engine_view.cpp is the Valve-free adapter implementing bridge::EngineView.

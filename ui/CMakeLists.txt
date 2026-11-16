@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.21)
 
 find_package(Qt6 COMPONENTS Core Gui Widgets Network QUIET)
 
+if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT Qt6_FOUND)
+    message(FATAL_ERROR "The x64 application requires Qt 6 Core, Gui, Widgets and Network. Set CMAKE_PREFIX_PATH to the Qt MSVC x64 installation.")
+endif()
+
 if(Qt6_FOUND)
     set(CMAKE_AUTOMOC ON)
     set(CMAKE_AUTORCC ON)
@@ -11,7 +15,6 @@ endif()
 # The 'ui' static library holds the headless editing core (session, panel model,
 # settings, validation, material browser, thumbnails).
 add_library(ui STATIC
-    src/ui.cpp
     src/atomic_file.cpp
     src/session.cpp
     src/panel_model.cpp
@@ -43,12 +46,8 @@ target_compile_definitions(ui PUBLIC
     VMTSTUDIO_VERSION_STRING="${PROJECT_VERSION}"
 )
 
-target_compile_definitions(ui PRIVATE
-    VMT_SCHEMA_DIR="${CMAKE_SOURCE_DIR}/data/schema"
-)
-
 target_link_libraries(ui
-    PUBLIC vmt_core vtf_reader renderer engine_bridge game_profiles
+    PUBLIC vmt_core vtf_reader engine_bridge game_profiles
            shell32 ole32
     PRIVATE engine_spike_sdk vmtviewer_warnings advapi32
 )
@@ -104,7 +103,8 @@ target_include_directories(vmtstudio PRIVATE
 )
 
 # Manifest and icon configuration
-set(VMTSTUDIO_MANIFEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/win32/app.manifest")
+configure_file(win32/app.manifest "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest" @ONLY)
+set(VMTSTUDIO_MANIFEST_PATH "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest")
 set(VMTVIEWER_MANIFEST_PATH "${VMTSTUDIO_MANIFEST_PATH}")
 set(VMTSTUDIO_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/win32/app.ico")
 configure_file(win32/app.rc.in "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc" @ONLY)
